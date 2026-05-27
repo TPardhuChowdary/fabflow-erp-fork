@@ -1,0 +1,227 @@
+type UserProfile = 
+ record {
+   name: text;
+   roles: vec AppRole;
+ };
+type Time = int;
+type SalesOrderStatus = 
+ variant {
+   closed;
+   dispatched;
+   inProduction;
+   open;
+   readyToDispatch;
+ };
+type SalesOrderLineItem = 
+ record {
+   amount: nat;
+   desc: text;
+   qty: nat;
+   unitPrice: nat;
+ };
+type SalesOrder = 
+ record {
+   createdAt: Time;
+   customerId: text;
+   deliveryDate: Time;
+   id: text;
+   lineItems: vec SalesOrderLineItem;
+   poId: text;
+   qtId: text;
+   remarks: text;
+   soNo: text;
+   status: SalesOrderStatus;
+ };
+type QuotationStatus = 
+ variant {
+   accepted;
+   draft;
+   rejected;
+   sent;
+ };
+type QuotationLineItem = 
+ record {
+   amount: nat;
+   desc: text;
+   hsn: text;
+   qty: nat;
+   unitPrice: nat;
+ };
+type Quotation = 
+ record {
+   createdAt: Time;
+   customerId: text;
+   enqId: text;
+   gstAmount: nat;
+   gstRate: nat;
+   id: text;
+   lineItems: vec QuotationLineItem;
+   qtNo: text;
+   status: QuotationStatus;
+   subtotal: nat;
+   terms: text;
+   totalAmount: nat;
+   validUntil: Time;
+ };
+type PurchaseOrderStatus = 
+ variant {
+   cancelled;
+   confirmed;
+   received;
+ };
+type PurchaseOrder = 
+ record {
+   createdAt: Time;
+   customerId: text;
+   id: text;
+   poAmount: nat;
+   poDate: Time;
+   poRef: text;
+   qtId: text;
+   status: PurchaseOrderStatus;
+ };
+type Payment = 
+ record {
+   amount: nat;
+   createdAt: Time;
+   id: text;
+   invoiceId: text;
+   paymentDate: Time;
+ };
+type MaterialRequisition = 
+ record {
+   createdAt: Time;
+   id: text;
+   items: text;
+   jobId: text;
+   mrNo: text;
+   status: text;
+   totalEstimatedCost: nat;
+ };
+type JobCard = 
+ record {
+   createdAt: Time;
+   customerId: text;
+   drawingFileIds: vec text;
+   id: text;
+   jobDescription: text;
+   jobNo: text;
+   materialRequisitionStatus: text;
+   soId: text;
+ };
+type Invoice = 
+ record {
+   createdAt: Time;
+   customerId: text;
+   id: text;
+   invNo: text;
+   status: text;
+ };
+type EnquiryStatus = 
+ variant {
+   closed;
+   inProgress;
+   new;
+   quoted;
+ };
+type Enquiry = 
+ record {
+   createdAt: Time;
+   customerId: text;
+   description: text;
+   enqNo: text;
+   id: text;
+   items: text;
+   status: EnquiryStatus;
+   targetDate: Time;
+ };
+type EmployeeProfile = 
+ record {
+   name: text;
+   photo: opt blob;
+   roles: vec AppRole;
+ };
+type DeliveryChallan = 
+ record {
+   createdAt: Time;
+   customerId: text;
+   dcNo: text;
+   id: text;
+   items: text;
+   soId: text;
+   status: text;
+ };
+type Customer = 
+ record {
+   address: text;
+   contactPerson: text;
+   createdAt: Time;
+   email: text;
+   gstin: text;
+   id: text;
+   name: text;
+   phone: text;
+ };
+type AppRole = 
+ variant {
+   accounts;
+   admin;
+   production;
+   qc;
+   sales;
+ };
+service : {
+  addAdmin: (user: principal) -> ();
+  assignAppRoles: (user: principal, roles: vec AppRole) -> ();
+  createCustomer: (name: text, contactPerson: text, phone: text, email: 
+   text, address: text, gstin: text) -> (Customer);
+  createDeliveryChallan: (id: text, dcNo: text, soId: text, customerId: 
+   text, items: text) -> (DeliveryChallan);
+  createEmployeeProfile: (profile: EmployeeProfile) -> ();
+  createEnquiry: (enqNo: text, customerId: text, description: text, items:
+   text, targetDate: Time) -> (Enquiry);
+  createInvoice: (id: text, invNo: text, customerId: text) -> (Invoice);
+  createJobCard: (id: text, jobNo: text, soId: text, customerId: text,
+   jobDescription: text, drawingFileIds: vec text) -> (JobCard);
+  createMaterialRequisition: (id: text, mrNo: text, jobId: text, items: 
+   text, totalEstimatedCost: nat) -> (MaterialRequisition);
+  createPayment: (id: text, invoiceId: text, amount: nat, paymentDate:
+   Time) -> (Payment);
+  createPurchaseOrder: (id: text, poRef: text, qtId: text, customerId: 
+   text, poDate: Time, poAmount: nat) -> (PurchaseOrder);
+  createQuotation: (id: text, qtNo: text, enqId: text, customerId: text,
+   lineItems: vec QuotationLineItem, subtotal: nat, gstRate: nat, gstAmount:
+   nat, totalAmount: nat, validUntil: Time, terms: text) -> (Quotation);
+  createSalesOrder: (id: text, soNo: text, poId: text, customerId: text,
+   qtId: text, lineItems: vec SalesOrderLineItem, deliveryDate: Time,
+   remarks: text) -> (SalesOrder);
+  fileExists: (_fileName: text) -> (bool) query;
+  generateDocNo: (prefix: text) -> (text);
+  getAllCustomers: () -> (vec Customer) query;
+  getAllDeliveryChallans: () -> (vec DeliveryChallan) query;
+  getAllEmployeeProfiles: () -> (vec EmployeeProfile) query;
+  getAllEnquiries: () -> (vec Enquiry) query;
+  getAllInvoices: () -> (vec Invoice) query;
+  getAllJobCards: () -> (vec JobCard) query;
+  getAllMaterialRequisitions: () -> (vec MaterialRequisition) query;
+  getAllPayments: () -> (vec Payment) query;
+  getAllPurchaseOrders: () -> (vec PurchaseOrder) query;
+  getAllQuotations: () -> (vec Quotation) query;
+  getAllSalesOrders: () -> (vec SalesOrder) query;
+  getCallerUserProfile: () -> (opt UserProfile) query;
+  getCustomer: (customerId: text) -> (opt Customer) query;
+  getDeliveryChallan: (dcId: text) -> (opt DeliveryChallan) query;
+  getEmployeeProfile: (employeeId: text) -> (opt EmployeeProfile) query;
+  getEnquiry: (enquiryId: text) -> (opt Enquiry) query;
+  getInvoice: (invoiceId: text) -> (opt Invoice) query;
+  getJobCard: (jobId: text) -> (opt JobCard) query;
+  getMaterialRequisition: (mrId: text) -> (opt MaterialRequisition) query;
+  getPayment: (paymentId: text) -> (opt Payment) query;
+  getPurchaseOrder: (poId: text) -> (opt PurchaseOrder) query;
+  getQuotation: (quotationId: text) -> (opt Quotation) query;
+  getSalesOrder: (soId: text) -> (opt SalesOrder) query;
+  getUserProfile: (user: principal) -> (opt UserProfile) query;
+  hasDrawing: (_fileName: text) -> (bool) query;
+  saveCallerUserProfile: (profile: UserProfile) -> ();
+  updateEmployeeProfile: (employeeId: text, profile: EmployeeProfile) -> ();
+}

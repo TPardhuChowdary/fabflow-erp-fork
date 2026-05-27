@@ -1,0 +1,296 @@
+// Version: 3.0.0
+type AppRole__319921778 = {#accounts; #admin; #production; #qc; #sales};
+type Customer__263943254 =
+  {
+    address : Text;
+    contactPerson : Text;
+    createdAt : Time__900049286;
+    email : Text;
+    gstin : Text;
+    id : Text;
+    name : Text;
+    phone : Text
+  };
+type Data__791452850<K, V> =
+  {var count : Nat__490723111; kvs : [var ?(K, V)]};
+type DeliveryChallan__390173411 =
+  {
+    createdAt : Time__900049286;
+    customerId : Text;
+    dcNo : Text;
+    id : Text;
+    items : Text;
+    soId : Text;
+    status : Text
+  };
+type EmployeeProfile__177892660 =
+  {name : Text; photo : ?Blob; roles : [AppRole__319921778]};
+type EnquiryStatus__1060502406 = {#closed; #inProgress; #new; #quoted};
+type Enquiry__415520819 =
+  {
+    createdAt : Time__900049286;
+    customerId : Text;
+    description : Text;
+    enqNo : Text;
+    id : Text;
+    items : Text;
+    status : EnquiryStatus__1060502406;
+    targetDate : Time__900049286
+  };
+type Int__270357528 = Int__616954475;
+type Int__616954475 = Int;
+type Internal__8484328<K, V> =
+  {children : [var ?Node__46230540<K, V>]; data : Data__791452850<K, V>};
+type Invoice__772203955 =
+  {
+    createdAt : Time__900049286;
+    customerId : Text;
+    id : Text;
+    invNo : Text;
+    status : Text
+  };
+type JobCard__300602509 =
+  {
+    createdAt : Time__900049286;
+    customerId : Text;
+    drawingFileIds : [Text];
+    id : Text;
+    jobDescription : Text;
+    jobNo : Text;
+    materialRequisitionStatus : Text;
+    soId : Text
+  };
+type Leaf__809889148<K, V> = {data : Data__791452850<K, V>};
+type Map__158565046<K, V> = Map__297112838<K, V>;
+type Map__297112838<K, V> =
+  {var root : Node__46230540<K, V>; var size : Nat__490723111};
+type Map__605269027<K, V> = Map__158565046<K, V>;
+type MaterialRequisition__1033045788 =
+  {
+    createdAt : Time__900049286;
+    id : Text;
+    items : Text;
+    jobId : Text;
+    mrNo : Text;
+    status : Text;
+    totalEstimatedCost : Nat
+  };
+type Nat__490723111 = Nat__920180692;
+type Nat__920180692 = Nat;
+type Node__46230540<K, V> =
+  {#internal : Internal__8484328<K, V>; #leaf : Leaf__809889148<K, V>};
+type OldAccessControlState__841599830 =
+  {
+    var adminAssigned : Bool;
+    userRoles : Map__605269027<Principal, OldUserRole__889293160>
+  };
+type OldUserRole__889293160 = {#admin; #guest; #user};
+type Payment__159206904 =
+  {
+    amount : Nat;
+    createdAt : Time__900049286;
+    id : Text;
+    invoiceId : Text;
+    paymentDate : Time__900049286
+  };
+type PurchaseOrderStatus__15580426 = {#cancelled; #confirmed; #received};
+type PurchaseOrder__375015127 =
+  {
+    createdAt : Time__900049286;
+    customerId : Text;
+    id : Text;
+    poAmount : Nat;
+    poDate : Time__900049286;
+    poRef : Text;
+    qtId : Text;
+    status : PurchaseOrderStatus__15580426
+  };
+type QuotationLineItem__436441840 =
+  {amount : Nat; desc : Text; hsn : Text; qty : Nat; unitPrice : Nat};
+type QuotationStatus__427361237 = {#accepted; #draft; #rejected; #sent};
+type Quotation__900248815 =
+  {
+    createdAt : Time__900049286;
+    customerId : Text;
+    enqId : Text;
+    gstAmount : Nat;
+    gstRate : Nat;
+    id : Text;
+    lineItems : [QuotationLineItem__436441840];
+    qtNo : Text;
+    status : QuotationStatus__427361237;
+    subtotal : Nat;
+    terms : Text;
+    totalAmount : Nat;
+    validUntil : Time__900049286
+  };
+type SalesOrderLineItem__767029195 =
+  {amount : Nat; desc : Text; qty : Nat; unitPrice : Nat};
+type SalesOrderStatus__671349589 =
+  {#closed; #dispatched; #inProduction; #open; #readyToDispatch};
+type SalesOrder__189846886 =
+  {
+    createdAt : Time__900049286;
+    customerId : Text;
+    deliveryDate : Time__900049286;
+    id : Text;
+    lineItems : [SalesOrderLineItem__767029195];
+    poId : Text;
+    qtId : Text;
+    remarks : Text;
+    soNo : Text;
+    status : SalesOrderStatus__671349589
+  };
+type Time__796480547 = Int__270357528;
+type Time__900049286 = Time__796480547;
+type UserProfile__491224006 = {name : Text; roles : [AppRole__319921778]};
+actor ({
+  in accessControlState : OldAccessControlState__841599830;
+  stable admins :
+    {
+      var blockIndex : Nat__490723111;
+      var blocks : [var [var ?Principal]];
+      var elementIndex : Nat__490723111
+    };
+  stable appRoles :
+    {
+      var root : Node__46230540<Principal, [AppRole__319921778]>;
+      var size : Nat__490723111
+    };
+  stable counters :
+    {var root : Node__46230540<Text, Nat>; var size : Nat__490723111};
+  stable customers :
+    {
+      var root : Node__46230540<Text, Customer__263943254>;
+      var size : Nat__490723111
+    };
+  stable deliveryChallans :
+    {
+      var root : Node__46230540<Text, DeliveryChallan__390173411>;
+      var size : Nat__490723111
+    };
+  stable employeeProfiles :
+    {
+      var root : Node__46230540<Text, EmployeeProfile__177892660>;
+      var size : Nat__490723111
+    };
+  stable enquiries :
+    {
+      var root : Node__46230540<Text, Enquiry__415520819>;
+      var size : Nat__490723111
+    };
+  stable invoices :
+    {
+      var root : Node__46230540<Text, Invoice__772203955>;
+      var size : Nat__490723111
+    };
+  stable jobCards :
+    {
+      var root : Node__46230540<Text, JobCard__300602509>;
+      var size : Nat__490723111
+    };
+  stable materialRequisitions :
+    {
+      var root : Node__46230540<Text, MaterialRequisition__1033045788>;
+      var size : Nat__490723111
+    };
+  stable payments :
+    {
+      var root : Node__46230540<Text, Payment__159206904>;
+      var size : Nat__490723111
+    };
+  stable purchaseOrders :
+    {
+      var root : Node__46230540<Text, PurchaseOrder__375015127>;
+      var size : Nat__490723111
+    };
+  stable quotations :
+    {
+      var root : Node__46230540<Text, Quotation__900248815>;
+      var size : Nat__490723111
+    };
+  stable salesOrders :
+    {
+      var root : Node__46230540<Text, SalesOrder__189846886>;
+      var size : Nat__490723111
+    };
+  stable userProfiles :
+    {
+      var root : Node__46230540<Principal, UserProfile__491224006>;
+      var size : Nat__490723111
+    }
+}, {
+  stable admins :
+    {
+      var blockIndex : Nat__490723111;
+      var blocks : [var [var ?Principal]];
+      var elementIndex : Nat__490723111
+    };
+  stable appRoles :
+    {
+      var root : Node__46230540<Principal, [AppRole__319921778]>;
+      var size : Nat__490723111
+    };
+  stable counters :
+    {var root : Node__46230540<Text, Nat>; var size : Nat__490723111};
+  stable customers :
+    {
+      var root : Node__46230540<Text, Customer__263943254>;
+      var size : Nat__490723111
+    };
+  stable deliveryChallans :
+    {
+      var root : Node__46230540<Text, DeliveryChallan__390173411>;
+      var size : Nat__490723111
+    };
+  stable employeeProfiles :
+    {
+      var root : Node__46230540<Text, EmployeeProfile__177892660>;
+      var size : Nat__490723111
+    };
+  stable enquiries :
+    {
+      var root : Node__46230540<Text, Enquiry__415520819>;
+      var size : Nat__490723111
+    };
+  stable invoices :
+    {
+      var root : Node__46230540<Text, Invoice__772203955>;
+      var size : Nat__490723111
+    };
+  stable jobCards :
+    {
+      var root : Node__46230540<Text, JobCard__300602509>;
+      var size : Nat__490723111
+    };
+  stable materialRequisitions :
+    {
+      var root : Node__46230540<Text, MaterialRequisition__1033045788>;
+      var size : Nat__490723111
+    };
+  stable payments :
+    {
+      var root : Node__46230540<Text, Payment__159206904>;
+      var size : Nat__490723111
+    };
+  stable purchaseOrders :
+    {
+      var root : Node__46230540<Text, PurchaseOrder__375015127>;
+      var size : Nat__490723111
+    };
+  stable quotations :
+    {
+      var root : Node__46230540<Text, Quotation__900248815>;
+      var size : Nat__490723111
+    };
+  stable salesOrders :
+    {
+      var root : Node__46230540<Text, SalesOrder__189846886>;
+      var size : Nat__490723111
+    };
+  stable userProfiles :
+    {
+      var root : Node__46230540<Principal, UserProfile__491224006>;
+      var size : Nat__490723111
+    }
+}) ;

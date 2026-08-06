@@ -18,7 +18,8 @@ Permanent record of the migration from a 100% client-side/`localStorage` ERP to 
 | [phase-04](./phase-04/) | Petty Expenses, Expense Floats, organization-scoped float numbering, trigger-maintained derived balances, `settle_expense_float()` atomic settlement primitive | ✅ Complete — all checks verified, 0 FAIL |
 | [phase-05](./phase-05/) | Projects — the first phase to extend a pre-existing (not Phase 1-4-created) table; new fields, organization-scoped numbering via `generate_project_number()`, `customer_id` FK correction (CASCADE → default), `updated_at` maintenance | ✅ Complete — all checks verified, 0 FAIL |
 | [phase-06](./phase-06/) | Customers — extends the pre-existing `customers` table; address/state/additional-details/multi-email fields, `sync_customer_email()` trigger resolving the `email` vs `emails[]`/`primaryEmail` duplicate-source-of-truth question, `updated_at` maintenance | ✅ Complete — all checks verified, 0 FAIL |
-| phase-07+ | Vendors, Inventory, Production, Material Requisitions, Machinery, Drawing Repository, QMS, Delivery Challans, Invoices & Payments, Ledger & Reports (incl. Payables), Dashboard & Analytics, full integration | Not started |
+| [phase-07](./phase-07/) | Vendors — extends the pre-existing `vendors` table; `address`/`updated_at` fields, and corrects `inventory_purchases.vendor_id` and `company_pos.vendor_id` (the latter a frozen Phase 3 object, explicitly approved) from `ON DELETE NO ACTION` to `ON DELETE SET NULL` to match `deleteVendor()`'s documented, unconditional behavior | ✅ Complete — all checks verified, 0 FAIL |
+| phase-08+ | Inventory, Production, Material Requisitions, Machinery, Drawing Repository, QMS, Delivery Challans, Invoices & Payments, Ledger & Reports (incl. Payables), Dashboard & Analytics, full integration | Not started |
 
 ## Phase 1 documents
 
@@ -73,3 +74,12 @@ Permanent record of the migration from a 100% client-side/`localStorage` ERP to 
 - [phase6_completion_report.md](./phase-06/phase6_completion_report.md) — full results, 0 FAIL
 - [phase6_rollback.md](./phase-06/phase6_rollback.md) — rollback plan (documented, not executed) — same pre-existing-table shape as Phase 5's
 - [phase6_customers_FINAL.sql](./phase-06/phase6_customers_FINAL.sql) — the executed migration itself, registered in `schema_migrations` as `20260806_006_phase6_customers`
+
+## Phase 7 documents
+
+- [phase7_architecture.md](./phase-07/phase7_architecture.md) — what was built and why, including the dependency-analysis selection of `vendors` and the first-ever explicitly-approved correction to a frozen phase's own object (`company_pos`, Phase 3)
+- [phase7_security.md](./phase-07/phase7_security.md) — the security/integrity model, framing the two FK `ON DELETE` corrections as data-integrity controls rather than access-control changes
+- [phase7_verification.md](./phase-07/phase7_verification.md) — verification methodology, including a disclosed test-methodology error (a cleanup query referencing a non-existent `security_audit_log.user_id` column) caught and corrected mid-verification
+- [phase7_completion_report.md](./phase-07/phase7_completion_report.md) — full results, 0 FAIL
+- [phase7_rollback.md](./phase-07/phase7_rollback.md) — rollback plan (documented, not executed) — the first to explicitly disclose that reverting part of it (the two FK corrections) would knowingly restore a confirmed defect rather than being a neutral reversal
+- [phase7_vendors_FINAL.sql](./phase-07/phase7_vendors_FINAL.sql) — the executed migration itself, registered in `schema_migrations` as `20260806_007_phase7_vendors`

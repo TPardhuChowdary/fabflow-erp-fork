@@ -15,7 +15,8 @@ Permanent record of the migration from a 100% client-side/`localStorage` ERP to 
 | [phase-01](./phase-01/) | Organizations, Supabase Auth, normalized RBAC, RLS, Security Audit Log, schema migration tracking, trigger hardening, race-condition fixes, indexing | ✅ Complete — 17/17 verified, 0 FAIL |
 | [phase-02](./phase-02/) | Employees, Attendance, Salary Payments, Advance Records, Employee Documents, Project↔Employee assignment, organization-scoped document numbering | ✅ Complete — all checks verified, 0 FAIL |
 | [phase-03](./phase-03/) | Quotations, Quotation Revisions, Master POs, Quotation Purchase Orders, Project Purchase Orders (junction, replaces Project.pos[] array), Company POs | ✅ Complete — all checks verified, 0 FAIL |
-| phase-04+ | Customers, Vendors, Projects, Inventory, Production, Material Requisitions, Machinery, Drawing Repository, QMS, Petty Expenses & Expense Floats, Delivery Challans, Invoices & Payments, Ledger & Reports (incl. Payables), Dashboard & Analytics, full integration | Not started |
+| [phase-04](./phase-04/) | Petty Expenses, Expense Floats, organization-scoped float numbering, trigger-maintained derived balances, `settle_expense_float()` atomic settlement primitive | ✅ Complete — all checks verified, 0 FAIL |
+| phase-05+ | Customers, Vendors, Projects, Inventory, Production, Material Requisitions, Machinery, Drawing Repository, QMS, Delivery Challans, Invoices & Payments, Ledger & Reports (incl. Payables), Dashboard & Analytics, full integration | Not started |
 
 ## Phase 1 documents
 
@@ -43,3 +44,12 @@ Permanent record of the migration from a 100% client-side/`localStorage` ERP to 
 - [phase3_completion_report.md](./phase-03/phase3_completion_report.md) — full results, including three fully-disclosed execution-process notes (a non-ASCII-character syntax-error episode, a genuine "migration not yet applied" state caught by independent database-identity verification, and the test-methodology error above)
 - [phase3_rollback.md](./phase-03/phase3_rollback.md) — rollback plan (documented, not executed)
 - [phase3_quotations_company_pos_FINAL.sql](./phase-03/phase3_quotations_company_pos_FINAL.sql) — the executed migration itself, registered in `schema_migrations` as `20260806_003_phase3_quotations_company_pos`
+
+## Phase 4 documents
+
+- [phase4_architecture.md](./phase-04/phase4_architecture.md) — what was built and why, including the derived-field trigger design and the post-approval `settle_expense_float()` concurrency fix
+- [phase4_security.md](./phase-04/phase4_security.md) — the security/authorization model, centered on `settle_expense_float()`'s internal permission re-check (necessary since it's a directly-callable `SECURITY DEFINER` RPC that doesn't inherit table RLS) and the deliberately-deferred `returned_amount` direct-write limitation
+- [phase4_verification.md](./phase-04/phase4_verification.md) — verification methodology, including the auto-provisioning-trigger adaptation needed for an empty `auth.users` baseline and the `clock_timestamp()`-verified concurrency proofs
+- [phase4_completion_report.md](./phase-04/phase4_completion_report.md) — full results, 0 FAIL
+- [phase4_rollback.md](./phase-04/phase4_rollback.md) — rollback plan (documented, not executed)
+- [phase4_petty_expenses_FINAL.sql](./phase-04/phase4_petty_expenses_FINAL.sql) — the executed migration itself, registered in `schema_migrations` as `20260806_004_phase4_petty_expenses`

@@ -17,7 +17,8 @@ Permanent record of the migration from a 100% client-side/`localStorage` ERP to 
 | [phase-03](./phase-03/) | Quotations, Quotation Revisions, Master POs, Quotation Purchase Orders, Project Purchase Orders (junction, replaces Project.pos[] array), Company POs | ✅ Complete — all checks verified, 0 FAIL |
 | [phase-04](./phase-04/) | Petty Expenses, Expense Floats, organization-scoped float numbering, trigger-maintained derived balances, `settle_expense_float()` atomic settlement primitive | ✅ Complete — all checks verified, 0 FAIL |
 | [phase-05](./phase-05/) | Projects — the first phase to extend a pre-existing (not Phase 1-4-created) table; new fields, organization-scoped numbering via `generate_project_number()`, `customer_id` FK correction (CASCADE → default), `updated_at` maintenance | ✅ Complete — all checks verified, 0 FAIL |
-| phase-06+ | Customers, Vendors, Inventory, Production, Material Requisitions, Machinery, Drawing Repository, QMS, Delivery Challans, Invoices & Payments, Ledger & Reports (incl. Payables), Dashboard & Analytics, full integration | Not started |
+| [phase-06](./phase-06/) | Customers — extends the pre-existing `customers` table; address/state/additional-details/multi-email fields, `sync_customer_email()` trigger resolving the `email` vs `emails[]`/`primaryEmail` duplicate-source-of-truth question, `updated_at` maintenance | ✅ Complete — all checks verified, 0 FAIL |
+| phase-07+ | Vendors, Inventory, Production, Material Requisitions, Machinery, Drawing Repository, QMS, Delivery Challans, Invoices & Payments, Ledger & Reports (incl. Payables), Dashboard & Analytics, full integration | Not started |
 
 ## Phase 1 documents
 
@@ -63,3 +64,12 @@ Permanent record of the migration from a 100% client-side/`localStorage` ERP to 
 - [phase5_completion_report.md](./phase-05/phase5_completion_report.md) — full results, 0 FAIL
 - [phase5_rollback.md](./phase-05/phase5_rollback.md) — rollback plan (documented, not executed) — a different shape from Phase 1-4's since `projects` is a pre-existing table, not one this phase created
 - [phase5_projects_FINAL.sql](./phase-05/phase5_projects_FINAL.sql) — the executed migration itself, registered in `schema_migrations` as `20260806_005_phase5_projects`
+
+## Phase 6 documents
+
+- [phase6_architecture.md](./phase-06/phase6_architecture.md) — what was built and why, including the `email`/`emails[]`/`primaryEmail` authoritativeness question resolved via a new `sync_customer_email()` trigger
+- [phase6_security.md](./phase-06/phase6_security.md) — the security/integrity model, framing `sync_customer_email()` as a data-integrity control rather than an access-control one
+- [phase6_verification.md](./phase-06/phase6_verification.md) — verification methodology, including a disclosed test-methodology error (an `updated_at` check run inside a single transaction, where `now()` is fixed for the transaction's lifetime) caught and corrected mid-verification
+- [phase6_completion_report.md](./phase-06/phase6_completion_report.md) — full results, 0 FAIL
+- [phase6_rollback.md](./phase-06/phase6_rollback.md) — rollback plan (documented, not executed) — same pre-existing-table shape as Phase 5's
+- [phase6_customers_FINAL.sql](./phase-06/phase6_customers_FINAL.sql) — the executed migration itself, registered in `schema_migrations` as `20260806_006_phase6_customers`

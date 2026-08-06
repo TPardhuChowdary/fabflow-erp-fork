@@ -20,7 +20,8 @@ Permanent record of the migration from a 100% client-side/`localStorage` ERP to 
 | [phase-06](./phase-06/) | Customers — extends the pre-existing `customers` table; address/state/additional-details/multi-email fields, `sync_customer_email()` trigger resolving the `email` vs `emails[]`/`primaryEmail` duplicate-source-of-truth question, `updated_at` maintenance | ✅ Complete — all checks verified, 0 FAIL |
 | [phase-07](./phase-07/) | Vendors — extends the pre-existing `vendors` table; `address`/`updated_at` fields, and corrects `inventory_purchases.vendor_id` and `company_pos.vendor_id` (the latter a frozen Phase 3 object, explicitly approved) from `ON DELETE NO ACTION` to `ON DELETE SET NULL` to match `deleteVendor()`'s documented, unconditional behavior | ✅ Complete — all checks verified, 0 FAIL |
 | [phase-08](./phase-08/) | Inventory — extends the pre-existing `inventory_items`/`inventory_purchases`/`inventory_usages` tables; purchase/usage/reservation fields, `updated_at` maintenance, `NOT NULL` on `inventory_items.name`, a `gst_percent` CHECK mirroring existing validation, and corrects `inventory_item_id` on `inventory_purchases`/`inventory_usages` from `ON DELETE NO ACTION` to `ON DELETE SET NULL` to match `deleteInventoryItem()`'s documented, unconditional behavior | ✅ Complete — all checks verified, 0 FAIL |
-| phase-09+ | Production, Material Requisitions, Machinery, Drawing Repository, QMS, Delivery Challans, Invoices & Payments, Ledger & Reports (incl. Payables), Dashboard & Analytics, full integration | Not started |
+| [phase-09](./phase-09/) | Invoices — extends the pre-existing `invoices`/`invoice_items`/`payments` tables; GST/buyer/reminder fields, `customer_id` backfill+`NOT NULL`, corrects `payments.invoice_id` from `ON DELETE NO ACTION` to `ON DELETE CASCADE`, and — the first phase to modify frozen function *logic* rather than a constraint clause — corrects the frozen Phase 1 `update_invoice_total()` (add GST to the total calculation) and `update_invoice_status()` (fix status strings to match the frontend enum) functions, explicitly approved with eight named constraints | ✅ Complete — all checks verified, 0 FAIL |
+| phase-10+ | Production, Material Requisitions, Machinery, Drawing Repository, QMS, Delivery Challans, Ledger & Reports (incl. Payables), Dashboard & Analytics, full integration | Not started |
 
 ## Phase 1 documents
 
@@ -93,3 +94,12 @@ Permanent record of the migration from a 100% client-side/`localStorage` ERP to 
 - [phase8_completion_report.md](./phase-08/phase8_completion_report.md) — full results, 0 FAIL
 - [phase8_rollback.md](./phase-08/phase8_rollback.md) — rollback plan (documented, not executed) — same pre-existing-table shape as Phase 5-7's, with the same disclosed-regression caveat on the FK corrections
 - [phase8_inventory_FINAL.sql](./phase-08/phase8_inventory_FINAL.sql) — the executed migration itself, registered in `schema_migrations` as `20260806_008_phase8_inventory`
+
+## Phase 9 documents
+
+- [phase9_architecture.md](./phase-09/phase9_architecture.md) — what was built and why, including the first-ever correction to frozen function *logic* (not just a constraint clause) — `update_invoice_total()` and `update_invoice_status()` — explicitly approved with eight named constraints
+- [phase9_security.md](./phase-09/phase9_security.md) — the security/integrity model, with a dedicated section on how the two frozen-function corrections were scoped to preserve `SECURITY DEFINER`/`search_path`/ownership/grants exactly
+- [phase9_verification.md](./phase-09/phase9_verification.md) — verification methodology, including hand-calculated GST-total behavioral tests verified byte-exact against the frontend's own formula, and a real cascading-delete test
+- [phase9_completion_report.md](./phase-09/phase9_completion_report.md) — full results, 0 FAIL
+- [phase9_rollback.md](./phase-09/phase9_rollback.md) — rollback plan (documented, not executed) — the first to include reverting a function body rather than only a constraint or column
+- [phase9_invoices_FINAL.sql](./phase-09/phase9_invoices_FINAL.sql) — the executed migration itself, registered in `schema_migrations` as `20260806_009_phase9_invoices`

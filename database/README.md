@@ -19,7 +19,8 @@ Permanent record of the migration from a 100% client-side/`localStorage` ERP to 
 | [phase-05](./phase-05/) | Projects — the first phase to extend a pre-existing (not Phase 1-4-created) table; new fields, organization-scoped numbering via `generate_project_number()`, `customer_id` FK correction (CASCADE → default), `updated_at` maintenance | ✅ Complete — all checks verified, 0 FAIL |
 | [phase-06](./phase-06/) | Customers — extends the pre-existing `customers` table; address/state/additional-details/multi-email fields, `sync_customer_email()` trigger resolving the `email` vs `emails[]`/`primaryEmail` duplicate-source-of-truth question, `updated_at` maintenance | ✅ Complete — all checks verified, 0 FAIL |
 | [phase-07](./phase-07/) | Vendors — extends the pre-existing `vendors` table; `address`/`updated_at` fields, and corrects `inventory_purchases.vendor_id` and `company_pos.vendor_id` (the latter a frozen Phase 3 object, explicitly approved) from `ON DELETE NO ACTION` to `ON DELETE SET NULL` to match `deleteVendor()`'s documented, unconditional behavior | ✅ Complete — all checks verified, 0 FAIL |
-| phase-08+ | Inventory, Production, Material Requisitions, Machinery, Drawing Repository, QMS, Delivery Challans, Invoices & Payments, Ledger & Reports (incl. Payables), Dashboard & Analytics, full integration | Not started |
+| [phase-08](./phase-08/) | Inventory — extends the pre-existing `inventory_items`/`inventory_purchases`/`inventory_usages` tables; purchase/usage/reservation fields, `updated_at` maintenance, `NOT NULL` on `inventory_items.name`, a `gst_percent` CHECK mirroring existing validation, and corrects `inventory_item_id` on `inventory_purchases`/`inventory_usages` from `ON DELETE NO ACTION` to `ON DELETE SET NULL` to match `deleteInventoryItem()`'s documented, unconditional behavior | ✅ Complete — all checks verified, 0 FAIL |
+| phase-09+ | Production, Material Requisitions, Machinery, Drawing Repository, QMS, Delivery Challans, Invoices & Payments, Ledger & Reports (incl. Payables), Dashboard & Analytics, full integration | Not started |
 
 ## Phase 1 documents
 
@@ -83,3 +84,12 @@ Permanent record of the migration from a 100% client-side/`localStorage` ERP to 
 - [phase7_completion_report.md](./phase-07/phase7_completion_report.md) — full results, 0 FAIL
 - [phase7_rollback.md](./phase-07/phase7_rollback.md) — rollback plan (documented, not executed) — the first to explicitly disclose that reverting part of it (the two FK corrections) would knowingly restore a confirmed defect rather than being a neutral reversal
 - [phase7_vendors_FINAL.sql](./phase-07/phase7_vendors_FINAL.sql) — the executed migration itself, registered in `schema_migrations` as `20260806_007_phase7_vendors`
+
+## Phase 8 documents
+
+- [phase8_architecture.md](./phase-08/phase8_architecture.md) — what was built and why, including the confirmed `MaterialPurchase`/`InventoryPurchase`/`InventoryItem` synchronization (kept as application logic, not moved to a trigger) and the explicit deferral of `StockReservation` (a real, active feature with zero database backing at all)
+- [phase8_security.md](./phase-08/phase8_security.md) — the security/integrity model, framing the two FK `ON DELETE` corrections and the new `gst_percent` CHECK as data-integrity controls rather than access-control changes
+- [phase8_verification.md](./phase-08/phase8_verification.md) — verification methodology; no test-methodology errors this phase, both prior lessons (two-transaction `updated_at` testing, correct audit-log column names) applied correctly from the start
+- [phase8_completion_report.md](./phase-08/phase8_completion_report.md) — full results, 0 FAIL
+- [phase8_rollback.md](./phase-08/phase8_rollback.md) — rollback plan (documented, not executed) — same pre-existing-table shape as Phase 5-7's, with the same disclosed-regression caveat on the FK corrections
+- [phase8_inventory_FINAL.sql](./phase-08/phase8_inventory_FINAL.sql) — the executed migration itself, registered in `schema_migrations` as `20260806_008_phase8_inventory`

@@ -1,0 +1,52 @@
+# Phase 5 — Architecture: Projects
+
+Status: **Implemented, executed, and fully verified** against the live Supabase project. This is the final, frozen design.
+
+## 1. A structural fact this phase was built around
+
+Unlike Phase 2-4, `projects` is not a new table. It is one of 14 pre-existing tables (`phase1_architecture.md` 2.8, 3) - "a prior, separate, partial schema effort" that Phase 1 only added `organization_id` and RLS to, without touching structure. Phase 5 is the first phase in this migration to extend that structure. This changed the whole shape of the work: instead of designing a table from scratch, the job was to read the live schema, compare it field-by-field against the frontend's `Project` type, and adapt the database to match - never the reverse.
+
+## 2. What already existed, confirmed via a live read before any SQL was written
+
+`\d public.projects` (performed read-only, before writing this migration) showed: `id uuid` PK (`uuid_generate_v4()` default - the pre-existing table's own convention, left as-is, not converted to `gen_random_uuid()`), `project_number text` (nullable, globally unique), `name text` (nullable), `customer_id uuid` (nullable, FK to `customers(id)` **ON DELETE CASCADE**), `quantity numeric` (nullable), `status text` (nullable), `value numeric` (nullable), `created_at timestamptz`, `organization_id uuid not null`. Two pre-existing triggers (`trg_log_project`, `trg_project_stages`, both `AFTER INSERT`) auto-create a `logs` row and 6 fixed `production_stages` rows on every insert - untouched by this migration, and confirmed not to fire during it (no `INSERT INTO projects` anywhere in this file).
+
+## 3. Reused, not duplicated
+
+`project_number`, `name`, and `quantity` already existed and already correspond to the frontend's `projectNo`/`projectName`/`totalQty` concepts. This migration adds `NOT NULL` (and a `CHECK` on `quantity`) to those existing columns rather than adding new `project_no`/`project_name`/`total_qty` columns alongside them - avoiding exactly the "two permanent sources for the same data" problem this project's standing rules forbid. This mapping is an inference (no source proves the frontend has ever written to these specific columns, since it has never been wired to Supabase), documented as such rather than asserted as fact.
+
+## 4. Columns added
+
+`work_description`, `production_version`, `customer_visible_name`, `internal_order_code`, `project_type`, `repeat_order_seq`, `original_project_name`, `activity_log` (jsonb) - all nullable, matching the frontend's own optionality for each. `parent_project_id`/`source_project_id` are real self-referencing foreign keys to `projects(id)`, `ON DELETE SET NULL` - both are used for genuine relational lookups in `repeatProject()` and `ProjectDetail.tsx` (confirmed live), and `SET NULL` was chosen because no code path in the frontend ever blocks or reacts to deleting a project with repeat-order children, so `RESTRICT` would be stricter than today's app and `CASCADE` would destructively delete real sibling project records with no frontend intent behind it. `updated_at timestamptz not null default now()`, backfilled via Postgres 11+'s fast-path default (a single `STABLE`-evaluated `now()` value applied to existing rows without a table rewrite).
+
+## 5. Numbering - `generate_project_number()`
+
+Identical, unmodified pattern to `generate_employee_code()`/`generate_quotation_number()`/`generate_float_number()`: atomic upsert against Phase 2's `document_counters` (new `counter_key = 'PROJ'`), format `PROJ-YYYY-NNN`, matching the frontend's own `generateDocNo("PROJ")` exactly. Proven safe under genuine concurrent load (two real overlapping committed transactions, sequential non-colliding output, verified via `clock_timestamp()`-proven blocking).
+
+## 6. The backfill - preserving existing data, not deleting it
+
+The live database's only non-Phase-1-4 business data was one connected chain: a `"Test Customer"`, one `"Test Project"` against it (with `project_number = NULL`), and one `"Partially Paid"` invoice against that project. Investigated directly rather than guessed at: creation timestamps (2026-04-26, over three months before this engagement began) rule out this being residue from any of this project's own test cleanup; the coherent customer-to-project-to-invoice chain, created within a two-minute window, reads more as a one-time manual smoke-test of the pre-existing schema's relationships than either disposable debris or a maintained demo dataset. Deletion was confirmed to be the more destructive, harder-to-reverse path (`invoices.project_id` has a default/RESTRICT FK - a direct delete would fail outright without first deciding what to do with a real, non-zero, "Partially Paid" financial record). The chosen approach: backfill a real generated `project_number` for the one `NULL` row, via `generate_project_number()` itself rather than a hardcoded literal, so `document_counters`' `PROJ` state starts correctly synchronized and no future call can collide with the backfilled value - executed before the `NOT NULL` constraint that could not otherwise be added safely.
+
+**Confirmed live during verification**: the backfilled value (`PROJ-2026-001`, since this was the first-ever call to this counter key) numerically coincides with the frontend's own hardcoded local sample data (`store.ts`'s `sampleProjects[0]`, an entirely fictional project also numbered `PROJ-2026-001`). This is not a defect - the two are disconnected storage systems today - but is disclosed here as a known item for whichever future phase reconciles frontend sample/seed data against these real Supabase rows.
+
+## 7. `customer_id` - the one correction to a pre-existing constraint
+
+The live FK was `ON DELETE CASCADE`. `deleteCustomer()` in the live frontend (`store.ts`) already unconditionally blocks deleting any customer with linked projects - the live CASCADE permitted an outcome the application was specifically built to make impossible. Changed to the default (no special action), closing that gap without changing anything reachable through the guarded UI path, since it never exercises the CASCADE branch today. Verified live post-execution: attempting to delete the linked customer now correctly fails with a foreign-key violation naming `projects_customer_id_fkey`.
+
+`NOT NULL` was also added to `customer_id` itself, alongside `name` and `quantity` - all three mirror validation the frontend already enforces in the same single check at `Projects.tsx:103` (`customerId` and `projectName` required together) and `:108-116` (`totalQty` required and `> 0`). Confirmed safe against the one live row before executing.
+
+## 8. Deliberately untouched, with evidence
+
+- **`status`**: exists on the live table, but corresponds to no field on the frontend's `Project` type and no computed logic anywhere in the frontend - checked directly against `Dashboard.tsx`'s "Order Pipeline" widget, which computes purely from array lengths (`quotations.length`, `projects.length`, `invoices.length`), not any per-project status. Phase 1's own index comment (`"Dashboard/Order Pipeline aggregates by status"`) describes an intended use that the actual current frontend does not bear out. No constraint, default, or semantics invented for it here.
+- **`value`**: exists on the live table with zero corresponding frontend field found anywhere (`projectValue`/`orderValue`/`contractValue` and similar all traced, zero matches). Left untouched, not dropped - no instruction to remove it, and it does no harm to leave alone.
+- **The existing `UNIQUE(project_number)` constraint is global, not organization-scoped**, unlike every other numbered document in this project (`quotations`, `expense_floats`). Left exactly as-is: with one organization currently seeded, org-scoped and global uniqueness are behaviorally identical, and rule 5 of this phase's standing principles only permits modifying a pre-existing object when necessary to preserve app behavior or prevent a real integrity problem - neither applies here today.
+- **`Project.poNumber`/`poDate`/`poFiles`** (top-level fields, distinct from `ProjectPO.poNumber`/`poDate` inside `pos[]` array items): traced exhaustively, zero read call sites anywhere in the codebase - not carried into schema.
+- **`Project.pos[]`/`assignedEmployeeIds[]`**: confirmed genuinely live in the frontend today (real read and write call sites in `ProjectDetail.tsx`/`Projects.tsx`), but **not** reintroduced as columns, because Phase 2's `project_employees` and Phase 3's `project_purchase_orders` already exist as their normalized, frozen replacements. Adding array columns alongside them would create two permanent database sources for the same fact. Those junction tables remain the sole authority; a future integration phase bridges the array shape the frontend expects to them, without any change to the user-facing screens.
+- **RLS**: Phase 1 already enabled RLS and wrote all four `projects_select/insert/update/delete` policies, confirmed live to already match `Projects.tsx`/`ProjectDetail.tsx`'s gating exactly (single-module, no cross-module OR). Nothing added or changed.
+
+## 9. Review history
+
+Design went through: initial architecture review → frontend-as-specification re-review (surfaced and resolved the `pos[]`/`assignedEmployeeIds` duplicate-source-of-truth question via an explicit standing rule) → a live schema inspection specifically requested before any SQL was written, which corrected the design's assumptions about `customer_id`/`status` already existing and reframed three "new columns" as "existing columns needing constraints" → a six-item architectural resolution (naming mappings, the `customer_id` FK correction, the seed-row `NULL` backfill decision) → SQL generation → a static self-review that caught and fixed a real inconsistency (missing `NOT NULL` on `customer_id`, despite the same rule already being applied to `name`) → a final pre-execution adversarial review that found and disclosed the `PROJ-2026-001` numbering coincidence without treating it as a blocking defect.
+
+## 10. Known, disclosed limitation carried from Phase 1-4
+
+Same as every prior phase: the frontend's local `AuthUser`/`localStorage`-based authentication remains entirely separate from Supabase Auth. None of this RLS/permission enforcement, nor `generate_project_number()`, is reachable by the live application yet - both become load-bearing only once a future phase wires the frontend to Supabase.

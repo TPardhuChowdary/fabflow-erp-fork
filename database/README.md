@@ -16,7 +16,8 @@ Permanent record of the migration from a 100% client-side/`localStorage` ERP to 
 | [phase-02](./phase-02/) | Employees, Attendance, Salary Payments, Advance Records, Employee Documents, Project↔Employee assignment, organization-scoped document numbering | ✅ Complete — all checks verified, 0 FAIL |
 | [phase-03](./phase-03/) | Quotations, Quotation Revisions, Master POs, Quotation Purchase Orders, Project Purchase Orders (junction, replaces Project.pos[] array), Company POs | ✅ Complete — all checks verified, 0 FAIL |
 | [phase-04](./phase-04/) | Petty Expenses, Expense Floats, organization-scoped float numbering, trigger-maintained derived balances, `settle_expense_float()` atomic settlement primitive | ✅ Complete — all checks verified, 0 FAIL |
-| phase-05+ | Customers, Vendors, Projects, Inventory, Production, Material Requisitions, Machinery, Drawing Repository, QMS, Delivery Challans, Invoices & Payments, Ledger & Reports (incl. Payables), Dashboard & Analytics, full integration | Not started |
+| [phase-05](./phase-05/) | Projects — the first phase to extend a pre-existing (not Phase 1-4-created) table; new fields, organization-scoped numbering via `generate_project_number()`, `customer_id` FK correction (CASCADE → default), `updated_at` maintenance | ✅ Complete — all checks verified, 0 FAIL |
+| phase-06+ | Customers, Vendors, Inventory, Production, Material Requisitions, Machinery, Drawing Repository, QMS, Delivery Challans, Invoices & Payments, Ledger & Reports (incl. Payables), Dashboard & Analytics, full integration | Not started |
 
 ## Phase 1 documents
 
@@ -53,3 +54,12 @@ Permanent record of the migration from a 100% client-side/`localStorage` ERP to 
 - [phase4_completion_report.md](./phase-04/phase4_completion_report.md) — full results, 0 FAIL
 - [phase4_rollback.md](./phase-04/phase4_rollback.md) — rollback plan (documented, not executed)
 - [phase4_petty_expenses_FINAL.sql](./phase-04/phase4_petty_expenses_FINAL.sql) — the executed migration itself, registered in `schema_migrations` as `20260806_004_phase4_petty_expenses`
+
+## Phase 5 documents
+
+- [phase5_architecture.md](./phase-05/phase5_architecture.md) — what was built and why, including the pre-existing-table framing that distinguishes this phase from every prior one, and the live-schema-vs-frontend field-by-field reconciliation
+- [phase5_security.md](./phase-05/phase5_security.md) — the security/integrity model, centered on correcting `customer_id`'s `ON DELETE CASCADE` to match the frontend's own `deleteCustomer()` guard
+- [phase5_verification.md](./phase-05/phase5_verification.md) — verification methodology, including the new pre-execution live schema inspection step this phase required and the two-stage (rollback-then-commit) concurrency proof for `generate_project_number()`
+- [phase5_completion_report.md](./phase-05/phase5_completion_report.md) — full results, 0 FAIL
+- [phase5_rollback.md](./phase-05/phase5_rollback.md) — rollback plan (documented, not executed) — a different shape from Phase 1-4's since `projects` is a pre-existing table, not one this phase created
+- [phase5_projects_FINAL.sql](./phase-05/phase5_projects_FINAL.sql) — the executed migration itself, registered in `schema_migrations` as `20260806_005_phase5_projects`

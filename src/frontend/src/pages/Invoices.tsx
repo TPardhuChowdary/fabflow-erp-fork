@@ -47,6 +47,14 @@ import {
   handleDownload as triggerDownload,
 } from "../lib/documentUtils";
 
+import { ProjectSelect } from "../components/ProjectSelect";
+import {
+  createInvoiceRemote,
+  deleteInvoiceRemote,
+  updateInvoiceRemote,
+  updateInvoiceStatusRemote,
+} from "../lib/invoicesApi";
+import { getCustomerVisibleName } from "../lib/utils";
 import {
   canCreate,
   canDelete,
@@ -67,6 +75,8 @@ const newItem = (): InvLineItem => ({
   amount: 0,
 });
 
+const todayStr = () => new Date().toISOString().split("T")[0];
+
 const emptyForm = () => ({
   customerId: "",
   projectId: "",
@@ -75,7 +85,7 @@ const emptyForm = () => ({
   cgstRate: 9,
   sgstRate: 9,
   igstRate: 0,
-  invoiceDate: "",
+  invoiceDate: todayStr(),
   dueDate: "",
   paymentTerms: "30 days",
   deliveryVehicleNo: "",
@@ -128,9 +138,13 @@ export function Invoices() {
     customers,
     projects,
     quotations,
+    quotationPurchaseOrders,
     addInvoice,
     updateInvoice,
     deleteInvoice,
+    removePaymentsForInvoice,
+    addAuditLog,
+    addProjectActivity,
     settings,
   } = useStore();
   const [open, setOpen] = useState(false);
@@ -216,9 +230,9 @@ export function Invoices() {
     setTimeout(() => setOpen(false), 0);
   };
 
-  // All project names for Description dropdown
+  // All project names for Description dropdown — use customer-visible names
   const projectNames = (projects || [])
-    .map((p) => p.projectName)
+    .map((p) => getCustomerVisibleName(p))
     .filter(Boolean);
 
   const sorted = [...(invoices || [])].sort(
@@ -297,12 +311,10 @@ export function Invoices() {
     setOpen(true);
   };
 
-  const handleSave = () => {
-    console.log("FORM SUBMITTED");
+  const handleSave = async () => {
     if (isSaving) return;
     setIsSaving(true);
     try {
-      console.log("Creating invoice:", form);
       if (!form.customerId) {
         toast.error("Select customer");
         setIsSaving(false);
@@ -355,8 +367,9 @@ export function Invoices() {
         "";
 
       if (editingInvoice) {
-        updateInvoice({
-          ...editingInvoice,
+        const result = await updateInvoiceRemote({
+          id: editingInvoice.id,
+          invNo: editingInvoice.invNo,
           dcId: form.dcId,
           customerId: form.customerId,
           projectId: form.projectId,
@@ -372,6 +385,8 @@ export function Invoices() {
           invoiceDate: form.invoiceDate,
           dueDate: form.dueDate,
           paymentTerms: form.paymentTerms,
+          status: editingInvoice.status,
+          paidAmount: editingInvoice.paidAmount,
           deliveryVehicleNo: form.deliveryVehicleNo,
           deliveryDestination: form.deliveryDestination,
           poNumber: form.poNumber,
@@ -382,13 +397,32 @@ export function Invoices() {
           buyerStateCode: form.buyerStateCode,
           invoiceType: form.invoiceType ?? "tax",
           selectedEmail: selectedEmailToSave,
+          reminderEnabled: editingInvoice.reminderEnabled,
+          reminderIntervalDays: editingInvoice.reminderIntervalDays,
+          reminderFrequencyDays: editingInvoice.reminderFrequencyDays,
+          nextReminderAt: editingInvoice.nextReminderAt,
+          lastReminderSentAt: editingInvoice.lastReminderSentAt,
+          reminderCount: editingInvoice.reminderCount,
+          nextReminderCustomDate: editingInvoice.nextReminderCustomDate,
         });
+
+        if (result.status === "unauthenticated") {
+          toast.error("You must be signed in to update an invoice");
+          return;
+        }
+        if (result.status === "denied") {
+          toast.error("You do not have permission to update invoices");
+          return;
+        }
+        if (result.status === "error" || !result.data) {
+          toast.error(result.error || "Failed to update invoice");
+          return;
+        }
+        updateInvoice(result.data);
         toast.success("Invoice updated");
       } else {
-        addInvoice({
-          id: crypto.randomUUID(),
+        const result = await createInvoiceRemote({
           invNo: invNoToUse,
-          invoiceNumber: invNoToUse,
           dcId: form.dcId,
           customerId: form.customerId,
           projectId: form.projectId,
@@ -416,37 +450,107 @@ export function Invoices() {
           buyerStateCode: form.buyerStateCode,
           invoiceType: form.invoiceType ?? "tax",
           selectedEmail: selectedEmailToSave,
-          createdAt: Date.now(),
           reminderEnabled: (form as any).reminderEnabled ?? true,
           reminderIntervalDays: (form as any).reminderIntervalDays ?? 5,
           reminderFrequencyDays: (form as any).reminderFrequencyDays ?? 5,
           nextReminderAt: form.dueDate || new Date().toISOString(),
           lastReminderSentAt: null,
           reminderCount: 0,
+          nextReminderCustomDate: null,
         });
+
+        if (result.status === "unauthenticated") {
+          toast.error("You must be signed in to create an invoice");
+          return;
+        }
+        if (result.status === "denied") {
+          toast.error("You do not have permission to create invoices");
+          return;
+        }
+        if (result.status === "error" || !result.data) {
+          toast.error(result.error || "Failed to create invoice");
+          return;
+        }
+
+        addInvoice(result.data);
         toast.success(`Invoice ${invNoToUse} created`);
+        if (form.projectId) {
+          addProjectActivity(
+            form.projectId,
+            "invoice_generated",
+            `Invoice ${invNoToUse} generated — ${fmt(total)}`,
+            currentUser?.username ?? "system",
+          );
+        }
       }
       handleAfterSave();
-      console.log("SAVE COMPLETE");
     } finally {
       setIsSaving(false);
     }
   };
 
-  const updateStatus = (id: string, status: InvoiceStatus) => {
+  const updateStatus = async (id: string, status: InvoiceStatus) => {
     if (!pEdit) {
       toast.error("Access restricted: edit permission required");
       return;
     }
     const inv = (invoices || []).find((x) => x.id === id);
     if (inv) {
-      updateInvoice({
-        ...inv,
+      const result = await updateInvoiceStatusRemote(
+        id,
         status,
-        ...(status === "Paid" ? { reminderEnabled: false } : {}),
+        status === "Paid",
+      );
+      if (result.status === "unauthenticated") {
+        toast.error("You must be signed in to update an invoice");
+        return;
+      }
+      if (result.status === "denied") {
+        toast.error("You do not have permission to update invoices");
+        return;
+      }
+      if (result.status === "error" || !result.data) {
+        toast.error(result.error || "Failed to update status");
+        return;
+      }
+      updateInvoice(result.data);
+      addAuditLog({
+        module: "invoices",
+        action: "status_change",
+        entityId: id,
+        entityLabel: inv.invNo ?? id,
+        changedBy: currentUser?.username ?? "unknown",
+        oldValue: inv.status,
+        newValue: status,
       });
       toast.success("Status updated");
     }
+  };
+
+  // Shared by both the mobile-card and desktop-table delete buttons.
+  // ON DELETE CASCADE (payments_invoice_id_fkey, invoice_items_invoice_id_
+  // fkey - confirmed via Phase 9's own committed migration) removes linked
+  // invoice_items/payments server-side; local state is kept in sync here
+  // by also filtering out any now-orphaned local payments for this
+  // invoice (the frontend never did this before migration since there
+  // was no cascade to mirror).
+  const handleDeleteInvoice = async (invoiceId: string) => {
+    const result = await deleteInvoiceRemote(invoiceId);
+    if (result.status === "unauthenticated") {
+      toast.error("You must be signed in to delete an invoice");
+      return;
+    }
+    if (result.status === "denied") {
+      toast.error("You do not have permission to delete invoices");
+      return;
+    }
+    if (result.status === "error") {
+      toast.error(result.error || "Failed to delete invoice");
+      return;
+    }
+    deleteInvoice(invoiceId);
+    removePaymentsForInvoice(invoiceId);
+    toast.success("Invoice deleted");
   };
 
   const fmt = (n: number) => `₹${(n ?? 0).toLocaleString("en-IN")}`;
@@ -666,7 +770,7 @@ export function Invoices() {
                       className="h-10 w-10 text-destructive hover:text-destructive"
                       onClick={() => {
                         if (window.confirm("Delete this invoice?"))
-                          deleteInvoice(inv.id);
+                          handleDeleteInvoice(inv.id);
                       }}
                       title="Delete"
                       data-ocid={`invoices.delete_button.${i + 1}`}
@@ -893,7 +997,7 @@ export function Invoices() {
                             className="h-7 w-7 text-destructive hover:text-destructive"
                             onClick={() => {
                               if (confirm("Delete this invoice?"))
-                                deleteInvoice(inv.id);
+                                handleDeleteInvoice(inv.id);
                             }}
                             title="Delete"
                           >
@@ -944,7 +1048,7 @@ export function Invoices() {
         }}
       >
         <DialogContent
-          className="max-w-4xl w-[95vw]"
+          className="max-w-4xl w-[95vw] max-h-[90vh] flex flex-col overflow-hidden"
           data-ocid="invoices.dialog"
         >
           <DialogHeader>
@@ -953,9 +1057,9 @@ export function Invoices() {
             </DialogTitle>
           </DialogHeader>
           <form
+            className="flex flex-col min-h-0 flex-1"
             onSubmit={(e) => {
               e.preventDefault();
-              console.log("FORM SUBMITTED");
               handleSave();
             }}
           >
@@ -1010,8 +1114,16 @@ export function Invoices() {
                       setSelectedQuotationId(v);
                       const qt = (quotations || []).find((q) => q.id === v);
                       if (!qt) return;
-                      const poNumber = qt.recordedPO?.poNumber || "";
-                      const poDate = qt.recordedPO?.poDate || "";
+                      // Prefer the most recently recorded independent PO;
+                      // fall back to the legacy embedded field for
+                      // quotations that predate per-revision POs.
+                      const qtPOs = (quotationPurchaseOrders || [])
+                        .filter((po) => po.quotationId === qt.id)
+                        .sort((a, b) => b.createdAt - a.createdAt);
+                      const poNumber =
+                        qtPOs[0]?.poNumber || qt.recordedPO?.poNumber || "";
+                      const poDate =
+                        qtPOs[0]?.poDate || qt.recordedPO?.poDate || "";
                       const newItems =
                         (qt.lineItems || []).length > 0
                           ? (qt.lineItems || []).map((li) => ({
@@ -1154,32 +1266,25 @@ export function Invoices() {
                 })()}
                 <div>
                   <Label className="text-xs">Project (optional)</Label>
-                  <Select
-                    value={form.projectId || ""}
-                    onValueChange={(v) => {
-                      setForm((p) => ({
-                        ...p,
-                        projectId: v,
-                        linkedPoId: "",
-                        poNumber: "",
-                        poDate: "",
-                      }));
-                    }}
+                  <div
+                    className="mt-1 w-full"
+                    data-ocid="invoices.form.project.select"
                   >
-                    <SelectTrigger
-                      data-ocid="invoices.form.project.select"
-                      className="mt-1 h-8 text-sm"
-                    >
-                      <SelectValue placeholder="Select project" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {(projects || []).map((p) => (
-                        <SelectItem key={p.id} value={p.id} className="text-sm">
-                          {p.projectName}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                    <ProjectSelect
+                      value={form.projectId || ""}
+                      onChange={(v) =>
+                        setForm((p) => ({
+                          ...p,
+                          projectId: v,
+                          linkedPoId: "",
+                          poNumber: "",
+                          poDate: "",
+                        }))
+                      }
+                      placeholder="Select project"
+                      className="w-full"
+                    />
+                  </div>
                   {form.projectId &&
                     (() => {
                       const selectedProj = (projects || []).find(
@@ -1356,6 +1461,7 @@ export function Invoices() {
                 <div className="flex items-center justify-between mb-2">
                   <Label className="text-xs font-semibold">Line Items</Label>
                   <Button
+                    type="button"
                     variant="outline"
                     size="sm"
                     className="h-6 text-xs"

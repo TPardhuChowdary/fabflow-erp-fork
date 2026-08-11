@@ -79,12 +79,7 @@ function amountToWords(amount: number): string {
   const paise = Math.round((amount - rupees) * 100);
   let words = toWords(rupees).trim();
   if (!words) words = "Zero";
-  words =
-    words.charAt(0).toUpperCase() +
-    words
-      .slice(1)
-      .toLowerCase()
-      .replace(/\b\w/g, (c) => c.toUpperCase());
+  words = words.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
   if (paise > 0) {
     words += ` and ${toWords(paise).trim()} Paise`;
   }
@@ -112,18 +107,11 @@ export function QuotationPrintView({
   const accountNumber = settings.accountNumber || bankDetails?.accountNo || "";
   const ifscCode = settings.ifscCode || bankDetails?.ifsc || "";
   const bankBranch = settings.bankBranch || bankDetails?.branch || "";
-  // Tax amounts
-  const cgstAmt = Number((quotation as any).cgstAmt ?? 0);
-  const sgstAmt = Number((quotation as any).sgstAmt ?? 0);
-  const igstAmt = Number((quotation as any).igstAmt ?? 0);
-  const cgstRate = (quotation as any).cgstRate;
-  const sgstRate = (quotation as any).sgstRate;
-  const igstRate = (quotation as any).igstRate;
-  // Fallback to single gstAmount/gstRate if split amounts not present
-  const gstAmount = Number(quotation.gstAmount ?? 0);
-  const gstRate = quotation.gstRate;
+  // A quotation shows only the offered price — no GST/subtotal/grand-total
+  // breakdown. `subtotal` (the pre-tax sum of line items entered by the
+  // user) doubles as that quoted amount here; tax fields on the Quotation
+  // record are intentionally not read or displayed in this document.
   const subtotal = Number(quotation.subtotal ?? 0);
-  const totalAmount = Number(quotation.totalAmount ?? 0);
 
   const quotationDate =
     (quotation as any).date ||
@@ -472,107 +460,62 @@ export function QuotationPrintView({
             </tbody>
           </table>
 
-          {/* ===== TOTALS ===== */}
+          {/* ===== QUOTED AMOUNT =====
+              A quotation is a commercial offer, not a tax document — it
+              intentionally shows only the price being offered. GST/subtotal/
+              grand-total breakdowns belong on the Proforma or Tax Invoice
+              generated later, not here. */}
           <div
             style={{
               display: "flex",
               justifyContent: "flex-end",
-              marginBottom: "16px",
+              marginBottom: "10px",
             }}
           >
-            <div
-              style={{
-                width: "260px",
-                border: "1px solid #ddd",
-                borderRadius: "4px",
-                overflow: "hidden",
-                fontSize: "12px",
-              }}
-            >
+            <div style={{ width: "280px" }}>
               <div
                 style={{
                   display: "flex",
                   justifyContent: "space-between",
-                  padding: "7px 12px",
-                  borderBottom: "1px solid #eee",
-                }}
-              >
-                <span style={{ color: "#666" }}>Subtotal</span>
-                <span>{fmt(subtotal)}</span>
-              </div>
-              {cgstAmt > 0 && (
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    padding: "7px 12px",
-                    borderBottom: "1px solid #eee",
-                  }}
-                >
-                  <span style={{ color: "#666" }}>CGST ({cgstRate}%)</span>
-                  <span>{fmt(cgstAmt)}</span>
-                </div>
-              )}
-              {sgstAmt > 0 && (
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    padding: "7px 12px",
-                    borderBottom: "1px solid #eee",
-                  }}
-                >
-                  <span style={{ color: "#666" }}>SGST ({sgstRate}%)</span>
-                  <span>{fmt(sgstAmt)}</span>
-                </div>
-              )}
-              {igstAmt > 0 && (
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    padding: "7px 12px",
-                    borderBottom: "1px solid #eee",
-                  }}
-                >
-                  <span style={{ color: "#666" }}>IGST ({igstRate}%)</span>
-                  <span>{fmt(igstAmt)}</span>
-                </div>
-              )}
-              {cgstAmt === 0 &&
-                sgstAmt === 0 &&
-                igstAmt === 0 &&
-                gstAmount > 0 && (
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      padding: "7px 12px",
-                      borderBottom: "1px solid #eee",
-                    }}
-                  >
-                    <span style={{ color: "#666" }}>GST ({gstRate}%)</span>
-                    <span>{fmt(gstAmount)}</span>
-                  </div>
-                )}
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  padding: "9px 12px",
+                  alignItems: "center",
+                  padding: "12px 16px",
                   background: "#1a1a1a",
-                  color: "#fff",
-                  fontWeight: "700",
-                  fontSize: "13px",
+                  borderRadius: "4px",
                 }}
               >
-                <span>Grand Total</span>
-                <span>{fmt(totalAmount)}</span>
+                <span
+                  style={{
+                    color: "#ccc",
+                    fontSize: "11px",
+                    fontWeight: "700",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.6px",
+                  }}
+                >
+                  Quoted Amount
+                </span>
+                <span
+                  style={{ color: "#fff", fontWeight: "800", fontSize: "18px" }}
+                >
+                  {fmt(subtotal)}
+                </span>
+              </div>
+              <div
+                style={{
+                  fontSize: "10px",
+                  color: "#999",
+                  textAlign: "right",
+                  marginTop: "5px",
+                }}
+              >
+                Taxes, if applicable, will be added at the time of invoicing.
               </div>
             </div>
           </div>
 
-          {/* ===== AMOUNT IN WORDS ===== */}
+          {/* ===== AMOUNT IN WORDS =====
+              Converts only the quoted amount above — GST is never
+              calculated or included in a quotation. */}
           <div
             style={{
               border: "1px solid #ddd",
@@ -586,7 +529,7 @@ export function QuotationPrintView({
               Amount in Words:{" "}
             </span>
             <span style={{ fontStyle: "italic" }}>
-              {amountToWords(totalAmount)}
+              {amountToWords(subtotal)}
             </span>
           </div>
 

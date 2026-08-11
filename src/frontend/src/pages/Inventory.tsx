@@ -40,11 +40,21 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
 import { MaterialDetailDrawer } from "../components/MaterialDetailDrawer";
 import { VendorSelect } from "../components/VendorSelect";
+import {
+  createInventoryItemRemote,
+  deleteInventoryItemRemote,
+  updateInventoryItemRemote,
+} from "../lib/inventoryApi";
+import {
+  createInventoryPurchaseRemote,
+  deleteInventoryPurchaseRemote,
+  updateInventoryPurchaseRemote,
+} from "../lib/inventoryPurchasesApi";
 import {
   canCreate,
   canDelete,
@@ -61,7 +71,19 @@ import type {
 
 const UNITS = ["pcs", "kg", "sheets", "meters", "liters", "boxes", "rolls"];
 
-export function Inventory() {
+interface InventoryProps {
+  /** Which tab to land on — defaults to "stock" (today's behavior) when
+   * omitted, so the bare `<Inventory />` call site stays unaffected. */
+  initialTab?: "stock" | "purchases";
+  /** Scrolls to and highlights the matching Purchase History row on
+   * mount — used by Petty Expense History's "View Inventory Record". */
+  highlightPurchaseId?: string;
+}
+
+export function Inventory({
+  initialTab,
+  highlightPurchaseId,
+}: InventoryProps = {}) {
   const { currentUser } = useAuth();
   const pCreate = canCreate(currentUser, "inventory");
 
@@ -109,6 +131,9 @@ export function Inventory() {
     id: string;
     name: string;
     unit: string;
+    reorderLevel: string;
+    unitCost: string;
+    estimatedPrice: string;
   } | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<
     PurchaseAttachment[]
@@ -123,6 +148,19 @@ export function Inventory() {
   const [isPurchaseSaving, setIsPurchaseSaving] = useState(false);
   const [isEditSaving, setIsEditSaving] = useState(false);
 
+  const [activeTab, setActiveTab] = useState<"stock" | "purchases">(
+    initialTab ?? "stock",
+  );
+
+  // Scroll to and highlight the purchase row a caller (e.g. Petty Expense
+  // History's "View Inventory Record") asked us to land on.
+  useEffect(() => {
+    if (!highlightPurchaseId) return;
+    document
+      .getElementById(`inventory-purchase-${highlightPurchaseId}`)
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [highlightPurchaseId]);
+
   const togglePurchaseExpand = (id: string) => {
     setExpandedPurchaseIds((prev) => {
       const next = new Set(prev);
@@ -132,26 +170,44 @@ export function Inventory() {
     });
   };
 
-  const handleAddItem = () => {
+  // Phase 20 — remote-first: the write goes to Supabase before Zustand is
+  // ever touched, and only ever sends the master-data field whitelist
+  // (name/unit/reorderLevel/unitCost/estimatedPrice) - never
+  // current_stock/quantity_reserved/last_purchase_price, which are
+  // trigger-owned. Only a confirmed "success" result updates local
+  // state; unauthenticated/error leave Zustand exactly as it was and
+  // surface a real toast - never a fabricated success. Mirrors
+  // Employees.tsx/Customers.tsx's established pattern.
+  const handleAddItem = async () => {
     if (isAddSaving) return;
-    setIsAddSaving(true);
     if (!newItem.name.trim()) {
       toast.error("Material name is required");
-      setIsAddSaving(false);
       return;
     }
-    const item: InventoryItem = {
-      id: `inv-${Date.now()}`,
-      name: newItem.name.trim(),
-      unit: newItem.unit,
-      quantityAvailable: 0,
-      lastUpdated: Date.now(),
-    };
-    addInventoryItem(item);
-    toast.success(`${item.name} added to inventory`);
-    setNewItem({ name: "", unit: "pcs" });
-    setAddDialog(false);
-    setIsAddSaving(false);
+    setIsAddSaving(true);
+    try {
+      const result = await createInventoryItemRemote({
+        name: newItem.name.trim(),
+        unit: newItem.unit,
+        reorderLevel: undefined,
+        unitCost: undefined,
+        estimatedPrice: undefined,
+      });
+      if (result.status === "unauthenticated") {
+        toast.error("Sign in required to add inventory items");
+        return;
+      }
+      if (result.status === "error" || !result.data) {
+        toast.error(result.error || "Failed to add inventory item");
+        return;
+      }
+      addInventoryItem(result.data);
+      toast.success(`${result.data.name} added to inventory`);
+      setNewItem({ name: "", unit: "pcs" });
+      setAddDialog(false);
+    } finally {
+      setIsAddSaving(false);
+    }
   };
 
   const openPurchaseDialog = (e: React.MouseEvent, item: InventoryItem) => {
@@ -238,7 +294,7 @@ export function Inventory() {
     setPendingAttachments((prev) => prev.filter((a) => a.ref !== ref));
   };
 
-  const handleAddPurchase = () => {
+  const handleAddPurchase = async () => {
     if (isPurchaseSaving) return;
     setIsPurchaseSaving(true);
     try {
@@ -266,8 +322,7 @@ export function Inventory() {
       const subtotalVal = qty * unitCost;
       const gstAmt = purchaseForm.applyGST ? subtotalVal * (gstPct / 100) : 0;
       const finalTotal = subtotalVal + gstAmt;
-      const purchase: InventoryPurchase = {
-        id: editingPurchase ? editingPurchase.id : `invp-${Date.now()}`,
+      const purchaseFields: Omit<InventoryPurchase, "id" | "createdAt"> = {
         inventoryItemId: purchaseTarget.id,
         materialName: purchaseTarget.name,
         quantityPurchased: qty,
@@ -283,13 +338,41 @@ export function Inventory() {
         finalTotal,
         attachments:
           pendingAttachments.length > 0 ? [...pendingAttachments] : undefined,
-        createdAt: editingPurchase ? editingPurchase.createdAt : Date.now(),
       };
       if (editingPurchase) {
-        updateInventoryPurchase(purchase);
+        const result = await updateInventoryPurchaseRemote({
+          ...editingPurchase,
+          ...purchaseFields,
+        });
+        if (result.status === "unauthenticated") {
+          toast.error("Not signed in to the server - purchase was not saved");
+          return;
+        }
+        if (result.status === "denied" || result.status === "error") {
+          toast.error(result.error ?? "Could not save purchase");
+          return;
+        }
+        if (!result.data) {
+          toast.error("Could not save purchase");
+          return;
+        }
+        updateInventoryPurchase(result.data);
         toast.success("Purchase updated");
       } else {
-        addInventoryPurchase(purchase);
+        const result = await createInventoryPurchaseRemote(purchaseFields);
+        if (result.status === "unauthenticated") {
+          toast.error("Not signed in to the server - purchase was not saved");
+          return;
+        }
+        if (result.status === "denied" || result.status === "error") {
+          toast.error(result.error ?? "Could not save purchase");
+          return;
+        }
+        if (!result.data) {
+          toast.error("Could not save purchase");
+          return;
+        }
+        addInventoryPurchase(result.data);
         toast.success(
           `Stock updated: +${qty} ${purchaseTarget.unit} of ${purchaseTarget.name}`,
         );
@@ -361,7 +444,10 @@ export function Inventory() {
         </span>
       </div>
 
-      <Tabs defaultValue="stock">
+      <Tabs
+        value={activeTab}
+        onValueChange={(v) => setActiveTab(v as "stock" | "purchases")}
+      >
         <TabsList>
           <TabsTrigger value="stock">Current Stock</TabsTrigger>
           <TabsTrigger value="purchases">Purchase History</TabsTrigger>
@@ -381,7 +467,13 @@ export function Inventory() {
                       Unit
                     </TableHead>
                     <TableHead className="text-xs font-semibold">
-                      Stock Available
+                      Total Stock
+                    </TableHead>
+                    <TableHead className="text-xs font-semibold">
+                      Reserved
+                    </TableHead>
+                    <TableHead className="text-xs font-semibold">
+                      Available
                     </TableHead>
                     <TableHead className="text-xs font-semibold">
                       Last Purchase Price
@@ -412,18 +504,41 @@ export function Inventory() {
                         {item.unit}
                       </TableCell>
                       <TableCell>
-                        <Badge
-                          variant={
-                            item.quantityAvailable === 0
-                              ? "destructive"
-                              : item.quantityAvailable < 10
-                                ? "secondary"
-                                : "outline"
-                          }
-                          className="font-mono text-xs"
-                        >
+                        <span className="font-mono text-xs">
                           {item.quantityAvailable} {item.unit}
-                        </Badge>
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        {(item.quantityReserved ?? 0) > 0 ? (
+                          <span className="font-mono text-xs text-amber-600">
+                            {item.quantityReserved} {item.unit}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground text-xs">
+                            —
+                          </span>
+                        )}
+                      </TableCell>
+                      <TableCell>
+                        {(() => {
+                          const avail =
+                            item.quantityAvailable -
+                            (item.quantityReserved ?? 0);
+                          return (
+                            <Badge
+                              variant={
+                                avail <= 0
+                                  ? "destructive"
+                                  : avail < 10
+                                    ? "secondary"
+                                    : "outline"
+                              }
+                              className="font-mono text-xs"
+                            >
+                              {Math.max(0, avail)} {item.unit}
+                            </Badge>
+                          );
+                        })()}
                       </TableCell>
                       <TableCell className="text-xs text-muted-foreground">
                         {item.lastPurchasePrice &&
@@ -459,6 +574,18 @@ export function Inventory() {
                                   id: item.id,
                                   name: item.name,
                                   unit: item.unit,
+                                  reorderLevel:
+                                    item.reorderLevel != null
+                                      ? String(item.reorderLevel)
+                                      : "",
+                                  unitCost:
+                                    item.unitCost != null
+                                      ? String(item.unitCost)
+                                      : "",
+                                  estimatedPrice:
+                                    item.estimatedPrice != null
+                                      ? String(item.estimatedPrice)
+                                      : "",
                                 });
                                 setEditItemDialog(true);
                               }}
@@ -472,7 +599,7 @@ export function Inventory() {
                             <button
                               type="button"
                               className="p-1 rounded hover:bg-muted transition-colors"
-                              onClick={(e) => {
+                              onClick={async (e) => {
                                 e.stopPropagation();
                                 const hasPurchases = (
                                   inventoryPurchases || []
@@ -483,6 +610,25 @@ export function Inventory() {
                                 if (hasPurchases || hasUsage) {
                                   toast.error(
                                     "Cannot delete material with existing records",
+                                  );
+                                  return;
+                                }
+                                const result = await deleteInventoryItemRemote(
+                                  item.id,
+                                );
+                                if (result.status === "unauthenticated") {
+                                  toast.error(
+                                    "Sign in required to delete inventory items",
+                                  );
+                                  return;
+                                }
+                                if (
+                                  result.status === "error" ||
+                                  result.status === "denied"
+                                ) {
+                                  toast.error(
+                                    result.error ||
+                                      "Failed to delete inventory item",
                                   );
                                   return;
                                 }
@@ -554,11 +700,17 @@ export function Inventory() {
                     .map((p, i) => {
                       const isExpanded = expandedPurchaseIds.has(p.id);
                       const attachments = p.attachments ?? [];
+                      const isHighlighted = highlightPurchaseId === p.id;
                       return (
                         <>
                           <TableRow
                             key={p.id}
-                            className="hover:bg-muted/30 transition-colors"
+                            id={`inventory-purchase-${p.id}`}
+                            className={
+                              isHighlighted
+                                ? "bg-primary/10 ring-2 ring-inset ring-primary/50 transition-colors"
+                                : "hover:bg-muted/30 transition-colors"
+                            }
                             data-ocid={`inventory.purchases.item.${i + 1}`}
                           >
                             <TableCell className="w-8">
@@ -634,13 +786,34 @@ export function Inventory() {
                                   <button
                                     type="button"
                                     className="p-1 rounded hover:bg-muted transition-colors"
-                                    onClick={() => {
+                                    onClick={async () => {
                                       if (
                                         !window.confirm(
                                           "Delete this purchase record? This will recalculate stock.",
                                         )
                                       )
                                         return;
+                                      const result =
+                                        await deleteInventoryPurchaseRemote(
+                                          p.id,
+                                          p.inventoryItemId,
+                                        );
+                                      if (result.status === "unauthenticated") {
+                                        toast.error(
+                                          "Not signed in to the server - purchase was not deleted",
+                                        );
+                                        return;
+                                      }
+                                      if (
+                                        result.status === "denied" ||
+                                        result.status === "error"
+                                      ) {
+                                        toast.error(
+                                          result.error ??
+                                            "Could not delete purchase",
+                                        );
+                                        return;
+                                      }
                                       deleteInventoryPurchase(p.id);
                                       toast.success("Purchase deleted");
                                     }}
@@ -727,31 +900,46 @@ export function Inventory() {
             <DialogTitle>Edit Material</DialogTitle>
           </DialogHeader>
           <form
-            onSubmit={(e) => {
+            onSubmit={async (e) => {
               e.preventDefault();
               if (isEditSaving) return;
-              setIsEditSaving(true);
               if (!editingItem || !editingItem.name.trim()) {
                 toast.error("Name is required");
-                setIsEditSaving(false);
                 return;
               }
-              const existing = inventoryItems.find(
-                (x) => x.id === editingItem.id,
-              );
-              if (!existing) {
+              setIsEditSaving(true);
+              try {
+                const result = await updateInventoryItemRemote(editingItem.id, {
+                  name: editingItem.name.trim(),
+                  unit: editingItem.unit,
+                  reorderLevel: editingItem.reorderLevel
+                    ? Number(editingItem.reorderLevel)
+                    : undefined,
+                  unitCost: editingItem.unitCost
+                    ? Number(editingItem.unitCost)
+                    : undefined,
+                  estimatedPrice: editingItem.estimatedPrice
+                    ? Number(editingItem.estimatedPrice)
+                    : undefined,
+                });
+                if (result.status === "unauthenticated") {
+                  toast.error("Sign in required to update inventory items");
+                  return;
+                }
+                if (result.status === "error" || result.status === "denied") {
+                  toast.error(
+                    result.error || "Failed to update inventory item",
+                  );
+                  return;
+                }
+                if (!result.data) return;
+                updateInventoryItem(result.data);
+                toast.success("Material updated");
+                setEditItemDialog(false);
+                setEditingItem(null);
+              } finally {
                 setIsEditSaving(false);
-                return;
               }
-              updateInventoryItem({
-                ...existing,
-                name: editingItem.name.trim(),
-                unit: editingItem.unit,
-              });
-              toast.success("Material updated");
-              setEditItemDialog(false);
-              setEditingItem(null);
-              setIsEditSaving(false);
             }}
           >
             {editingItem && (
@@ -787,6 +975,45 @@ export function Inventory() {
                       ))}
                     </SelectContent>
                   </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Reorder Level</Label>
+                  <Input
+                    type="number"
+                    value={editingItem.reorderLevel}
+                    onChange={(e) =>
+                      setEditingItem((p) =>
+                        p ? { ...p, reorderLevel: e.target.value } : p,
+                      )
+                    }
+                    data-ocid="inventory.edit.reorder_level.input"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Unit Cost (₹)</Label>
+                  <Input
+                    type="number"
+                    value={editingItem.unitCost}
+                    onChange={(e) =>
+                      setEditingItem((p) =>
+                        p ? { ...p, unitCost: e.target.value } : p,
+                      )
+                    }
+                    data-ocid="inventory.edit.unit_cost.input"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Estimated Price (₹)</Label>
+                  <Input
+                    type="number"
+                    value={editingItem.estimatedPrice}
+                    onChange={(e) =>
+                      setEditingItem((p) =>
+                        p ? { ...p, estimatedPrice: e.target.value } : p,
+                      )
+                    }
+                    data-ocid="inventory.edit.estimated_price.input"
+                  />
                 </div>
               </div>
             )}

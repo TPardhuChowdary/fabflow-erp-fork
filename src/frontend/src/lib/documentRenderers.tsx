@@ -11,6 +11,7 @@ import type {
   Project,
   Quotation,
 } from "../types";
+import { getCustomerVisibleName } from "./utils";
 
 const fmt = (n: number) => `₹${(Number(n) || 0).toLocaleString("en-IN")}`;
 
@@ -81,6 +82,18 @@ function amountToWords(amount: number): string {
       .replace(/\b\w/g, (c) => c.toUpperCase());
   if (paise > 0) words += ` and ${toWords(paise).trim()} Paise`;
   return `${words} Only`;
+}
+
+/** Quotation-only wrapper around amountToWords that fixes a pre-existing
+ * capitalization bug (the shared function's title-casing produces e.g.
+ * "ELeven..." instead of "Eleven..."). Scoped to Quotation on purpose —
+ * Invoice/PO keep calling the original amountToWords unchanged, per the
+ * requirement that those documents continue exactly as they do today. */
+function quotationAmountToWords(amount: number): string {
+  return amountToWords(amount).replace(
+    /^(\p{Lu})(\p{Lu})/u,
+    (_m, first, second) => first + second.toLowerCase(),
+  );
 }
 
 const HIDDEN_STYLE: React.CSSProperties = {
@@ -212,6 +225,11 @@ export function InvoiceDocContent({
           {invoice.poNumber && (
             <div style={{ fontSize: "11px", color: "#444" }}>
               <strong>PO No:</strong> {invoice.poNumber}
+            </div>
+          )}
+          {invoice.poDate && (
+            <div style={{ fontSize: "11px", color: "#444" }}>
+              <strong>PO Date:</strong> {invoice.poDate}
             </div>
           )}
         </div>
@@ -641,16 +659,11 @@ export function QuotationDocContent({
   const accountNumber = settings.accountNumber || "";
   const ifscCode = settings.ifscCode || "";
   const bankBranch = settings.bankBranch || "";
-  const cgstAmt = Number((quotation as any).cgstAmt ?? 0);
-  const sgstAmt = Number((quotation as any).sgstAmt ?? 0);
-  const igstAmt = Number((quotation as any).igstAmt ?? 0);
-  const cgstRate = (quotation as any).cgstRate;
-  const sgstRate = (quotation as any).sgstRate;
-  const igstRate = (quotation as any).igstRate;
-  const gstAmount = Number(quotation.gstAmount ?? 0);
-  const gstRate = quotation.gstRate;
+  // A quotation shows only the offered price — no GST/subtotal/grand-total
+  // breakdown. `subtotal` (the pre-tax sum of line items entered by the
+  // user) doubles as that quoted amount here; tax fields on the Quotation
+  // record are intentionally not read or displayed in this document.
   const subtotal = Number(quotation.subtotal ?? 0);
-  const totalAmount = Number(quotation.totalAmount ?? 0);
   const quotationDate =
     (quotation as any).date ||
     (quotation as any).quotationDate ||
@@ -909,104 +922,60 @@ export function QuotationDocContent({
         </tbody>
       </table>
 
-      {/* TOTALS */}
+      {/* QUOTED AMOUNT — a quotation is a commercial offer, not a tax
+          document: it shows only the price being offered. GST/subtotal/
+          grand-total breakdowns belong on the Proforma or Tax Invoice
+          generated later, not here. */}
       <div
         style={{
           display: "flex",
           justifyContent: "flex-end",
-          marginBottom: "16px",
+          marginBottom: "10px",
         }}
       >
-        <div
-          style={{
-            width: "260px",
-            border: "1px solid #ddd",
-            borderRadius: "4px",
-            overflow: "hidden",
-            fontSize: "12px",
-          }}
-        >
+        <div style={{ width: "280px" }}>
           <div
             style={{
               display: "flex",
               justifyContent: "space-between",
-              padding: "7px 12px",
-              borderBottom: "1px solid #eee",
-            }}
-          >
-            <span style={{ color: "#666" }}>Subtotal</span>
-            <span>{fmt(subtotal)}</span>
-          </div>
-          {cgstAmt > 0 && (
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                padding: "7px 12px",
-                borderBottom: "1px solid #eee",
-              }}
-            >
-              <span style={{ color: "#666" }}>CGST ({cgstRate}%)</span>
-              <span>{fmt(cgstAmt)}</span>
-            </div>
-          )}
-          {sgstAmt > 0 && (
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                padding: "7px 12px",
-                borderBottom: "1px solid #eee",
-              }}
-            >
-              <span style={{ color: "#666" }}>SGST ({sgstRate}%)</span>
-              <span>{fmt(sgstAmt)}</span>
-            </div>
-          )}
-          {igstAmt > 0 && (
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                padding: "7px 12px",
-                borderBottom: "1px solid #eee",
-              }}
-            >
-              <span style={{ color: "#666" }}>IGST ({igstRate}%)</span>
-              <span>{fmt(igstAmt)}</span>
-            </div>
-          )}
-          {cgstAmt === 0 && sgstAmt === 0 && igstAmt === 0 && gstAmount > 0 && (
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                padding: "7px 12px",
-                borderBottom: "1px solid #eee",
-              }}
-            >
-              <span style={{ color: "#666" }}>GST ({gstRate}%)</span>
-              <span>{fmt(gstAmount)}</span>
-            </div>
-          )}
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              padding: "9px 12px",
+              alignItems: "center",
+              padding: "12px 16px",
               background: "#1a1a1a",
-              color: "#fff",
-              fontWeight: "700",
-              fontSize: "13px",
+              borderRadius: "4px",
             }}
           >
-            <span>Grand Total</span>
-            <span>{fmt(totalAmount)}</span>
+            <span
+              style={{
+                color: "#ccc",
+                fontSize: "11px",
+                fontWeight: "700",
+                textTransform: "uppercase",
+                letterSpacing: "0.6px",
+              }}
+            >
+              Quoted Amount
+            </span>
+            <span
+              style={{ color: "#fff", fontWeight: "800", fontSize: "18px" }}
+            >
+              {fmt(subtotal)}
+            </span>
+          </div>
+          <div
+            style={{
+              fontSize: "10px",
+              color: "#999",
+              textAlign: "right",
+              marginTop: "5px",
+            }}
+          >
+            Taxes, if applicable, will be added at the time of invoicing.
           </div>
         </div>
       </div>
 
-      {/* AMOUNT IN WORDS */}
+      {/* AMOUNT IN WORDS — converts only the quoted amount above; GST is
+          never calculated or included in a quotation. */}
       <div
         style={{
           border: "1px solid #ddd",
@@ -1020,7 +989,7 @@ export function QuotationDocContent({
           Amount in Words:{" "}
         </span>
         <span style={{ fontStyle: "italic" }}>
-          {amountToWords(totalAmount)}
+          {quotationAmountToWords(subtotal)}
         </span>
       </div>
 
@@ -1771,6 +1740,14 @@ export function ChallanDocContent({
             Dispatch Details
           </div>
           <div style={{ lineHeight: "1.8", color: "#444", fontSize: "11px" }}>
+            <div>
+              <strong>Dispatched Via:</strong>{" "}
+              {challan.dispatchMethod ?? "Company Vehicle"}
+            </div>
+            {/* Only the fields relevant to the dispatch method above are
+                ever populated (see buildDispatchFields in
+                pages/DeliveryChallans.tsx), so this conditional-on-value
+                rendering naturally shows only what applies. */}
             {challan.vehicleNo && (
               <div>
                 <strong>Vehicle No:</strong> {challan.vehicleNo}
@@ -1779,6 +1756,36 @@ export function ChallanDocContent({
             {challan.driverName && (
               <div>
                 <strong>Driver:</strong> {challan.driverName}
+              </div>
+            )}
+            {challan.courierCompany && (
+              <div>
+                <strong>Courier Company:</strong> {challan.courierCompany}
+              </div>
+            )}
+            {challan.trackingNumber && (
+              <div>
+                <strong>Tracking No:</strong> {challan.trackingNumber}
+              </div>
+            )}
+            {challan.transportCompany && (
+              <div>
+                <strong>Transport Company:</strong> {challan.transportCompany}
+              </div>
+            )}
+            {challan.lrNumber && (
+              <div>
+                <strong>LR No:</strong> {challan.lrNumber}
+              </div>
+            )}
+            {challan.collectedBy && (
+              <div>
+                <strong>Collected By:</strong> {challan.collectedBy}
+              </div>
+            )}
+            {challan.mobileNumber && (
+              <div>
+                <strong>Mobile:</strong> {challan.mobileNumber}
               </div>
             )}
             {challan.receiverName && (
@@ -1852,8 +1859,7 @@ export function ChallanDocContent({
             const project = projects.find((p) => p.id === entry.projectId);
             const description =
               project?.workDescription?.trim() ||
-              project?.projectName ||
-              entry.projectId;
+              (project ? getCustomerVisibleName(project) : entry.projectId);
             return (
               <tr
                 key={entry.projectId}

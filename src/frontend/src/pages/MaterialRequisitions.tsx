@@ -13,6 +13,7 @@ import { ShieldOff } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import { updateBomRequisitionStatusRemote } from "../lib/bomItemsApi";
 import { canCreate, canDelete, canEdit, canView } from "../permissions";
 import { useStore } from "../store";
 import type { BomRequisitionStatus } from "../types";
@@ -70,12 +71,25 @@ export function MaterialRequisitions() {
     "Completed",
   ];
 
-  function handleMarkCompleted(id: string) {
+  async function handleMarkCompleted(id: string) {
     if (!pEdit) {
       toast.error("Access restricted: edit permission required");
       return;
     }
-    updateBomRequisition(id, { status: "Completed", updatedAt: Date.now() });
+    const result = await updateBomRequisitionStatusRemote(id, "Completed");
+    if (result.status === "unauthenticated") {
+      toast.error("Not signed in to the server - requisition was not updated");
+      return;
+    }
+    if (result.status === "denied" || result.status === "error") {
+      toast.error(result.error ?? "Could not update requisition");
+      return;
+    }
+    if (!result.data) {
+      toast.error("Could not update requisition");
+      return;
+    }
+    updateBomRequisition(id, result.data);
     toast.success("Requisition marked as completed");
   }
 

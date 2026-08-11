@@ -43,6 +43,8 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
 import { StatusBadge } from "../components/StatusBadge";
+import { updateInvoiceReminderRemote } from "../lib/invoicesApi";
+import { createPaymentRemote } from "../lib/paymentsApi";
 import {
   canCreate,
   canDelete,
@@ -168,12 +170,15 @@ function isReminderDue(inv: any): boolean {
   return today >= next;
 }
 
-function updateFrequency(
+async function updateFrequency(
   inv: any,
   value: string,
   updateInvoiceFn: (inv: any) => void,
 ) {
-  updateInvoiceFn({ ...inv, reminderFrequencyDays: Number(value) });
+  const result = await updateInvoiceReminderRemote(inv.id, {
+    reminderFrequencyDays: Number(value),
+  });
+  if (result.status === "success" && result.data) updateInvoiceFn(result.data);
 }
 
 function sendEmailReminder(inv: any, updateInvoiceFn: (inv: any) => void) {
@@ -238,7 +243,7 @@ function PaymentsInner() {
   const [form, setForm] = useState({
     invoiceId: "",
     amount: "",
-    paymentDate: "",
+    paymentDate: new Date().toISOString().split("T")[0],
     mode: "NEFT" as PaymentMode,
     referenceNo: "",
     notes: "",
@@ -299,8 +304,7 @@ function PaymentsInner() {
 
   const getDefaultMethod = (): ReminderMethod => "WhatsApp";
 
-  const handleSave = () => {
-    console.log("FORM SUBMITTED");
+  const handleSave = async () => {
     if (isSavingPayment) return;
     setIsSavingPayment(true);
     try {
@@ -321,36 +325,45 @@ function PaymentsInner() {
           return;
         }
       }
-      addPayment({
-        id: crypto.randomUUID(),
+
+      const result = await createPaymentRemote({
         invoiceId: form.invoiceId,
         amount: amt,
         paymentDate: form.paymentDate,
         mode: form.mode,
         referenceNo: form.referenceNo,
         notes: form.notes,
-        createdAt: Date.now(),
         files: paymentFiles.length > 0 ? [...paymentFiles] : undefined,
       });
-      // Update invoice paid amount & status
-      const inv = invoices.find((i) => i.id === form.invoiceId);
-      if (inv) {
-        const newPaid = inv.paidAmount + amt;
-        const status = newPaid >= inv.totalAmount ? "Paid" : "PartiallyPaid";
-        updateInvoice({ ...inv, paidAmount: newPaid, status });
+
+      if (result.status === "unauthenticated") {
+        toast.error("You must be signed in to record a payment");
+        return;
       }
+      if (result.status === "denied") {
+        toast.error("You do not have permission to record payments");
+        return;
+      }
+      if (result.status === "error" || !result.data) {
+        // Surfaces trg_overpayment's Postgres exception here too, in case
+        // a concurrent tab/session raced the pre-check above.
+        toast.error(result.error || "Failed to record payment");
+        return;
+      }
+
+      addPayment(result.data.payment);
+      updateInvoice(result.data.invoice);
       toast.success("Payment recorded");
       setOpen(false);
       setPaymentFiles([]);
       setForm({
         invoiceId: "",
         amount: "",
-        paymentDate: "",
+        paymentDate: new Date().toISOString().split("T")[0],
         mode: "NEFT",
         referenceNo: "",
         notes: "",
       });
-      console.log("SAVE COMPLETE");
     } finally {
       setIsSavingPayment(false);
     }
@@ -408,13 +421,17 @@ function PaymentsInner() {
             d.setDate(d.getDate() + freq);
             return d;
           })();
-      updateInvoice({
-        ...inv,
+      const reminderResult = await updateInvoiceReminderRemote(inv.id, {
         lastReminderSentAt: new Date().toISOString(),
         reminderCount: (inv.reminderCount || 0) + 1,
         nextReminderCustomDate: null,
         nextReminderAt: nextAt.toISOString(),
-      } as any);
+      });
+      if (reminderResult.status === "success" && reminderResult.data) {
+        updateInvoice(reminderResult.data);
+      } else if (reminderResult.status !== "unauthenticated") {
+        toast.error(reminderResult.error || "Failed to update reminder");
+      }
 
       addReminderLog({
         id: crypto.randomUUID(),
@@ -1591,7 +1608,11 @@ function PaymentsInner() {
                     (i) => i.id === reminderModal.invoiceId,
                   );
                   if (inv)
-                    updateFrequency(inv, e.target.value, updateInvoice as any);
+                    void updateFrequency(
+                      inv,
+                      e.target.value,
+                      updateInvoice as any,
+                    );
                 }}
               >
                 <option value={5}>Every 5 days</option>
@@ -1616,9 +1637,12 @@ function PaymentsInner() {
                     (i) => i.id === reminderModal.invoiceId,
                   );
                   if (inv) {
-                    updateInvoice({
-                      ...inv,
+                    void updateInvoiceReminderRemote(inv.id, {
                       nextReminderCustomDate: date || null,
+                    }).then((result) => {
+                      if (result.status === "success" && result.data) {
+                        updateInvoice(result.data);
+                      }
                     });
                   }
                 }}

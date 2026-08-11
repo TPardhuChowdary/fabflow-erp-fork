@@ -36,7 +36,12 @@ import { ShieldOff } from "lucide-react";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
-import { hashPassword } from "../authUtils";
+import {
+  createEmployeeRemote,
+  deleteEmployeeRemote,
+  updateEmployeeRemote,
+} from "../lib/employeesApi";
+import { createOrgUser } from "../lib/settingsUsersApi";
 import {
   canCreate,
   canDelete,
@@ -45,7 +50,7 @@ import {
   hasPermission,
 } from "../permissions";
 import { useStore } from "../store";
-import type { AuthUser, Employee, UserRole } from "../types";
+import type { Employee, UserRole } from "../types";
 import { uploadPhoto } from "../utils/photoStorage";
 
 const ROLE_COLORS: Record<string, string> = {
@@ -61,13 +66,7 @@ interface Props {
 
 export function Employees({ onViewEmployee }: Props) {
   const { currentUser } = useAuth();
-  const {
-    employees,
-    addEmployee,
-    addAuthUser,
-    updateEmployee,
-    deleteEmployee,
-  } = useStore();
+  const { employees, addEmployee, updateEmployee, deleteEmployee } = useStore();
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editDialogOpen, setEditDialogOpen] = useState(false);
@@ -86,6 +85,11 @@ export function Employees({ onViewEmployee }: Props) {
     joiningDate: "",
     username: "",
     password: "",
+    designation: "",
+    bloodGroup: "",
+    emergencyContactName: "",
+    emergencyContactRelation: "",
+    emergencyContactPhone: "",
   });
   const [editForm, setEditForm] = useState({
     name: "",
@@ -94,6 +98,11 @@ export function Employees({ onViewEmployee }: Props) {
     monthlySalary: "",
     joiningDate: "",
     photo: null as string | null,
+    designation: "",
+    bloodGroup: "",
+    emergencyContactName: "",
+    emergencyContactRelation: "",
+    emergencyContactPhone: "",
   });
   const [newPhotoFile, setNewPhotoFile] = useState<File | null>(null);
 
@@ -131,39 +140,16 @@ export function Employees({ onViewEmployee }: Props) {
       toast.error("Name, Username, and Password are required");
       return;
     }
-    const empId = `emp-${Date.now()}`;
-    const userId = `user-${Date.now()}`;
-    let passwordHash: string;
-    try {
-      passwordHash = await hashPassword(form.password);
-    } catch (err) {
-      console.error("Password hash failed", err);
-      toast.error("Failed to process password. Please try again.");
+    if (form.password.trim().length < 8) {
+      toast.error("Temporary password must be at least 8 characters");
       return;
     }
 
-    const newUser: AuthUser = {
-      id: userId,
-      username: form.username.trim(),
-      passwordHash,
-      role: form.role,
-      employeeId: empId,
-    };
-    const newEmp: Employee = {
-      id: empId,
-      name: form.name.trim(),
-      phone: form.phone.trim(),
-      role: form.role,
-      monthlySalary: Number.parseFloat(form.monthlySalary) || 0,
-      joiningDate: form.joiningDate,
-      userId,
-    };
-
+    let photoRef: string | undefined;
     if (photoFile) {
       setUploading(true);
       try {
-        const url = await uploadPhoto(photoFile);
-        newEmp.photoRef = url;
+        photoRef = await uploadPhoto(photoFile);
       } catch (_err) {
         console.error(_err);
         toast.error(
@@ -174,7 +160,70 @@ export function Employees({ onViewEmployee }: Props) {
       }
     }
 
-    addAuthUser(newUser);
+    // Phase 18B: Supabase is now authoritative for the employees table.
+    // No Zustand mutation happens until the remote write actually
+    // succeeds - a rejected/failed write must leave local state exactly
+    // as it was, not fake success.
+    const result = await createEmployeeRemote({
+      name: form.name.trim(),
+      phone: form.phone.trim(),
+      role: form.role,
+      monthlySalary: Number.parseFloat(form.monthlySalary) || 0,
+      joiningDate: form.joiningDate,
+      // No DB representation for userId - left unset here, filled in
+      // below from the real Supabase Auth account created via
+      // createOrgUser() (same provisioning path as Settings -> Users;
+      // see settingsUsersApi.ts). employees has no user_id column, so
+      // this stays a local/Zustand-only field - the real, DB-enforced
+      // link is profiles.employee_id, set by the Edge Function.
+      userId: "",
+      photoRef,
+      designation: form.designation.trim() || undefined,
+      bloodGroup: form.bloodGroup.trim() || undefined,
+      emergencyContactName: form.emergencyContactName.trim() || undefined,
+      emergencyContactRelation:
+        form.emergencyContactRelation.trim() || undefined,
+      emergencyContactPhone: form.emergencyContactPhone.trim() || undefined,
+    });
+
+    if (result.status === "unauthenticated") {
+      toast.error("Not signed in to Supabase - employee was not saved.");
+      return;
+    }
+    if (result.status === "error" || !result.data) {
+      toast.error(
+        `Could not save employee: ${result.error ?? "unknown error"}`,
+      );
+      return;
+    }
+
+    const newEmp = result.data;
+
+    // Single, real account-provisioning path — the same Edge Function
+    // Settings -> Users uses. The employee record above is already saved
+    // remotely; a failure here is reported but does not undo it (there is
+    // no clean way to "roll back" a Supabase Auth account, so a saved
+    // employee with no login yet is the correct failure mode, not a
+    // silently-created local-only account - see settingsUsersApi.ts).
+    const accountResult = await createOrgUser(
+      form.username.trim(),
+      form.password.trim(),
+      form.role,
+      newEmp.id,
+    );
+    if (accountResult.status === "success" && accountResult.data) {
+      newEmp.userId = accountResult.data.id;
+      if (accountResult.data.employeeLinkError) {
+        toast.error(
+          `Login account created, but could not be linked to this employee: ${accountResult.data.employeeLinkError}`,
+        );
+      }
+    } else {
+      toast.error(
+        `Employee saved, but the login account could not be created: ${accountResult.error ?? "unknown error"}. You can create it separately from Settings → Users.`,
+      );
+    }
+
     addEmployee(newEmp);
     console.log("SAVE COMPLETE");
     toast.success(`Employee ${newEmp.name} added`);
@@ -190,6 +239,11 @@ export function Employees({ onViewEmployee }: Props) {
       joiningDate: "",
       username: "",
       password: "",
+      designation: "",
+      bloodGroup: "",
+      emergencyContactName: "",
+      emergencyContactRelation: "",
+      emergencyContactPhone: "",
     });
   };
 
@@ -202,6 +256,11 @@ export function Employees({ onViewEmployee }: Props) {
       monthlySalary: String(emp.monthlySalary || ""),
       joiningDate: emp.joiningDate || "",
       photo: emp.photoRef || null,
+      designation: emp.designation || "",
+      bloodGroup: emp.bloodGroup || "",
+      emergencyContactName: emp.emergencyContactName || "",
+      emergencyContactRelation: emp.emergencyContactRelation || "",
+      emergencyContactPhone: emp.emergencyContactPhone || "",
     });
     setNewPhotoFile(null);
     setEditDialogOpen(true);
@@ -255,7 +314,9 @@ export function Employees({ onViewEmployee }: Props) {
     } catch (_err) {
       console.warn("Photo update failed, keeping old photo");
     }
-    updateEmployee({
+    // Phase 18B: remote-first, same discipline as create - Zustand is
+    // only updated with what Supabase actually persisted, never before.
+    const result = await updateEmployeeRemote({
       ...editingEmployee,
       name: editForm.name.trim(),
       phone: editForm.phone.trim(),
@@ -263,7 +324,28 @@ export function Employees({ onViewEmployee }: Props) {
       monthlySalary: Number.parseFloat(editForm.monthlySalary) || 0,
       joiningDate: editForm.joiningDate,
       photoRef: photoUrl || editingEmployee.photoRef,
+      designation: editForm.designation.trim() || undefined,
+      bloodGroup: editForm.bloodGroup.trim() || undefined,
+      emergencyContactName: editForm.emergencyContactName.trim() || undefined,
+      emergencyContactRelation:
+        editForm.emergencyContactRelation.trim() || undefined,
+      emergencyContactPhone: editForm.emergencyContactPhone.trim() || undefined,
     });
+
+    if (result.status === "unauthenticated") {
+      toast.error("Not signed in to Supabase - changes were not saved.");
+      return;
+    }
+    if (result.status === "error" || !result.data) {
+      toast.error(
+        `Could not update employee: ${result.error ?? "unknown error"}`,
+      );
+      return;
+    }
+
+    // Preserve the local-only userId link (no DB representation - Phase
+    // 18A/18B mapping) since the returned row can't carry it.
+    updateEmployee({ ...result.data, userId: editingEmployee.userId });
     console.log("SAVE COMPLETE");
     toast.success("Employee updated");
     setEditDialogOpen(false);
@@ -401,13 +483,48 @@ export function Employees({ onViewEmployee }: Props) {
                           variant="ghost"
                           size="sm"
                           className="h-7 px-2"
-                          onClick={() => {
+                          onClick={async () => {
                             if (
                               !window.confirm(
                                 `Are you sure you want to delete employee "${emp.name}"? This cannot be undone.`,
                               )
                             )
                               return;
+                            // Same local-only guard the store's own
+                            // deleteEmployee() already enforces, checked
+                            // first so a blocked delete never attempts a
+                            // remote call at all.
+                            const s = useStore.getState();
+                            const hasSalary = (s.salaryPayments || []).some(
+                              (sp) => sp.employeeId === emp.id,
+                            );
+                            const hasAdvance = (s.advanceRecords || []).some(
+                              (ar) => ar.employeeId === emp.id,
+                            );
+                            if (hasSalary || hasAdvance) {
+                              toast.error(
+                                "Cannot delete employee. Linked salary payments or advance records exist.",
+                              );
+                              return;
+                            }
+                            // Phase 18B: remote-first, same discipline as
+                            // create/update.
+                            const result = await deleteEmployeeRemote(emp.id);
+                            if (result.status === "unauthenticated") {
+                              toast.error(
+                                "Not signed in to Supabase - employee was not deleted.",
+                              );
+                              return;
+                            }
+                            if (
+                              result.status === "error" ||
+                              result.status === "denied"
+                            ) {
+                              toast.error(
+                                `Could not delete employee: ${result.error ?? "unknown error"}`,
+                              );
+                              return;
+                            }
                             deleteEmployee(emp.id);
                             toast.success("Employee deleted");
                           }}
@@ -555,13 +672,93 @@ export function Employees({ onViewEmployee }: Props) {
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Password *</Label>
+                  <Label>Temporary Password *</Label>
                   <Input
                     type="password"
-                    placeholder="set password"
+                    placeholder="At least 8 characters"
                     value={form.password}
                     onChange={(e) =>
                       setForm((f) => ({ ...f, password: e.target.value }))
+                    }
+                    data-ocid="employees.input"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Designation</Label>
+                  <Input
+                    placeholder="e.g. Senior Fabricator"
+                    value={form.designation}
+                    onChange={(e) =>
+                      setForm((f) => ({ ...f, designation: e.target.value }))
+                    }
+                    data-ocid="employees.input"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Blood Group</Label>
+                  <Select
+                    value={form.bloodGroup}
+                    onValueChange={(v) =>
+                      setForm((f) => ({ ...f, bloodGroup: v }))
+                    }
+                  >
+                    <SelectTrigger data-ocid="employees.select">
+                      <SelectValue placeholder="Select blood group" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"].map(
+                        (bg) => (
+                          <SelectItem key={bg} value={bg}>
+                            {bg}
+                          </SelectItem>
+                        ),
+                      )}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5 col-span-2 pt-1">
+                  <Label className="text-xs text-muted-foreground uppercase tracking-wide">
+                    Emergency Contact
+                  </Label>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Contact Name</Label>
+                  <Input
+                    placeholder="e.g. Sunita Sharma"
+                    value={form.emergencyContactName}
+                    onChange={(e) =>
+                      setForm((f) => ({
+                        ...f,
+                        emergencyContactName: e.target.value,
+                      }))
+                    }
+                    data-ocid="employees.input"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Relationship</Label>
+                  <Input
+                    placeholder="e.g. Spouse"
+                    value={form.emergencyContactRelation}
+                    onChange={(e) =>
+                      setForm((f) => ({
+                        ...f,
+                        emergencyContactRelation: e.target.value,
+                      }))
+                    }
+                    data-ocid="employees.input"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Emergency Phone</Label>
+                  <Input
+                    placeholder="9876543210"
+                    value={form.emergencyContactPhone}
+                    onChange={(e) =>
+                      setForm((f) => ({
+                        ...f,
+                        emergencyContactPhone: e.target.value,
+                      }))
                     }
                     data-ocid="employees.input"
                   />
@@ -713,6 +910,89 @@ export function Employees({ onViewEmployee }: Props) {
                       }))
                     }
                     data-ocid="employees.edit.joiningdate.input"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Designation</Label>
+                  <Input
+                    placeholder="e.g. Senior Fabricator"
+                    value={editForm.designation}
+                    onChange={(e) =>
+                      setEditForm((f) => ({
+                        ...f,
+                        designation: e.target.value,
+                      }))
+                    }
+                    data-ocid="employees.edit.designation.input"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Blood Group</Label>
+                  <Select
+                    value={editForm.bloodGroup}
+                    onValueChange={(v) =>
+                      setEditForm((f) => ({ ...f, bloodGroup: v }))
+                    }
+                  >
+                    <SelectTrigger data-ocid="employees.edit.bloodgroup.select">
+                      <SelectValue placeholder="Select blood group" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"].map(
+                        (bg) => (
+                          <SelectItem key={bg} value={bg}>
+                            {bg}
+                          </SelectItem>
+                        ),
+                      )}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5 col-span-2 pt-1">
+                  <Label className="text-xs text-muted-foreground uppercase tracking-wide">
+                    Emergency Contact
+                  </Label>
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Contact Name</Label>
+                  <Input
+                    placeholder="e.g. Sunita Sharma"
+                    value={editForm.emergencyContactName}
+                    onChange={(e) =>
+                      setEditForm((f) => ({
+                        ...f,
+                        emergencyContactName: e.target.value,
+                      }))
+                    }
+                    data-ocid="employees.edit.emergency_name.input"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Relationship</Label>
+                  <Input
+                    placeholder="e.g. Spouse"
+                    value={editForm.emergencyContactRelation}
+                    onChange={(e) =>
+                      setEditForm((f) => ({
+                        ...f,
+                        emergencyContactRelation: e.target.value,
+                      }))
+                    }
+                    data-ocid="employees.edit.emergency_relation.input"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Emergency Phone</Label>
+                  <Input
+                    placeholder="9876543210"
+                    value={editForm.emergencyContactPhone}
+                    onChange={(e) =>
+                      setEditForm((f) => ({
+                        ...f,
+                        emergencyContactPhone: e.target.value,
+                      }))
+                    }
+                    data-ocid="employees.edit.emergency_phone.input"
                   />
                 </div>
               </div>

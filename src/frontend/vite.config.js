@@ -42,6 +42,11 @@ export default defineConfig({
     environment("all", { prefix: "DFX_" }),
     environment(["II_URL"]),
     environment(["STORAGE_GATEWAY_URL"]),
+    // Phase 17A: browser-safe Supabase config only (project URL + anon/
+    // publishable key). Never add SUPABASE_SERVICE_ROLE_KEY or a DB
+    // password/connection string here - this list is exposed to the
+    // client bundle exactly like the CANISTER_/DFX_ prefixes above.
+    environment(["SUPABASE_URL", "SUPABASE_ANON_KEY"]),
     react(),
   ],
   resolve: {

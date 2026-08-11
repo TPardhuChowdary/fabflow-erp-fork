@@ -295,6 +295,14 @@ export function DeliveryChallanPrintView({
               <div
                 style={{ lineHeight: "1.8", color: "#444", fontSize: "11px" }}
               >
+                <div>
+                  <strong>Dispatched Via:</strong>{" "}
+                  {challan.dispatchMethod ?? "Company Vehicle"}
+                </div>
+                {/* Only the fields relevant to the dispatch method above are
+                    ever populated (see buildDispatchFields in
+                    pages/DeliveryChallans.tsx), so this conditional-on-value
+                    rendering naturally shows only what applies. */}
                 {challan.vehicleNo && (
                   <div>
                     <strong>Vehicle No:</strong> {challan.vehicleNo}
@@ -303,6 +311,37 @@ export function DeliveryChallanPrintView({
                 {challan.driverName && (
                   <div>
                     <strong>Driver:</strong> {challan.driverName}
+                  </div>
+                )}
+                {challan.courierCompany && (
+                  <div>
+                    <strong>Courier Company:</strong> {challan.courierCompany}
+                  </div>
+                )}
+                {challan.trackingNumber && (
+                  <div>
+                    <strong>Tracking No:</strong> {challan.trackingNumber}
+                  </div>
+                )}
+                {challan.transportCompany && (
+                  <div>
+                    <strong>Transport Company:</strong>{" "}
+                    {challan.transportCompany}
+                  </div>
+                )}
+                {challan.lrNumber && (
+                  <div>
+                    <strong>LR No:</strong> {challan.lrNumber}
+                  </div>
+                )}
+                {challan.collectedBy && (
+                  <div>
+                    <strong>Collected By:</strong> {challan.collectedBy}
+                  </div>
+                )}
+                {challan.mobileNumber && (
+                  <div>
+                    <strong>Mobile:</strong> {challan.mobileNumber}
                   </div>
                 )}
                 {challan.receiverName && (

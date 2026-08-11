@@ -2,24 +2,32 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Factory, Lock, User } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useAuth } from "../AuthContext";
 
 export function LoginPage() {
-  const { login } = useAuth();
+  const { login, authNotice, clearAuthNotice } = useAuth();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
+  // Show whatever passive-sign-out notice (deactivated account, config
+  // error) triggered a bounce back to this screen exactly once, then
+  // clear it from context so it doesn't reappear on a later remount.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: run once
+  useEffect(() => {
+    return () => clearAuthNotice();
+  }, []);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
     setLoading(true);
-    const ok = await login(username.trim(), password);
+    const result = await login(username.trim(), password);
     setLoading(false);
-    if (!ok) {
-      setError("Invalid username or password.");
+    if (!result.ok) {
+      setError(result.error || "Invalid username or password.");
     }
   };
 
@@ -75,12 +83,12 @@ export function LoginPage() {
               </div>
             </div>
 
-            {error && (
+            {(error || authNotice) && (
               <p
                 className="text-sm text-destructive"
                 data-ocid="login.error_state"
               >
-                {error}
+                {error || authNotice}
               </p>
             )}
 
@@ -93,17 +101,6 @@ export function LoginPage() {
               {loading ? "Signing in..." : "Sign In"}
             </Button>
           </form>
-        </div>
-
-        <div className="mt-4 p-3 rounded-lg bg-muted/50 border border-border text-xs text-muted-foreground">
-          <p className="font-medium text-foreground mb-1">Demo Credentials</p>
-          <p>
-            Admin: <span className="font-mono">admin</span> /{" "}
-            <span className="font-mono">admin123</span>
-          </p>
-          <p className="mt-0.5 text-muted-foreground/70">
-            Designer, Worker, Accountant accounts also available
-          </p>
         </div>
 
         <p className="text-center text-xs text-muted-foreground mt-6">

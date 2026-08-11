@@ -44,6 +44,11 @@ import { createRoot } from "react-dom/client";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
 import { CompanyPOPrintView } from "../components/CompanyPOPrintView";
+import {
+  createCompanyPORemote,
+  deleteCompanyPORemote,
+  updateCompanyPORemote,
+} from "../lib/companyPosApi";
 import { CompanyPODocContent } from "../lib/documentRenderers";
 import {
   openShareModalV2,
@@ -346,8 +351,7 @@ function CompanyPOsInner() {
     }
   };
 
-  const handleSave = () => {
-    console.log("FORM SUBMITTED");
+  const handleSave = async () => {
     if (isSaving) return;
     setIsSaving(true);
     try {
@@ -383,7 +387,10 @@ function CompanyPOsInner() {
       const computedGrand = computedSubtotal + computedGst;
 
       if (editing) {
-        updateCompanyPO({
+        // Phase 21B — remote-first. cpoNumber is intentionally not part
+        // of `form` and stays as editing.cpoNumber - the PO number is
+        // immutable after creation, same as before this phase.
+        const result = await updateCompanyPORemote({
           ...editing,
           ...form,
           items: itemsWithAmounts,
@@ -392,10 +399,27 @@ function CompanyPOsInner() {
           grandTotal: computedGrand,
           file: formFile,
         });
+        if (result.status === "unauthenticated") {
+          toast.error("Not signed in to the server - PO was not updated");
+          return;
+        }
+        if (result.status === "denied" || result.status === "error") {
+          toast.error(result.error ?? "Could not update PO");
+          return;
+        }
+        if (!result.data) {
+          toast.error("Could not update PO");
+          return;
+        }
+        updateCompanyPO(result.data);
         toast.success("PO updated.");
       } else {
-        addCompanyPO({
-          id: `cpo-${Date.now()}`,
+        // Phase 21B — remote-first, with bounded retry-on-conflict for
+        // the CPO number handled inside createCompanyPORemote(). The
+        // number generated here from local state is only the *initial*
+        // attempt - on a collision the API module re-derives it from
+        // actual server state, never from this stale guess.
+        const result = await createCompanyPORemote({
           cpoNumber: genCpoNumber(),
           ...form,
           items: itemsWithAmounts,
@@ -403,23 +427,43 @@ function CompanyPOsInner() {
           gstAmount: computedGst,
           grandTotal: computedGrand,
           file: formFile,
-          createdAt: Date.now(),
         });
+        if (result.status === "unauthenticated") {
+          toast.error("Not signed in to the server - PO was not saved");
+          return;
+        }
+        if (result.status === "denied" || result.status === "error") {
+          toast.error(result.error ?? "Could not save PO");
+          return;
+        }
+        if (!result.data) {
+          toast.error("Could not save PO");
+          return;
+        }
+        addCompanyPO(result.data);
         toast.success("PO created.");
       }
       setDialogOpen(false);
-      console.log("SAVE COMPLETE");
     } finally {
       setIsSaving(false);
     }
   };
 
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
     if (!pDelete) {
       alert("Access restricted");
       return;
     }
     if (!window.confirm("Delete this Purchase Order?")) return;
+    const result = await deleteCompanyPORemote(id);
+    if (result.status === "unauthenticated") {
+      toast.error("Not signed in to the server - PO was not deleted");
+      return;
+    }
+    if (result.status === "denied" || result.status === "error") {
+      toast.error(result.error ?? "Could not delete PO");
+      return;
+    }
     deleteCompanyPO(id);
     toast.success("PO deleted.");
   };
@@ -920,7 +964,7 @@ function CompanyPOsInner() {
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <h3 className="font-semibold text-sm">Items</h3>
-                  <Button variant="outline" size="sm" onClick={addItem}>
+                  <Button type="button" variant="outline" size="sm" onClick={addItem}>
                     <Plus className="w-3.5 h-3.5 mr-1" /> Add Item
                   </Button>
                 </div>

@@ -98,6 +98,92 @@ export const MODULE_PERMISSIONS: Record<
     category: "System",
     actions: ["view", "edit"],
   },
+  machinery: {
+    label: "Machinery",
+    category: "Production",
+    actions: [
+      "view",
+      "create",
+      "edit",
+      "delete",
+      "service_create",
+      "service_approve",
+      "upload",
+    ],
+  },
+  export_engine: {
+    label: "Export / Print Engine",
+    category: "System",
+    actions: ["view", "create", "download", "print"],
+  },
+  salary_advance: {
+    label: "Salary Advances",
+    category: "HR",
+    actions: ["view", "create", "edit", "delete", "recover"],
+  },
+  expense_float: {
+    label: "Expense Float",
+    category: "Finance",
+    actions: ["view", "create", "edit", "delete", "settle"],
+  },
+  quality_characteristics: {
+    label: "Quality Characteristic Library (QMS)",
+    category: "Quality Management (QMS)",
+    actions: ["view", "create", "edit", "delete"],
+  },
+  inspection_sheets: {
+    label: "Inspection Sheets (QMS)",
+    category: "Quality Management (QMS)",
+    actions: [
+      "view",
+      "generate",
+      "complete",
+      "upload",
+      "print",
+      "review",
+      "approve",
+      "assign",
+      // Phase 32 (Task #176) - supervisor/admin Production-gate override.
+      // The permission itself was already approved and seeded server-side
+      // in Task #170's migration (RLS on project_qms_inspection_overrides
+      // requires it); this entry only completes its frontend wiring so it
+      // is checkable via hasPermission() and assignable per-user in the
+      // Settings > Users permission editor, exactly like every other
+      // granular permission here. No ROLE_DEFAULTS grants it by default -
+      // only admin (which bypasses all checks) has it until an admin
+      // explicitly assigns it to a specific user.
+      "override",
+    ],
+  },
+  drawing_editor: {
+    label: "Engineering Drawing Editor",
+    category: "Production",
+    actions: ["view", "create", "edit", "export", "delete"],
+  },
+  ledger: {
+    label: "Ledger",
+    category: "Finance",
+    actions: ["view", "export", "print", "manage"],
+  },
+  // Priority 1 (real Supabase Auth): the DB has always seeded these exact
+  // 7 actions on the `users` module (phase1_auth_permissions_rls_v5_FINAL.sql)
+  // and every RLS policy on profiles/roles/user_roles/user_permission_overrides
+  // already calls has_permission('users', ...) - this entry was simply
+  // missing from the frontend registry, so Settings -> Users had nothing
+  // to gate on and fell back to a hardcoded role === "Admin" check.
+  users: {
+    label: "User Management",
+    category: "System",
+    actions: [
+      "view",
+      "create",
+      "edit",
+      "delete",
+      "activate",
+      "deactivate",
+      "assign_roles",
+    ],
+  },
 };
 
 function buildPerms(allowed: string[]): Record<string, boolean> {
@@ -138,12 +224,33 @@ export const ROLE_DEFAULTS: Record<string, Record<string, boolean>> = {
     "material_requisitions.create",
     "inventory.view",
     "employees.view",
+    "machinery.view",
+    "machinery.service_create",
+    "machinery.upload",
+    "inspection_sheets.view",
+    "inspection_sheets.complete",
+    "inspection_sheets.upload",
+    "inspection_sheets.print",
+    "drawing_editor.view",
+    "drawing_editor.create",
+    "drawing_editor.edit",
+    "drawing_editor.export",
   ]),
   quality: buildPerms([
     "projects.view",
     "production.view",
     "quality_inspection.*",
     "delivery_challans.view",
+    "quality_characteristics.*",
+    "inspection_sheets.view",
+    "inspection_sheets.generate",
+    "inspection_sheets.complete",
+    "inspection_sheets.upload",
+    "inspection_sheets.print",
+    "inspection_sheets.review",
+    // QA Manager role: only they (besides admin) may approve/close a sheet
+    // or create a new revision of a locked one.
+    "inspection_sheets.approve",
   ]),
   dispatch: buildPerms([
     "projects.view",
@@ -155,11 +262,21 @@ export const ROLE_DEFAULTS: Record<string, Record<string, boolean>> = {
     "payments.*",
     "payables.*",
     "petty_expenses.*",
+    "expense_float.*",
+    "salary_advance.view",
+    "salary_advance.recover",
     "customers.view",
     "projects.view",
     "employees.view",
+    "machinery.view",
+    "export_engine.*",
+    "ledger.*",
   ]),
-  employee: buildPerms(["employees.view", "petty_expenses.create"]),
+  employee: buildPerms([
+    "employees.view",
+    "petty_expenses.create",
+    "expense_float.view",
+  ]),
   // Legacy role mappings
   Admin: buildPerms(["*"]),
   Accountant: buildPerms([
@@ -170,6 +287,7 @@ export const ROLE_DEFAULTS: Record<string, Record<string, boolean>> = {
     "projects.view",
     "employees.view",
     "settings.view",
+    "ledger.*",
   ]),
   Designer: buildPerms(["projects.view", "projects.edit", "production.view"]),
   Worker: buildPerms(["projects.view", "production.view"]),

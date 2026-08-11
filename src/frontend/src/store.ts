@@ -1,9 +1,17 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+// Phase 22 — repeatProject creates a real Project row remotely; every
+// other domain's remote calls are initiated from page components, but
+// repeatProject's local-only child-cloning logic (design files/BOM
+// items/costing/production stages - none of those domains migrated) is
+// tightly coupled to store.ts's own synchronous local-state reads, so
+// the remote call is made from here instead of relocating that logic.
+import { createProjectRemote, updateProjectRemote } from "./lib/projectsApi";
 import type {
   AdvanceRecord,
   AppSettings,
   AttendanceRecord,
+  AuditLogEntry,
   AuthUser,
   BomItem,
   BomRequisition,
@@ -13,10 +21,18 @@ import type {
   DeliveryChallan,
   DesignFile,
   Employee,
+  EmployeeDocument,
+  ExpenseFloat,
+  ExpenseFloatStatus,
+  ExportJob,
   InternalCosting,
   InventoryItem,
   InventoryPurchase,
   Invoice,
+  Machine,
+  MachineCondition,
+  MachineDocument,
+  MachineUsageLog,
   MasterPO,
   MaterialPurchase,
   MaterialRequisition,
@@ -26,7 +42,10 @@ import type {
   PayablePayment,
   Payment,
   PettyExpense,
+  ProductionMovement,
   Project,
+  ProjectActivity,
+  ProjectActivityType,
   ProjectDelivery,
   ProjectItem,
   ProjectPO,
@@ -36,9 +55,16 @@ import type {
   PurchaseOrder,
   QualityInspection,
   Quotation,
+  QuotationPurchaseOrder,
+  QuotationRevision,
   ReminderLog,
+  SalaryAdvance,
   SalaryPayment,
+  ScrapRecord,
+  ServicePart,
+  ServiceRecord,
   StageTransaction,
+  StockReservation,
   Vendor,
 } from "./types";
 
@@ -239,6 +265,7 @@ const mkStage = (
   receivedDateTime: "",
   startTime: "",
   endTime: "",
+  stageId: crypto.randomUUID(),
 });
 
 const sampleProjectProductions: ProjectProduction[] = [
@@ -366,6 +393,16 @@ const samplePayablePayments: PayablePayment[] = [
   },
 ];
 
+// Phase 27 — shared literal union for every hydration-state block's
+// `status` field, replacing the repeated inline union every earlier
+// phase wrote out by hand.
+type HydrationStatusValue =
+  | "idle"
+  | "loading"
+  | "success"
+  | "error"
+  | "unauthenticated";
+
 interface DocCounters {
   QT: number;
   MR: number;
@@ -373,7 +410,141 @@ interface DocCounters {
   INV: number;
   PAY: number;
   PROJ: number;
+  MCH: number;
+  SVC: number;
+  EMP: number;
 }
+
+const sampleMachines: Machine[] = [
+  {
+    id: "mch-1",
+    machineCode: "MCH-001",
+    name: "Bystronic Fiber Laser 3015",
+    type: "Laser Cutting",
+    brand: "Bystronic",
+    model: "ByStar Fiber 3015",
+    serialNumber: "BST-2021-FL-4421",
+    assetId: "FAB-LASER-01",
+    purchaseDate: "2021-06-15",
+    purchaseCost: 4500000,
+    purchaseVendorName: "Bystronic India",
+    currentStatus: "Operational",
+    location: "Bay 1 - Cutting Section",
+    department: "Cutting",
+    warrantyExpiry: "2024-06-15",
+    amcVendorName: "Bystronic India",
+    amcStartDate: "2024-07-01",
+    amcEndDate: "2025-06-30",
+    amcCost: 85000,
+    amcCoverage: "Annual preventive maintenance, emergency breakdowns",
+    serviceIntervalDays: 90,
+    lastServiceDate: "2026-03-10",
+    nextServiceDue: "2026-06-10",
+    totalRunningHours: 4820,
+    hourlyRate: 350,
+    notes: "Primary laser cutting machine. Handle with care.",
+    isActive: true,
+    createdAt: Date.now() - 86400000 * 180,
+    updatedAt: Date.now() - 86400000 * 30,
+  },
+  {
+    id: "mch-2",
+    machineCode: "MCH-002",
+    name: "Amada HFE 100-3 CNC Press Brake",
+    type: "Bending",
+    brand: "Amada",
+    model: "HFE 100-3",
+    serialNumber: "AMD-2020-PB-8812",
+    assetId: "FAB-BEND-01",
+    purchaseDate: "2020-11-20",
+    purchaseCost: 2800000,
+    purchaseVendorName: "Amada India",
+    currentStatus: "Operational",
+    location: "Bay 2 - Bending Section",
+    department: "Bending",
+    warrantyExpiry: "2023-11-20",
+    serviceIntervalDays: 120,
+    lastServiceDate: "2026-01-15",
+    nextServiceDue: "2026-05-15",
+    totalRunningHours: 6200,
+    hourlyRate: 200,
+    notes: "100T press brake. 3-axis back gauge.",
+    isActive: true,
+    createdAt: Date.now() - 86400000 * 200,
+    updatedAt: Date.now() - 86400000 * 60,
+  },
+  {
+    id: "mch-3",
+    machineCode: "MCH-003",
+    name: "Lincoln MIG Welding Machine",
+    type: "Welding",
+    brand: "Lincoln Electric",
+    model: "Power MIG 350MP",
+    serialNumber: "LNC-2022-WLD-0091",
+    assetId: "FAB-WELD-01",
+    purchaseDate: "2022-03-01",
+    purchaseCost: 180000,
+    currentStatus: "Operational",
+    location: "Bay 3 - Welding Section",
+    department: "Welding",
+    serviceIntervalDays: 180,
+    lastServiceDate: "2025-12-01",
+    nextServiceDue: "2026-06-01",
+    totalRunningHours: 2100,
+    hourlyRate: 80,
+    isActive: true,
+    createdAt: Date.now() - 86400000 * 120,
+    updatedAt: Date.now() - 86400000 * 90,
+  },
+];
+
+const sampleServiceRecords: ServiceRecord[] = [
+  {
+    id: "svc-1",
+    machineId: "mch-1",
+    serviceNumber: "SVC-001",
+    serviceDate: "2026-03-10",
+    serviceType: "Preventive",
+    performedBy: "AMC Vendor",
+    vendorName: "Bystronic India",
+    technicianName: "Ramesh Kumar",
+    technicianContact: "9876512345",
+    serviceCost: 12000,
+    travelCost: 2000,
+    downtimeHours: 4,
+    resolutionDetails:
+      "Replaced nozzle, cleaned lens assembly, checked beam alignment. Machine calibrated.",
+    machineCondition: "Good",
+    nextServiceDue: "2026-06-10",
+    runningHoursAtService: 4820,
+    notes: "Quarterly AMC visit. All parameters within spec.",
+    status: "Completed",
+    createdBy: "admin",
+    createdAt: Date.now() - 86400000 * 82,
+  },
+  {
+    id: "svc-2",
+    machineId: "mch-2",
+    serviceNumber: "SVC-002",
+    serviceDate: "2026-01-15",
+    serviceType: "Corrective",
+    performedBy: "External Vendor",
+    vendorName: "Amada India",
+    technicianName: "Suresh Patil",
+    serviceCost: 28000,
+    travelCost: 5000,
+    downtimeHours: 16,
+    breakdownCause: "Back-gauge servo motor fault. Y-axis movement erratic.",
+    resolutionDetails:
+      "Replaced servo drive module. Recalibrated back-gauge positioning. Full test run completed.",
+    machineCondition: "Good",
+    nextServiceDue: "2026-05-15",
+    runningHoursAtService: 6200,
+    status: "Completed",
+    createdBy: "admin",
+    createdAt: Date.now() - 86400000 * 136,
+  },
+];
 
 const sampleEmployees: Employee[] = [
   {
@@ -434,6 +605,8 @@ const defaultSettings: AppSettings = {
 interface Store {
   customers: Customer[];
   quotations: Quotation[];
+  quotationRevisions: QuotationRevision[];
+  quotationPurchaseOrders: QuotationPurchaseOrder[];
   purchaseOrders: PurchaseOrder[];
   masterPOs: MasterPO[];
   companyPOs: CompanyPO[];
@@ -463,6 +636,11 @@ interface Store {
   updateQuotation: (q: Quotation) => void;
   deleteQuotation: (id: string) => void;
 
+  addQuotationRevision: (r: QuotationRevision) => void;
+  updateQuotationRevision: (r: QuotationRevision) => void;
+  addQuotationPurchaseOrder: (p: QuotationPurchaseOrder) => void;
+  updateQuotationPurchaseOrder: (p: QuotationPurchaseOrder) => void;
+
   addPurchaseOrder: (p: PurchaseOrder) => void;
   updatePurchaseOrder: (p: PurchaseOrder) => void;
   addMasterPO: (m: MasterPO) => void;
@@ -481,6 +659,11 @@ interface Store {
   deleteInvoice: (id: string) => void;
 
   addPayment: (p: Payment) => void;
+  // Local-only cleanup for the ON DELETE CASCADE that already happened
+  // server-side (payments_invoice_id_fkey - Phase 9) when an invoice is
+  // deleted - keeps the in-memory payments array from showing orphaned
+  // rows for the rest of the session, until the next hydration.
+  removePaymentsForInvoice: (invoiceId: string) => void;
 
   generateDocNo: (prefix: keyof DocCounters) => string;
 
@@ -517,6 +700,285 @@ interface Store {
   attendanceRecords: AttendanceRecord[];
   salaryPayments: SalaryPayment[];
   advanceRecords: AdvanceRecord[];
+  employeeDocuments: EmployeeDocument[];
+
+  // Phase 18 — Supabase read/hydration status for the employees domain.
+  // Observable so any component can distinguish loading/success/error/
+  // unauthenticated rather than silently guessing from the data alone.
+  employeesHydration: {
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated";
+    error?: string;
+  };
+  setEmployeesHydrationStatus: (
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated",
+    error?: string,
+  ) => void;
+  // Replaces the employees array wholesale with a Supabase-sourced result.
+  // Only ever called on a successful hydration - never on loading/error/
+  // unauthenticated, so a failed fetch never destroys existing local data.
+  setEmployeesFromServer: (employees: Employee[]) => void;
+
+  // Phase 19 — same shape as employeesHydration above, for the customers
+  // domain.
+  customersHydration: {
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated";
+    error?: string;
+  };
+  setCustomersHydrationStatus: (
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated",
+    error?: string,
+  ) => void;
+  setCustomersFromServer: (customers: Customer[]) => void;
+
+  // Phase 20 — same shape, for the inventory items domain (master-data
+  // scope only - see lib/inventoryApi.ts for the write-field boundary).
+  inventoryItemsHydration: {
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated";
+    error?: string;
+  };
+  setInventoryItemsHydrationStatus: (
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated",
+    error?: string,
+  ) => void;
+  setInventoryItemsFromServer: (items: InventoryItem[]) => void;
+
+  // Phase 21A — same shape, for the vendors domain.
+  vendorsHydration: {
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated";
+    error?: string;
+  };
+  setVendorsHydrationStatus: (
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated",
+    error?: string,
+  ) => void;
+  setVendorsFromServer: (vendors: Vendor[]) => void;
+
+  // Phase 21B — same shape, for the company POs domain.
+  companyPOsHydration: {
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated";
+    error?: string;
+  };
+  setCompanyPOsHydrationStatus: (
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated",
+    error?: string,
+  ) => void;
+  setCompanyPOsFromServer: (pos: CompanyPO[]) => void;
+
+  // Phase 22 — same shape, for the projects domain. setProjectsFromServer
+  // is NOT a wholesale replace like every prior domain: assignedEmployeeIds/
+  // pos/poNumber/poDate/poFiles have no DB column (explicitly approved
+  // Decisions 3 + the PO-fields follow-up), so it merges those five fields
+  // in from the CURRENT local project (matched by id) before replacing
+  // state - otherwise every successful hydration would silently wipe them.
+  projectsHydration: {
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated";
+    error?: string;
+  };
+  setProjectsHydrationStatus: (
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated",
+    error?: string,
+  ) => void;
+  setProjectsFromServer: (projects: Project[]) => void;
+
+  // Phase 24 — same shape, for the outsourced works domain. Unlike
+  // Projects, this IS a plain wholesale replace - every OutsourcedWork
+  // field has a real DB column, no local-only fields to merge.
+  outsourcedWorksHydration: {
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated";
+    error?: string;
+  };
+  setOutsourcedWorksHydrationStatus: (
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated",
+    error?: string,
+  ) => void;
+  setOutsourcedWorksFromServer: (works: OutsourcedWork[]) => void;
+
+  // Phase 27 Batch 1 — same shape, wholesale replace, for every
+  // Employees/Inventory/Projects-children domain in this batch.
+  advanceRecordsHydration: { status: HydrationStatusValue; error?: string };
+  setAdvanceRecordsHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setAdvanceRecordsFromServer: (records: AdvanceRecord[]) => void;
+
+  attendanceRecordsHydration: { status: HydrationStatusValue; error?: string };
+  setAttendanceRecordsHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setAttendanceRecordsFromServer: (records: AttendanceRecord[]) => void;
+
+  // employeeDocumentsHydration — NOT a plain wholesale replace:
+  // uploadedBy has no DB column (see lib/hydration.ts), merged in from
+  // current local state per document id, same shape as Projects'
+  // assignedEmployeeIds merge-exception.
+  employeeDocumentsHydration: { status: HydrationStatusValue; error?: string };
+  setEmployeeDocumentsHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setEmployeeDocumentsFromServer: (
+    docs: Omit<EmployeeDocument, "uploadedBy">[],
+  ) => void;
+
+  salaryPaymentsHydration: { status: HydrationStatusValue; error?: string };
+  setSalaryPaymentsHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setSalaryPaymentsFromServer: (payments: SalaryPayment[]) => void;
+
+  inventoryPurchasesHydration: { status: HydrationStatusValue; error?: string };
+  setInventoryPurchasesHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setInventoryPurchasesFromServer: (purchases: InventoryPurchase[]) => void;
+
+  inventoryUsagesHydration: { status: HydrationStatusValue; error?: string };
+  setInventoryUsagesHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setInventoryUsagesFromServer: (usages: MaterialUsage[]) => void;
+
+  bomItemsHydration: { status: HydrationStatusValue; error?: string };
+  setBomItemsHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setBomItemsFromServer: (items: BomItem[]) => void;
+
+  bomRequisitionsHydration: { status: HydrationStatusValue; error?: string };
+  setBomRequisitionsHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setBomRequisitionsFromServer: (reqs: BomRequisition[]) => void;
+
+  // project_employees — no dedicated array; feeds Project.
+  // assignedEmployeeIds only (see lib/hydration.ts's ProjectEmployeeRow).
+  projectEmployeesHydration: { status: HydrationStatusValue; error?: string };
+  setProjectEmployeesHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setProjectEmployeesFromServer: (
+    pairs: { projectId: string; employeeId: string }[],
+  ) => void;
+
+  // Phase 27 Batch 2 — quotations, quotation_revisions, master_pos,
+  // quotation_purchase_orders, project_purchase_orders.
+  // quotationsHydration — NOT a plain wholesale replace: approvedBy
+  // (display username) and recordedPO (legacy, never written) have no
+  // DB column, merged in from current local state per quotation id, same
+  // shape as employeeDocumentsHydration's uploadedBy merge-exception.
+  quotationsHydration: { status: HydrationStatusValue; error?: string };
+  setQuotationsHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setQuotationsFromServer: (quotations: Quotation[]) => void;
+
+  // quotationRevisionsHydration — NOT a plain wholesale replace:
+  // createdBy (display username) has no DB column, merged in from
+  // current local state per revision id.
+  quotationRevisionsHydration: { status: HydrationStatusValue; error?: string };
+  setQuotationRevisionsHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setQuotationRevisionsFromServer: (revisions: QuotationRevision[]) => void;
+
+  // masterPOsHydration — plain wholesale replace. sharedPoId has no DB
+  // gap (derived from the row's own id in hydration.ts), nothing to merge.
+  masterPOsHydration: { status: HydrationStatusValue; error?: string };
+  setMasterPOsHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setMasterPOsFromServer: (pos: MasterPO[]) => void;
+
+  // quotationPurchaseOrdersHydration — NOT a plain wholesale replace:
+  // createdBy (display username) has no DB column, merged in from
+  // current local state per PO id.
+  quotationPurchaseOrdersHydration: {
+    status: HydrationStatusValue;
+    error?: string;
+  };
+  setQuotationPurchaseOrdersHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setQuotationPurchaseOrdersFromServer: (pos: QuotationPurchaseOrder[]) => void;
+
+  // project_purchase_orders — no dedicated array; feeds Project.pos only
+  // (see lib/hydration.ts's ProjectPurchaseOrderRow), same shape as
+  // project_employees feeding Project.assignedEmployeeIds.
+  projectPurchaseOrdersHydration: {
+    status: HydrationStatusValue;
+    error?: string;
+  };
+  setProjectPurchaseOrdersHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setProjectPurchaseOrdersFromServer: (
+    pairs: { projectId: string; po: ProjectPO }[],
+  ) => void;
+
+  // Phase 27 Batch 3 — expense_floats, petty_expenses.
+  // expenseFloatsHydration — NOT a plain wholesale replace: issuedBy
+  // (display username) has no DB column, merged in from current local
+  // state per float id, same shape as employeeDocumentsHydration's
+  // uploadedBy merge-exception.
+  expenseFloatsHydration: { status: HydrationStatusValue; error?: string };
+  setExpenseFloatsHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setExpenseFloatsFromServer: (floats: ExpenseFloat[]) => void;
+
+  // pettyExpensesHydration — plain wholesale replace. Every PettyExpense
+  // field has a real DB column, nothing to merge.
+  pettyExpensesHydration: { status: HydrationStatusValue; error?: string };
+  setPettyExpensesHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setPettyExpensesFromServer: (expenses: PettyExpense[]) => void;
+
+  // Phase 27 Batch 4 — delivery_challans. Plain wholesale replace - every
+  // field has a real DB column (soId/jobId are legacy, zero live write
+  // sites, so there's nothing to merge back in even though they exist on
+  // the type).
+  deliveryChallansHydration: { status: HydrationStatusValue; error?: string };
+  setDeliveryChallansHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setDeliveryChallansFromServer: (challans: DeliveryChallan[]) => void;
+
+  // Phase 27 Batch 5 — invoices (with invoice_items decomposed/rejoined
+  // into lineItems by the hydration layer) and payments. Plain wholesale
+  // replace - every field has a real DB column (soId/invoiceNumber/
+  // bankDetails/termsAndConditions are legacy/form-only, zero live write
+  // sites, so there's nothing to merge back in even though they exist on
+  // the type).
+  invoicesHydration: { status: HydrationStatusValue; error?: string };
+  setInvoicesHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setInvoicesFromServer: (invoices: Invoice[]) => void;
+
+  paymentsHydration: { status: HydrationStatusValue; error?: string };
+  setPaymentsHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setPaymentsFromServer: (payments: Payment[]) => void;
 
   addAuthUser: (u: AuthUser) => void;
   updateAuthUser: (u: AuthUser) => void;
@@ -529,6 +991,9 @@ interface Store {
   addSalaryPayment: (p: SalaryPayment) => void;
   addAdvanceRecord: (a: AdvanceRecord) => void;
   updateAdvanceRecord: (a: AdvanceRecord) => void;
+  addEmployeeDocument: (d: EmployeeDocument) => void;
+  updateEmployeeDocument: (d: EmployeeDocument) => void;
+  deleteEmployeeDocument: (id: string) => void;
 
   // Inventory
   inventoryItems: InventoryItem[];
@@ -595,9 +1060,348 @@ interface Store {
   // Petty Expenses
   pettyExpenses: PettyExpense[];
   addPettyExpense: (e: PettyExpense) => void;
+  /** Adds several PettyExpense records in one atomic update, resolving
+   * every item's floatId against a single consistent floats snapshot
+   * (unlike calling addPettyExpense in a loop, which re-derives float
+   * status after each item and can silently strip floatId off an item
+   * added after cumulative spend already crosses into "Fully Settled").
+   * Used by the Float Settlement dialog's itemized "Purchased Items". */
+  addPettyExpensesBatch: (items: PettyExpense[]) => void;
   updatePettyExpense: (e: PettyExpense) => void;
   deletePettyExpense: (id: string) => void;
   restoreFromBackup: (data: Record<string, unknown[]>) => void;
+
+  // Audit Log
+  auditLogs: AuditLogEntry[];
+  addAuditLog: (entry: Omit<AuditLogEntry, "id" | "timestamp">) => void;
+
+  // Project Activity Log
+  addProjectActivity: (
+    projectId: string,
+    type: ProjectActivityType,
+    description: string,
+    performedBy: string,
+    metadata?: Record<string, string | number>,
+  ) => Promise<void>;
+
+  // Stock Reservations
+  stockReservations: StockReservation[];
+  reserveStock: (
+    reservation: Omit<StockReservation, "id" | "reservedAt" | "status">,
+  ) => { success: boolean; message: string };
+  releaseReservation: (reservationId: string) => void;
+  consumeReservation: (reservationId: string) => void;
+
+  // Scrap Management
+  scrapRecords: ScrapRecord[];
+  addScrapRecord: (r: ScrapRecord) => void;
+  updateScrapRecord: (r: ScrapRecord) => void;
+  deleteScrapRecord: (id: string) => void;
+
+  // Machinery Management
+  machines: Machine[];
+  serviceRecords: ServiceRecord[];
+  serviceParts: ServicePart[];
+  machineDocuments: MachineDocument[];
+  machineUsageLogs: MachineUsageLog[];
+  addMachine: (m: Machine) => void;
+  updateMachine: (m: Machine) => void;
+  deleteMachine: (id: string) => void;
+  addServiceRecord: (r: ServiceRecord) => void;
+  updateServiceRecord: (r: ServiceRecord) => void;
+  deleteServiceRecord: (id: string) => void;
+  addServicePart: (p: ServicePart) => void;
+  updateServicePart: (p: ServicePart) => void;
+  deleteServicePart: (id: string) => void;
+  addMachineDocument: (d: MachineDocument) => void;
+  deleteMachineDocument: (id: string) => void;
+  addMachineUsageLog: (l: MachineUsageLog) => void;
+  deleteMachineUsageLog: (id: string) => void;
+  reportBreakdown: (
+    machineId: string,
+    cause: string,
+    createdBy: string,
+  ) => void;
+  resolveBreakdown: (
+    machineId: string,
+    serviceRecordId: string,
+    condition: MachineCondition,
+  ) => void;
+  generateMachineCode: () => string;
+  generateServiceNumber: (machineId: string) => string;
+
+  // Export Engine
+  exportJobs: ExportJob[];
+  addExportJob: (j: ExportJob) => void;
+  updateExportJob: (j: ExportJob) => void;
+  clearExportJobs: () => void;
+
+  // Salary Advances (Feature 3)
+  salaryAdvances: SalaryAdvance[];
+  addSalaryAdvance: (a: SalaryAdvance) => void;
+  updateSalaryAdvance: (a: SalaryAdvance) => void;
+  deleteSalaryAdvance: (id: string) => void;
+
+  // Expense Floats (Feature 4)
+  expenseFloats: ExpenseFloat[];
+  addExpenseFloat: (f: ExpenseFloat) => void;
+  updateExpenseFloat: (f: ExpenseFloat) => void;
+  deleteExpenseFloat: (id: string) => void;
+  floatCounter: number;
+
+  // Production Movements (Feature 2)
+  productionMovements: ProductionMovement[];
+  addProductionMovement: (m: ProductionMovement) => void;
+
+  // Repeat Order (Feature 1)
+  repeatProject: (
+    projectId: string,
+    options: {
+      newName: string;
+      copyDesignFiles: boolean;
+      copyBOM: boolean;
+      copyCosting: boolean;
+      copyStages: boolean;
+      copyQC: boolean;
+      copyNotes: boolean;
+    },
+  ) => Promise<string | null>;
+}
+
+// Re-export MachineCondition so store users can reference it
+export type {
+  Machine,
+  ServiceRecord,
+  ServicePart,
+  MachineDocument,
+  MachineUsageLog,
+  ExportJob,
+} from "./types";
+
+/** Backfills Revision 1 (+ a PO from the old recordedPO field, if any) for
+ * any quotation that doesn't yet have a revision. Idempotent — checks
+ * existing revisions by quotationId first, so it's safe to call on every
+ * rehydrate rather than only once. New quotations created after this
+ * feature shipped already get Revision 1 at creation time in
+ * pages/Quotations.tsx, so this only ever fires for pre-existing data. */
+function migrateQuotationsToRevisions(
+  quotations: Quotation[],
+  existingRevisions: QuotationRevision[],
+  existingPOs: QuotationPurchaseOrder[],
+): {
+  revisions: QuotationRevision[];
+  purchaseOrders: QuotationPurchaseOrder[];
+} {
+  const revisions = [...existingRevisions];
+  const purchaseOrders = [...existingPOs];
+  const hasRevision = new Set(revisions.map((r) => r.quotationId));
+  for (const q of quotations) {
+    if (hasRevision.has(q.id)) continue;
+    const revisionId = `qrev-migrated-${q.id}`;
+    revisions.push({
+      id: revisionId,
+      quotationId: q.id,
+      revisionNumber: 1,
+      revisionDate:
+        q.quotationDate || new Date(q.createdAt).toISOString().split("T")[0],
+      lineItems: q.lineItems,
+      subtotal: q.subtotal,
+      gstRate: q.gstRate,
+      gstAmount: q.gstAmount,
+      totalAmount: q.totalAmount,
+      validUntil: q.validUntil,
+      terms: q.terms,
+      notes: q.notes,
+      status: q.status,
+      approvedBy: q.approvedBy,
+      approvedAt: q.approvedAt,
+      isCurrent: true,
+      createdAt: q.createdAt,
+    });
+    if (q.recordedPO) {
+      purchaseOrders.push({
+        id: `qpo-migrated-${q.id}`,
+        quotationId: q.id,
+        revisionId,
+        poNumber: q.recordedPO.poNumber,
+        poDate: q.recordedPO.poDate,
+        customerId: q.customerId,
+        files: q.recordedPO.files || [],
+        status: "Received",
+        sharedPoId: q.recordedPO.sharedPoId,
+        createdAt: q.createdAt,
+      });
+    }
+  }
+  return { revisions, purchaseOrders };
+}
+
+// ── Expense Float ↔ Expense Record linkage ──────────────────────────
+//
+// ExpenseFloat.spentAmount/balanceAmount/status are a derived read-model,
+// not independently-entered data: they're always a pure function of
+// issuedAmount, returnedAmount, and the live sum of every PettyExpense
+// whose floatId points at this float. This keeps the float and its
+// itemized purchase history from ever drifting apart.
+
+function deriveFloatTotals(
+  float: ExpenseFloat,
+  allPettyExpenses: PettyExpense[],
+): Pick<
+  ExpenseFloat,
+  "spentAmount" | "balanceAmount" | "status" | "settledAt"
+> {
+  const spentAmount = allPettyExpenses
+    .filter((e) => e.floatId === float.id)
+    .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+  const balanceRaw = float.issuedAmount - spentAmount - float.returnedAmount;
+  const balanceAmount = Math.max(0, balanceRaw);
+  const status: ExpenseFloatStatus =
+    balanceRaw <= 0
+      ? "Fully Settled"
+      : spentAmount > 0 || float.returnedAmount > 0
+        ? "Partially Settled"
+        : "Open";
+  return {
+    spentAmount,
+    balanceAmount,
+    status,
+    settledAt:
+      status === "Fully Settled" ? (float.settledAt ?? Date.now()) : undefined,
+  };
+}
+
+// Phase 27 Batch 3 note: recomputeFloats (the old per-mutation local
+// recompute helper) was removed here - its only call sites were the
+// addPettyExpense/addPettyExpensesBatch/updatePettyExpense/
+// deletePettyExpense local actions, all simplified above to plain
+// sync-from-server. deriveFloatTotals itself stays - restoreFromBackup
+// (a genuinely local, out-of-scope JSON-import feature) still needs it.
+
+/** Backfills one "legacy spend" PettyExpense (linked via floatId) for every
+ * pre-existing ExpenseFloat whose spentAmount was manually entered before
+ * Expense Records became the source of truth for float spend. Idempotent —
+ * guarded by a deterministic `pe-legacy-<floatId>` id, same convention as
+ * migrateQuotationsToRevisions above. Deliberately omits projectId so
+ * ProjectDetail's project-cost totals are never retroactively changed by
+ * this migration. Must run BEFORE any deriveFloatTotals pass — it reads
+ * each float's persisted spentAmount, which a prior recompute would have
+ * already zeroed out (nothing would be linked yet).
+ *
+ * Skips any float that already has at least one real linked PettyExpense:
+ * its spentAmount is already properly itemized (derived, not manually
+ * typed), so backfilling here would double-count that spend. */
+function migrateExpenseFloatLegacySpend(
+  floats: ExpenseFloat[],
+  existingPettyExpenses: PettyExpense[],
+): PettyExpense[] {
+  const pettyExpenses = [...existingPettyExpenses];
+  const known = new Set(pettyExpenses.map((e) => e.id));
+  const floatsWithRealLinks = new Set(
+    pettyExpenses
+      .filter((e) => e.floatId && e.id !== `pe-legacy-${e.floatId}`)
+      .map((e) => e.floatId),
+  );
+  for (const f of floats) {
+    if (f.spentAmount <= 0) continue;
+    if (floatsWithRealLinks.has(f.id)) continue;
+    const legacyId = `pe-legacy-${f.id}`;
+    if (known.has(legacyId)) continue;
+    pettyExpenses.push({
+      id: legacyId,
+      date: f.issuedDate,
+      employeeId: f.employeeId,
+      amount: f.spentAmount,
+      expenseType: "Misc",
+      expenseMode: "Company Expense",
+      floatId: f.id,
+      notes:
+        "Legacy spend migrated from float's manually-entered Spent Amount (pre-dates itemized Expense Records)",
+      createdAt: new Date(f.createdAt).toISOString(),
+    });
+  }
+  return pettyExpenses;
+}
+
+/** One-time-per-record migration: promotes each legacy SalaryAdvance into
+ * an equivalent AdvanceRecord, so there is exactly one advance-and-recovery
+ * system going forward — AdvanceRecord, the one actually wired into the
+ * salary-payment deduction UI. Idempotent — guarded by a deterministic
+ * `sa-migrated-<id>` id, same convention as migrateExpenseFloatLegacySpend/
+ * migrateQuotationsToRevisions above. SalaryAdvance itself (type, store
+ * state, its own actions) is left fully intact — this only stops it from
+ * being the thing salary payment reads going forward; no data or code is
+ * deleted, matching this app's usual "keep it, just stop writing to it"
+ * retirement convention. */
+function migrateSalaryAdvancesToAdvanceRecords(
+  salaryAdvances: SalaryAdvance[],
+  existingAdvanceRecords: AdvanceRecord[],
+): AdvanceRecord[] {
+  const advanceRecords = [...existingAdvanceRecords];
+  const known = new Set(advanceRecords.map((a) => a.id));
+  for (const sa of salaryAdvances) {
+    const migratedId = `sa-migrated-${sa.id}`;
+    if (known.has(migratedId)) continue;
+    advanceRecords.push({
+      id: migratedId,
+      employeeId: sa.employeeId,
+      amount: sa.amount,
+      date: sa.advanceDate,
+      reason: sa.reason || "Migrated from Salary Advance",
+      remainingBalance: Math.max(0, sa.amount - sa.recoveredAmount),
+    });
+  }
+  return advanceRecords;
+}
+
+// Phase 32 (Task #173) — backfills stageId on any ProjectProductionStage
+// that predates this feature (every stage before this change had
+// stageId only when it was a synthetic rework row, see
+// pages/Production.tsx's handleSendToRework). Runs inside the persist
+// `merge` below, same "backfill on load" pattern as
+// migrateSalaryAdvancesToAdvanceRecords/migrateExpenseFloatLegacySpend
+// above. Pure and idempotent: a production array where every stage
+// already has a stageId is returned completely unchanged (same array
+// reference), so this is safe to call unconditionally on every load,
+// not just once. Never touches any other field, never reorders, never
+// drops a stage - only fills in the one missing field.
+function migrateProjectProductionStageIds(
+  productions: ProjectProduction[],
+): ProjectProduction[] {
+  let anyChanged = false;
+  const migrated = productions.map((pp) => {
+    let ppChanged = false;
+    const stages = pp.stages.map((stage) => {
+      if (stage.stageId) return stage;
+      ppChanged = true;
+      return { ...stage, stageId: crypto.randomUUID() };
+    });
+    if (!ppChanged) return pp;
+    anyChanged = true;
+    return { ...pp, stages };
+  });
+  return anyChanged ? migrated : productions;
+}
+
+/** Strips an expense's float link if it's stale/invalid: float doesn't
+ * exist, belongs to a different employee, or is already Fully Settled.
+ * Backstop behind the UI's own dropdown filtering (which only ever offers
+ * the selected employee's non-fully-settled floats) — silent strip rather
+ * than a thrown error since these actions are void-returning. */
+// Phase 27 Batch 3 — exported so PettyExpenses.tsx can apply this exact
+// validation before building a remote write payload (see store.ts's
+// Batch 3 notes on addPettyExpense/etc above).
+export function resolveFloatLink(
+  candidateFloatId: string | undefined,
+  employeeId: string,
+  floats: ExpenseFloat[],
+): string | undefined {
+  if (!candidateFloatId) return undefined;
+  const f = floats.find((x) => x.id === candidateFloatId);
+  if (!f || f.status === "Fully Settled" || f.employeeId !== employeeId) {
+    return undefined;
+  }
+  return candidateFloatId;
 }
 
 export const useStore = create<Store>()(
@@ -605,6 +1409,8 @@ export const useStore = create<Store>()(
     (set, get) => ({
       customers: sampleCustomers,
       quotations: sampleQuotations,
+      quotationRevisions: [],
+      quotationPurchaseOrders: [],
       purchaseOrders: samplePOs,
       masterPOs: [],
       companyPOs: [],
@@ -619,6 +1425,9 @@ export const useStore = create<Store>()(
         INV: 0,
         PAY: 0,
         PROJ: 2,
+        MCH: 3,
+        SVC: 2,
+        EMP: 0,
       },
 
       // Project tracking initial state
@@ -633,9 +1442,36 @@ export const useStore = create<Store>()(
       // Auth & HR initial state
       authUsers: [],
       employees: sampleEmployees,
+      employeesHydration: { status: "idle" },
+      customersHydration: { status: "idle" },
+      inventoryItemsHydration: { status: "idle" },
+      vendorsHydration: { status: "idle" },
+      companyPOsHydration: { status: "idle" },
+      projectsHydration: { status: "idle" },
+      outsourcedWorksHydration: { status: "idle" },
+      advanceRecordsHydration: { status: "idle" },
+      attendanceRecordsHydration: { status: "idle" },
+      employeeDocumentsHydration: { status: "idle" },
+      salaryPaymentsHydration: { status: "idle" },
+      inventoryPurchasesHydration: { status: "idle" },
+      inventoryUsagesHydration: { status: "idle" },
+      bomItemsHydration: { status: "idle" },
+      bomRequisitionsHydration: { status: "idle" },
+      projectEmployeesHydration: { status: "idle" },
+      quotationsHydration: { status: "idle" },
+      quotationRevisionsHydration: { status: "idle" },
+      masterPOsHydration: { status: "idle" },
+      quotationPurchaseOrdersHydration: { status: "idle" },
+      projectPurchaseOrdersHydration: { status: "idle" },
+      expenseFloatsHydration: { status: "idle" },
+      pettyExpensesHydration: { status: "idle" },
+      deliveryChallansHydration: { status: "idle" },
+      invoicesHydration: { status: "idle" },
+      paymentsHydration: { status: "idle" },
       attendanceRecords: [],
       salaryPayments: [],
       advanceRecords: [],
+      employeeDocuments: [],
 
       // Inventory initial state
       inventoryItems: sampleInventory,
@@ -664,6 +1500,35 @@ export const useStore = create<Store>()(
 
       // Petty Expenses
       pettyExpenses: [],
+
+      // Audit Log
+      auditLogs: [],
+
+      // Stock Reservations
+      stockReservations: [],
+
+      // Scrap Management
+      scrapRecords: [],
+
+      // Machinery initial state
+      machines: sampleMachines,
+      serviceRecords: sampleServiceRecords,
+      serviceParts: [],
+      machineDocuments: [],
+      machineUsageLogs: [],
+
+      // Export Engine initial state
+      exportJobs: [],
+
+      // Salary Advances initial state
+      salaryAdvances: [],
+
+      // Expense Floats initial state
+      expenseFloats: [],
+      floatCounter: 0,
+
+      // Production Movements initial state
+      productionMovements: [],
 
       // Vendors initial state (with auto-migration from existing names)
       vendors: (() => {
@@ -699,12 +1564,44 @@ export const useStore = create<Store>()(
         set((s) => ({ customers: s.customers.filter((x) => x.id !== id) }));
       },
 
+      // Phase 27 Batch 2 — quotations is now server-backed. history/
+      // version used to be computed here on every update (snapshot the
+      // pre-update row, bump version); that responsibility moved to
+      // Quotations.tsx's handleSave, which builds the correct next
+      // history array (a real quotations.history jsonb column) BEFORE
+      // calling updateQuotationRemote, so the DB round-trip returns the
+      // authoritative row. version itself has no DB column - it's
+      // derived as history.length + 1 in hydration.ts's
+      // transformQuotationRow, never computed here. These three actions
+      // now only sync the local array from what the remote call actually
+      // returned - no local recompute, no dead-code risk.
       addQuotation: (q) => set((s) => ({ quotations: [...s.quotations, q] })),
       deleteQuotation: (id) =>
         set((s) => ({ quotations: s.quotations.filter((x) => x.id !== id) })),
       updateQuotation: (q) =>
         set((s) => ({
           quotations: s.quotations.map((x) => (x.id === q.id ? q : x)),
+        })),
+
+      addQuotationRevision: (r) =>
+        set((s) => ({
+          quotationRevisions: [...(s.quotationRevisions || []), r],
+        })),
+      updateQuotationRevision: (r) =>
+        set((s) => ({
+          quotationRevisions: (s.quotationRevisions || []).map((x) =>
+            x.id === r.id ? r : x,
+          ),
+        })),
+      addQuotationPurchaseOrder: (p) =>
+        set((s) => ({
+          quotationPurchaseOrders: [...(s.quotationPurchaseOrders || []), p],
+        })),
+      updateQuotationPurchaseOrder: (p) =>
+        set((s) => ({
+          quotationPurchaseOrders: (s.quotationPurchaseOrders || []).map((x) =>
+            x.id === p.id ? p : x,
+          ),
         })),
 
       addPurchaseOrder: (p) =>
@@ -714,28 +1611,22 @@ export const useStore = create<Store>()(
           purchaseOrders: s.purchaseOrders.map((x) => (x.id === p.id ? p : x)),
         })),
 
+      // Phase 27 Batch 2 — master_pos is now server-backed. The old
+      // local hasProjects guard is superseded by the real DB RESTRICT
+      // constraint from quotation_purchase_orders/project_purchase_orders
+      // (checked in lib/purchaseOrdersApi.ts's deleteMasterPORemote,
+      // which surfaces a clear error before this local action ever
+      // runs) - these three are now plain sync-from-server-result.
       addMasterPO: (m) =>
         set((s) => ({ masterPOs: [...(s.masterPOs || []), m] })),
       updateMasterPO: (m) =>
         set((s) => ({
           masterPOs: (s.masterPOs || []).map((x) => (x.id === m.id ? m : x)),
         })),
-      deleteMasterPO: (id) => {
-        const s = get();
-        const po = (s.masterPOs || []).find((x) => x.id === id);
-        if (po) {
-          const hasProjects = (s.projects || []).some((proj) =>
-            (proj.pos || []).some((p) => p.sharedPoId === po.sharedPoId),
-          );
-          if (hasProjects) {
-            alert("Cannot delete PO. Linked projects exist.");
-            return;
-          }
-        }
+      deleteMasterPO: (id) =>
         set((s) => ({
           masterPOs: (s.masterPOs || []).filter((x) => x.id !== id),
-        }));
-      },
+        })),
 
       addCompanyPO: (p) =>
         set((s) => ({ companyPOs: [...(s.companyPOs || []), p] })),
@@ -765,17 +1656,16 @@ export const useStore = create<Store>()(
             x.id === d.id ? d : x,
           ),
         })),
-      deleteDeliveryChallan: (id) => {
-        const s = get();
-        const hasInvoices = (s.invoices || []).some((i) => i.dcId === id);
-        if (hasInvoices) {
-          alert("Cannot delete delivery challan. Linked invoices exist.");
-          return;
-        }
+      // Phase 27 Batch 4 — the old hasInvoices guard moved to
+      // DeliveryChallans.tsx's delete handler, checked BEFORE calling
+      // deleteDeliveryChallanRemote (this stays a pure local business
+      // rule - invoices is still fully local, unrelated to this domain's
+      // own server migration - but it must run before the network call,
+      // not after, now that this action only syncs a confirmed result).
+      deleteDeliveryChallan: (id) =>
         set((s) => ({
           deliveryChallans: s.deliveryChallans.filter((x) => x.id !== id),
-        }));
-      },
+        })),
 
       addInvoice: (i) => set((s) => ({ invoices: [...s.invoices, i] })),
       deleteInvoice: (id) =>
@@ -786,6 +1676,10 @@ export const useStore = create<Store>()(
         })),
 
       addPayment: (p) => set((s) => ({ payments: [...s.payments, p] })),
+      removePaymentsForInvoice: (invoiceId) =>
+        set((s) => ({
+          payments: s.payments.filter((p) => p.invoiceId !== invoiceId),
+        })),
 
       // Project tracking implementations
       addProject: (p) => {
@@ -808,6 +1702,9 @@ export const useStore = create<Store>()(
             endTime: "",
             requiresMaterialTracking: stg.requiresMaterialTracking,
             transactions: [],
+            // Phase 32 (Task #173) - stable identity, generated once per
+            // stage instance, never reused across projects or stages.
+            stageId: crypto.randomUUID(),
           })),
         };
         set((s) => ({
@@ -1044,6 +1941,304 @@ export const useStore = create<Store>()(
         set((s) => ({
           employees: s.employees.map((x) => (x.id === e.id ? e : x)),
         })),
+      setEmployeesHydrationStatus: (status, error) =>
+        set({ employeesHydration: { status, error } }),
+      setEmployeesFromServer: (employees) =>
+        set({ employees, employeesHydration: { status: "success" } }),
+      setCustomersHydrationStatus: (status, error) =>
+        set({ customersHydration: { status, error } }),
+      setCustomersFromServer: (customers) =>
+        set({ customers, customersHydration: { status: "success" } }),
+      setInventoryItemsHydrationStatus: (status, error) =>
+        set({ inventoryItemsHydration: { status, error } }),
+      setVendorsHydrationStatus: (status, error) =>
+        set({ vendorsHydration: { status, error } }),
+      setVendorsFromServer: (vendors) =>
+        set({ vendors, vendorsHydration: { status: "success" } }),
+      setCompanyPOsHydrationStatus: (status, error) =>
+        set({ companyPOsHydration: { status, error } }),
+      setCompanyPOsFromServer: (companyPOs) =>
+        set({ companyPOs, companyPOsHydration: { status: "success" } }),
+      setProjectsHydrationStatus: (status, error) =>
+        set({ projectsHydration: { status, error } }),
+      // Phase 22 Decision 3 + PO-fields follow-up (both explicitly
+      // approved) - NOT a wholesale replace. assignedEmployeeIds/pos/
+      // poNumber/poDate/poFiles have no DB column, so they'd be wiped to
+      // undefined on every successful hydration under the wholesale-
+      // replace pattern every other domain uses. Instead, merge those
+      // five fields in from the CURRENT local project (matched by id)
+      // before committing the server-authoritative data. A project the
+      // server doesn't know about yet (mid-flight local-only state) is
+      // simply not in the incoming array and is dropped, same as every
+      // other domain's hydration-replace semantics for everything else.
+      setProjectsFromServer: (projects) =>
+        set((s) => {
+          const localById = new Map(s.projects.map((p) => [p.id, p]));
+          const merged = projects.map((p) => {
+            const local = localById.get(p.id);
+            return {
+              ...p,
+              assignedEmployeeIds: local?.assignedEmployeeIds,
+              pos: local?.pos,
+              poNumber: local?.poNumber,
+              poDate: local?.poDate,
+              poFiles: local?.poFiles,
+            };
+          });
+          return {
+            projects: merged,
+            projectsHydration: { status: "success" },
+          };
+        }),
+      setInventoryItemsFromServer: (inventoryItems) =>
+        set({
+          inventoryItems,
+          inventoryItemsHydration: { status: "success" },
+        }),
+      setOutsourcedWorksHydrationStatus: (status, error) =>
+        set({ outsourcedWorksHydration: { status, error } }),
+      // Wholesale replace - no local-only fields in this domain, unlike
+      // Projects' setProjectsFromServer above.
+      setOutsourcedWorksFromServer: (outsourcedWorks) =>
+        set({
+          outsourcedWorks,
+          outsourcedWorksHydration: { status: "success" },
+        }),
+
+      // Phase 27 Batch 1
+      setAdvanceRecordsHydrationStatus: (status, error) =>
+        set({ advanceRecordsHydration: { status, error } }),
+      setAdvanceRecordsFromServer: (advanceRecords) =>
+        set({ advanceRecords, advanceRecordsHydration: { status: "success" } }),
+
+      setAttendanceRecordsHydrationStatus: (status, error) =>
+        set({ attendanceRecordsHydration: { status, error } }),
+      setAttendanceRecordsFromServer: (attendanceRecords) =>
+        set({
+          attendanceRecords,
+          attendanceRecordsHydration: { status: "success" },
+        }),
+
+      setEmployeeDocumentsHydrationStatus: (status, error) =>
+        set({ employeeDocumentsHydration: { status, error } }),
+      // uploadedBy has no DB column (see lib/hydration.ts) - merged in
+      // from current local state per document id, same shape as
+      // Projects' assignedEmployeeIds merge-exception. A document the
+      // server doesn't know about yet is simply dropped, same semantics
+      // as every other domain's hydration-replace.
+      setEmployeeDocumentsFromServer: (docs) =>
+        set((s) => {
+          const localById = new Map(s.employeeDocuments.map((d) => [d.id, d]));
+          const merged = docs.map((d) => ({
+            ...d,
+            uploadedBy: localById.get(d.id)?.uploadedBy ?? "—",
+          }));
+          return {
+            employeeDocuments: merged,
+            employeeDocumentsHydration: { status: "success" },
+          };
+        }),
+
+      setSalaryPaymentsHydrationStatus: (status, error) =>
+        set({ salaryPaymentsHydration: { status, error } }),
+      setSalaryPaymentsFromServer: (salaryPayments) =>
+        set({ salaryPayments, salaryPaymentsHydration: { status: "success" } }),
+
+      setInventoryPurchasesHydrationStatus: (status, error) =>
+        set({ inventoryPurchasesHydration: { status, error } }),
+      setInventoryPurchasesFromServer: (inventoryPurchases) =>
+        set({
+          inventoryPurchases,
+          inventoryPurchasesHydration: { status: "success" },
+        }),
+
+      setInventoryUsagesHydrationStatus: (status, error) =>
+        set({ inventoryUsagesHydration: { status, error } }),
+      setInventoryUsagesFromServer: (materialUsages) =>
+        set({
+          materialUsages,
+          inventoryUsagesHydration: { status: "success" },
+        }),
+
+      setBomItemsHydrationStatus: (status, error) =>
+        set({ bomItemsHydration: { status, error } }),
+      setBomItemsFromServer: (bomItems) =>
+        set({ bomItems, bomItemsHydration: { status: "success" } }),
+
+      setBomRequisitionsHydrationStatus: (status, error) =>
+        set({ bomRequisitionsHydration: { status, error } }),
+      setBomRequisitionsFromServer: (bomRequisitions) =>
+        set({
+          bomRequisitions,
+          bomRequisitionsHydration: { status: "success" },
+        }),
+
+      setProjectEmployeesHydrationStatus: (status, error) =>
+        set({ projectEmployeesHydration: { status, error } }),
+      // Groups pairs by projectId and applies to whatever project rows
+      // currently exist in state. Runs independently of Projects'
+      // hydration effect (both are separate useEffects) - safe either
+      // order, since both this action and setProjectsFromServer's own
+      // assignedEmployeeIds merge are idempotent forward-carries of the
+      // same eventual DB truth (see store.ts's Phase 27 Batch 1 notes).
+      setProjectEmployeesFromServer: (pairs) =>
+        set((s) => {
+          const byProject = new Map<string, string[]>();
+          for (const { projectId, employeeId } of pairs) {
+            const arr = byProject.get(projectId) ?? [];
+            arr.push(employeeId);
+            byProject.set(projectId, arr);
+          }
+          return {
+            projects: s.projects.map((p) => ({
+              ...p,
+              assignedEmployeeIds: byProject.get(p.id) ?? [],
+            })),
+            projectEmployeesHydration: { status: "success" },
+          };
+        }),
+
+      // Phase 27 Batch 2
+      setQuotationsHydrationStatus: (status, error) =>
+        set({ quotationsHydration: { status, error } }),
+      // approvedBy (display username, no DB column) and recordedPO
+      // (legacy, never written) merged in from current local state per
+      // quotation id - same shape as employeeDocuments.uploadedBy.
+      setQuotationsFromServer: (quotations) =>
+        set((s) => {
+          const localById = new Map(s.quotations.map((q) => [q.id, q]));
+          const merged = quotations.map((q) => {
+            const local = localById.get(q.id);
+            return {
+              ...q,
+              approvedBy: local?.approvedBy,
+              recordedPO: local?.recordedPO,
+            };
+          });
+          return {
+            quotations: merged,
+            quotationsHydration: { status: "success" },
+          };
+        }),
+
+      setQuotationRevisionsHydrationStatus: (status, error) =>
+        set({ quotationRevisionsHydration: { status, error } }),
+      // createdBy (display username, no DB column) merged in from
+      // current local state per revision id.
+      setQuotationRevisionsFromServer: (revisions) =>
+        set((s) => {
+          const localById = new Map(s.quotationRevisions.map((r) => [r.id, r]));
+          const merged = revisions.map((r) => ({
+            ...r,
+            createdBy: localById.get(r.id)?.createdBy,
+          }));
+          return {
+            quotationRevisions: merged,
+            quotationRevisionsHydration: { status: "success" },
+          };
+        }),
+
+      setMasterPOsHydrationStatus: (status, error) =>
+        set({ masterPOsHydration: { status, error } }),
+      // Plain wholesale replace - sharedPoId has no DB gap, derived
+      // directly from the row's own id in hydration.ts.
+      setMasterPOsFromServer: (masterPOs) =>
+        set({ masterPOs, masterPOsHydration: { status: "success" } }),
+
+      setQuotationPurchaseOrdersHydrationStatus: (status, error) =>
+        set({ quotationPurchaseOrdersHydration: { status, error } }),
+      // createdBy (display username, no DB column) merged in from
+      // current local state per PO id.
+      setQuotationPurchaseOrdersFromServer: (pos) =>
+        set((s) => {
+          const localById = new Map(
+            s.quotationPurchaseOrders.map((p) => [p.id, p]),
+          );
+          const merged = pos.map((p) => ({
+            ...p,
+            createdBy: localById.get(p.id)?.createdBy,
+          }));
+          return {
+            quotationPurchaseOrders: merged,
+            quotationPurchaseOrdersHydration: { status: "success" },
+          };
+        }),
+
+      setProjectPurchaseOrdersHydrationStatus: (status, error) =>
+        set({ projectPurchaseOrdersHydration: { status, error } }),
+      // Groups pairs by projectId and applies to whatever project rows
+      // currently exist in state - identical shape to
+      // setProjectEmployeesFromServer above, safe in either resolution
+      // order against setProjectsFromServer's own pos merge-exception.
+      setProjectPurchaseOrdersFromServer: (pairs) =>
+        set((s) => {
+          const byProject = new Map<string, ProjectPO[]>();
+          for (const { projectId, po } of pairs) {
+            const arr = byProject.get(projectId) ?? [];
+            arr.push(po);
+            byProject.set(projectId, arr);
+          }
+          return {
+            projects: s.projects.map((p) => ({
+              ...p,
+              pos: byProject.get(p.id) ?? [],
+            })),
+            projectPurchaseOrdersHydration: { status: "success" },
+          };
+        }),
+
+      // Phase 27 Batch 3
+      setExpenseFloatsHydrationStatus: (status, error) =>
+        set({ expenseFloatsHydration: { status, error } }),
+      // issuedBy (display username, no DB column) merged in from
+      // current local state per float id.
+      setExpenseFloatsFromServer: (floats) =>
+        set((s) => {
+          const localById = new Map(s.expenseFloats.map((f) => [f.id, f]));
+          const merged = floats.map((f) => ({
+            ...f,
+            issuedBy: localById.get(f.id)?.issuedBy ?? "—",
+          }));
+          return {
+            expenseFloats: merged,
+            expenseFloatsHydration: { status: "success" },
+          };
+        }),
+
+      setPettyExpensesHydrationStatus: (status, error) =>
+        set({ pettyExpensesHydration: { status, error } }),
+      setPettyExpensesFromServer: (pettyExpenses) =>
+        set({
+          pettyExpenses,
+          pettyExpensesHydration: { status: "success" },
+        }),
+
+      // Phase 27 Batch 4
+      setDeliveryChallansHydrationStatus: (status, error) =>
+        set({ deliveryChallansHydration: { status, error } }),
+      setDeliveryChallansFromServer: (deliveryChallans) =>
+        set({
+          deliveryChallans,
+          deliveryChallansHydration: { status: "success" },
+        }),
+
+      // Phase 27 Batch 5
+      setInvoicesHydrationStatus: (status, error) =>
+        set({ invoicesHydration: { status, error } }),
+      setInvoicesFromServer: (invoices) =>
+        set({
+          invoices,
+          invoicesHydration: { status: "success" },
+        }),
+
+      setPaymentsHydrationStatus: (status, error) =>
+        set({ paymentsHydration: { status, error } }),
+      setPaymentsFromServer: (payments) =>
+        set({
+          payments,
+          paymentsHydration: { status: "success" },
+        }),
+
       deleteEmployee: (id) => {
         const s = get();
         const hasSalary = (s.salaryPayments || []).some(
@@ -1058,7 +2253,12 @@ export const useStore = create<Store>()(
           );
           return;
         }
-        set((s) => ({ employees: s.employees.filter((x) => x.id !== id) }));
+        set((s) => ({
+          employees: s.employees.filter((x) => x.id !== id),
+          employeeDocuments: (s.employeeDocuments || []).filter(
+            (x) => x.employeeId !== id,
+          ),
+        }));
       },
       addAttendanceRecord: (r) =>
         set((s) => ({ attendanceRecords: [...s.attendanceRecords, r] })),
@@ -1075,6 +2275,22 @@ export const useStore = create<Store>()(
       updateAdvanceRecord: (a) =>
         set((s) => ({
           advanceRecords: s.advanceRecords.map((x) => (x.id === a.id ? a : x)),
+        })),
+      addEmployeeDocument: (d) =>
+        set((s) => ({
+          employeeDocuments: [...(s.employeeDocuments || []), d],
+        })),
+      updateEmployeeDocument: (d) =>
+        set((s) => ({
+          employeeDocuments: (s.employeeDocuments || []).map((x) =>
+            x.id === d.id ? d : x,
+          ),
+        })),
+      deleteEmployeeDocument: (id) =>
+        set((s) => ({
+          employeeDocuments: (s.employeeDocuments || []).filter(
+            (x) => x.id !== id,
+          ),
         })),
 
       // Inventory actions
@@ -1273,139 +2489,30 @@ export const useStore = create<Store>()(
           payablePayments: s.payablePayments.filter((x) => x.payableId !== id),
         })),
       // BOM actions
+      // NOTE: bomRequisitions is now fully server-owned (populated via
+      // hydrateBomRequisitions()/setBomRequisitionsFromServer, driven by
+      // the DB's recompute_bom_requisition() trigger on project_bom_items).
+      // These three actions used to also locally recompute bomRequisitions
+      // from client-side shortage math, but every real call site
+      // (ProjectDetail.tsx) always calls refreshBomRequisitions() right
+      // after, which wholesale-replaces this slice from the server anyway
+      // — so the local recompute was dead weight that only risked a
+      // momentary stale/incorrect flash. Removed; these actions now only
+      // touch bomItems.
       addBomItem: (item) =>
-        set((s) => {
-          const invItem = s.inventoryItems.find(
-            (x) => x.id === item.inventoryItemId,
-          );
-          const available = Number(invItem?.quantityAvailable || 0);
-          const shortage = Math.max(
-            0,
-            Number(item.requiredQuantity || 0) - available,
-          );
-          const estimatedPrice = Number(item.estimatedPrice || 0);
-          let newBomReqs = [...s.bomRequisitions];
-          if (shortage > 0) {
-            const existingIdx = newBomReqs.findIndex(
-              (r) =>
-                r.projectId === item.projectId &&
-                r.inventoryItemId === item.inventoryItemId,
-            );
-            if (existingIdx >= 0) {
-              newBomReqs[existingIdx] = {
-                ...newBomReqs[existingIdx],
-                shortageQty: shortage,
-                requiredQty: item.requiredQuantity,
-                availableQty: available,
-                updatedAt: Date.now(),
-              };
-            } else {
-              newBomReqs.push({
-                id: crypto.randomUUID(),
-                inventoryItemId: item.inventoryItemId,
-                projectId: item.projectId,
-                materialName: item.materialName,
-                shortageQty: shortage,
-                requiredQty: Number(item.requiredQuantity || 0),
-                availableQty: available,
-                estimatedPrice: estimatedPrice,
-                status: "Pending",
-                createdAt: Date.now(),
-                updatedAt: Date.now(),
-              });
-            }
-          }
-          return {
-            bomItems: [...s.bomItems, item],
-            bomRequisitions: newBomReqs,
-          };
-        }),
+        set((s) => ({
+          bomItems: [...s.bomItems, item],
+        })),
       updateBomItem: (id, updates) =>
-        set((s) => {
-          const updatedBomItems = s.bomItems.map((x) =>
+        set((s) => ({
+          bomItems: s.bomItems.map((x) =>
             x.id === id ? { ...x, ...updates } : x,
-          );
-          const updatedItem = updatedBomItems.find((x) => x.id === id);
-          if (!updatedItem) return { bomItems: updatedBomItems };
-          const invItem = s.inventoryItems.find(
-            (x) => x.id === updatedItem.inventoryItemId,
-          );
-          const available = Number(invItem?.quantityAvailable || 0);
-          const shortage = Math.max(
-            0,
-            Number(updatedItem.requiredQuantity || 0) - available,
-          );
-          const estimatedPrice = Number(updatedItem.estimatedPrice || 0);
-          let newBomReqs = [...s.bomRequisitions];
-          if (shortage > 0) {
-            const existingIdx = newBomReqs.findIndex(
-              (r) =>
-                r.projectId === updatedItem.projectId &&
-                r.inventoryItemId === updatedItem.inventoryItemId,
-            );
-            if (existingIdx >= 0) {
-              const existing = newBomReqs[existingIdx];
-              const newStatus =
-                existing.status === "Completed"
-                  ? "Pending"
-                  : existing.status === "Ready to Complete"
-                    ? "Pending"
-                    : existing.status;
-              newBomReqs[existingIdx] = {
-                ...existing,
-                shortageQty: shortage,
-                requiredQty: Number(updatedItem.requiredQuantity || 0),
-                availableQty: available,
-                estimatedPrice: estimatedPrice,
-                status: newStatus,
-                updatedAt: Date.now(),
-              };
-            } else {
-              newBomReqs.push({
-                id: crypto.randomUUID(),
-                inventoryItemId: updatedItem.inventoryItemId,
-                projectId: updatedItem.projectId,
-                materialName: updatedItem.materialName,
-                shortageQty: shortage,
-                requiredQty: Number(updatedItem.requiredQuantity || 0),
-                availableQty: available,
-                estimatedPrice: estimatedPrice,
-                status: "Pending",
-                createdAt: Date.now(),
-                updatedAt: Date.now(),
-              });
-            }
-          } else {
-            newBomReqs = newBomReqs.filter(
-              (r) =>
-                !(
-                  r.projectId === updatedItem.projectId &&
-                  r.inventoryItemId === updatedItem.inventoryItemId &&
-                  r.status !== "Completed"
-                ),
-            );
-          }
-          return { bomItems: updatedBomItems, bomRequisitions: newBomReqs };
-        }),
+          ),
+        })),
       deleteBomItem: (id) =>
-        set((s) => {
-          const item = s.bomItems.find((x) => x.id === id);
-          let newBomReqs = s.bomRequisitions;
-          if (item) {
-            newBomReqs = s.bomRequisitions.filter(
-              (r) =>
-                !(
-                  r.projectId === item.projectId &&
-                  r.inventoryItemId === item.inventoryItemId &&
-                  r.status !== "Completed"
-                ),
-            );
-          }
-          return {
-            bomItems: s.bomItems.filter((x) => x.id !== id),
-            bomRequisitions: newBomReqs,
-          };
-        }),
+        set((s) => ({
+          bomItems: s.bomItems.filter((x) => x.id !== id),
+        })),
 
       updateBomRequisition: (id, updates) =>
         set((s) => ({
@@ -1458,8 +2565,23 @@ export const useStore = create<Store>()(
         set((s) => ({
           projectItems: s.projectItems.filter((x) => x.id !== id),
         })),
+      // Phase 27 Batch 3 — petty_expenses/expense_floats are now
+      // server-backed. The old local floatId-resolution (resolveFloatLink)
+      // and float-recompute-on-every-mutation logic used to live here;
+      // resolveFloatLink's validation (float not fully settled, employee
+      // matches) is a real business rule with no DB-enforced equivalent,
+      // so it moved to PettyExpenses.tsx, applied BEFORE building the
+      // remote write payload. The float recompute itself is now the DB
+      // trigger's job (trg_recompute_petty_expense_floats), always more
+      // current than any local derivation could be. These four actions
+      // now only sync the local array from what the remote call actually
+      // returned.
       addPettyExpense: (e) =>
         set((s) => ({ pettyExpenses: [...(s.pettyExpenses || []), e] })),
+      addPettyExpensesBatch: (items) =>
+        set((s) => ({
+          pettyExpenses: [...(s.pettyExpenses || []), ...items],
+        })),
       updatePettyExpense: (e) =>
         set((s) => ({
           pettyExpenses: (s.pettyExpenses || []).map((x) =>
@@ -1470,47 +2592,698 @@ export const useStore = create<Store>()(
         set((s) => ({
           pettyExpenses: (s.pettyExpenses || []).filter((x) => x.id !== id),
         })),
-      restoreFromBackup: (data) =>
-        set(() => ({
-          customers: (data.customers as Customer[]) || [],
-          projects: (data.projects as Project[]) || [],
-          quotations: (data.quotations as Quotation[]) || [],
-          purchaseOrders: (data.purchaseOrders as PurchaseOrder[]) || [],
-          masterPOs: (data.masterPOs as MasterPO[]) || [],
-          companyPOs: (data.companyPOs as CompanyPO[]) || [],
-          inventoryItems: (data.inventoryItems as InventoryItem[]) || [],
-          materialRequisitions:
-            (data.materialRequisitions as MaterialRequisition[]) || [],
-          projectProductions:
-            (data.projectProductions as ProjectProduction[]) || [],
-          deliveryChallans: (data.deliveryChallans as DeliveryChallan[]) || [],
-          invoices: (data.invoices as Invoice[]) || [],
-          payments: (data.payments as Payment[]) || [],
-          pettyExpenses: (data.pettyExpenses as PettyExpense[]) || [],
-          employees: (data.employees as Employee[]) || [],
-          vendors: (data.vendors as Vendor[]) || [],
-          payables: (data.payables as Payable[]) || [],
-          payablePayments: (data.payablePayments as PayablePayment[]) || [],
-          materialUsages: (data.materialUsages as MaterialUsage[]) || [],
-          materialPurchases:
-            (data.materialPurchases as MaterialPurchase[]) || [],
-          outsourcedWorks: (data.outsourcedWorks as OutsourcedWork[]) || [],
-          advanceRecords: (data.advanceRecords as AdvanceRecord[]) || [],
-          salaryPayments: (data.salaryPayments as SalaryPayment[]) || [],
-          inventoryPurchases:
-            (data.inventoryPurchases as InventoryPurchase[]) || [],
-          bomItems: (data.bomItems as BomItem[]) || [],
-          bomRequisitions: (data.bomRequisitions as BomRequisition[]) || [],
-          qualityInspections:
-            (data.qualityInspections as QualityInspection[]) || [],
-          designFiles: (data.designFiles as DesignFile[]) || [],
-          internalCostings: (data.internalCostings as InternalCosting[]) || [],
-          attendanceRecords:
-            (data.attendanceRecords as AttendanceRecord[]) || [],
-          projectDeliveries:
-            (data.projectDeliveries as ProjectDelivery[]) || [],
-          projectItems: (data.projectItems as ProjectItem[]) || [],
+
+      // ── Audit Log ─────────────────────────────────────────────
+      addAuditLog: (entry) =>
+        set((s) => ({
+          auditLogs: [
+            ...(s.auditLogs || []).slice(-499), // keep last 500 entries
+            { ...entry, id: crypto.randomUUID(), timestamp: Date.now() },
+          ],
         })),
+
+      // ── Scrap Management ─────────────────────────────────────
+      addScrapRecord: (r) =>
+        set((s) => ({ scrapRecords: [...(s.scrapRecords || []), r] })),
+      updateScrapRecord: (r) =>
+        set((s) => ({
+          scrapRecords: (s.scrapRecords || []).map((x) =>
+            x.id === r.id ? r : x,
+          ),
+        })),
+      deleteScrapRecord: (id) =>
+        set((s) => ({
+          scrapRecords: (s.scrapRecords || []).filter((x) => x.id !== id),
+        })),
+
+      // ── Stock Reservations ────────────────────────────────────
+      reserveStock: (reservation) => {
+        const state = get();
+        const item = (state.inventoryItems || []).find(
+          (i) => i.id === reservation.inventoryItemId,
+        );
+        if (!item) return { success: false, message: "Item not found" };
+        const reserved = (state.stockReservations || [])
+          .filter(
+            (r) =>
+              r.inventoryItemId === reservation.inventoryItemId &&
+              r.status === "active",
+          )
+          .reduce((s, r) => s + r.quantity, 0);
+        const available = item.quantityAvailable - reserved;
+        if (reservation.quantity > available)
+          return {
+            success: false,
+            message: `Only ${available} ${item.unit} available (${item.quantityAvailable} total − ${reserved} reserved)`,
+          };
+        const newReservation: StockReservation = {
+          ...reservation,
+          id: crypto.randomUUID(),
+          reservedAt: Date.now(),
+          status: "active",
+        };
+        set((s) => ({
+          stockReservations: [...(s.stockReservations || []), newReservation],
+          inventoryItems: s.inventoryItems.map((it) =>
+            it.id === reservation.inventoryItemId
+              ? {
+                  ...it,
+                  quantityReserved:
+                    (it.quantityReserved ?? 0) + reservation.quantity,
+                }
+              : it,
+          ),
+        }));
+        return {
+          success: true,
+          message: `Reserved ${reservation.quantity} ${item.unit}`,
+        };
+      },
+      releaseReservation: (reservationId) => {
+        const state = get();
+        const res = (state.stockReservations || []).find(
+          (r) => r.id === reservationId,
+        );
+        if (!res || res.status !== "active") return;
+        set((s) => ({
+          stockReservations: s.stockReservations.map((r) =>
+            r.id === reservationId ? { ...r, status: "released" } : r,
+          ),
+          inventoryItems: s.inventoryItems.map((it) =>
+            it.id === res.inventoryItemId
+              ? {
+                  ...it,
+                  quantityReserved: Math.max(
+                    0,
+                    (it.quantityReserved ?? 0) - res.quantity,
+                  ),
+                }
+              : it,
+          ),
+        }));
+      },
+      consumeReservation: (reservationId) => {
+        const state = get();
+        const res = (state.stockReservations || []).find(
+          (r) => r.id === reservationId,
+        );
+        if (!res || res.status !== "active") return;
+        set((s) => ({
+          stockReservations: s.stockReservations.map((r) =>
+            r.id === reservationId ? { ...r, status: "consumed" } : r,
+          ),
+          inventoryItems: s.inventoryItems.map((it) =>
+            it.id === res.inventoryItemId
+              ? {
+                  ...it,
+                  quantityAvailable: Math.max(
+                    0,
+                    it.quantityAvailable - res.quantity,
+                  ),
+                  quantityReserved: Math.max(
+                    0,
+                    (it.quantityReserved ?? 0) - res.quantity,
+                  ),
+                }
+              : it,
+          ),
+        }));
+      },
+
+      // ── Project Activity Log ───────────────────────────────────
+      // Phase 22 — remote-first (explicitly approved). activity_log is a
+      // real DB column (unlike assignedEmployeeIds/pos/etc.), so this
+      // must actually reach Supabase rather than being treated as
+      // another local-only merge exception - otherwise every note/
+      // auto-logged event added after project creation would silently
+      // vanish on the next successful hydration.
+      addProjectActivity: async (
+        projectId,
+        type,
+        description,
+        performedBy,
+        metadata,
+      ) => {
+        const s = get();
+        const project = (s.projects || []).find((p) => p.id === projectId);
+        if (!project) return;
+        const entry: ProjectActivity = {
+          id: crypto.randomUUID(),
+          type,
+          description,
+          performedBy,
+          timestamp: Date.now(),
+          metadata,
+        };
+        const updatedActivityLog = [...(project.activityLog || []), entry];
+        const result = await updateProjectRemote({
+          ...project,
+          activityLog: updatedActivityLog,
+        });
+        // Never fabricate success - if the remote write failed (RLS
+        // denial, no session, etc.), the entry is simply not added
+        // locally either, so the UI never claims a note/event was saved
+        // when it wasn't.
+        if (result.status !== "success" || !result.data) return;
+        const updatedProject = result.data;
+        set((st) => ({
+          projects: st.projects.map((p) =>
+            p.id !== projectId
+              ? p
+              : {
+                  ...updatedProject,
+                  // Preserve local-only fields exactly as every other
+                  // updateProjectRemote caller does.
+                  assignedEmployeeIds: p.assignedEmployeeIds,
+                  pos: p.pos,
+                  poNumber: p.poNumber,
+                  poDate: p.poDate,
+                  poFiles: p.poFiles,
+                },
+          ),
+        }));
+      },
+
+      // ── Machinery actions ──────────────────────────────────────
+      generateMachineCode: () => {
+        const next = get().counters.MCH + 1;
+        set((s) => ({ counters: { ...s.counters, MCH: next } }));
+        return `MCH-${String(next).padStart(3, "0")}`;
+      },
+
+      generateServiceNumber: (machineId) => {
+        const machine = get().machines.find((m) => m.id === machineId);
+        const existing = get().serviceRecords.filter(
+          (r) => r.machineId === machineId,
+        );
+        const next = existing.length + 1;
+        const code = machine?.machineCode || "MCH";
+        return `SVC-${code}-${String(next).padStart(3, "0")}`;
+      },
+
+      addMachine: (m) => set((s) => ({ machines: [...(s.machines || []), m] })),
+
+      updateMachine: (m) =>
+        set((s) => ({
+          machines: (s.machines || []).map((x) => (x.id === m.id ? m : x)),
+        })),
+
+      deleteMachine: (id) => {
+        const s = get();
+        const hasSvcRecords = (s.serviceRecords || []).some(
+          (r) => r.machineId === id,
+        );
+        const hasUsageLogs = (s.machineUsageLogs || []).some(
+          (l) => l.machineId === id,
+        );
+        if (hasSvcRecords || hasUsageLogs) {
+          alert("Cannot delete machine. Service records or usage logs exist.");
+          return;
+        }
+        set((s) => ({
+          machines: (s.machines || []).filter((x) => x.id !== id),
+          machineDocuments: (s.machineDocuments || []).filter(
+            (x) => x.machineId !== id,
+          ),
+        }));
+      },
+
+      addServiceRecord: (r) =>
+        set((s) => {
+          const updatedMachines = (s.machines || []).map((m) => {
+            if (m.id !== r.machineId) return m;
+            const updates: Partial<Machine> = { updatedAt: Date.now() };
+            if (r.status === "Completed") {
+              updates.lastServiceDate = r.serviceDate;
+              if (r.nextServiceDue) updates.nextServiceDue = r.nextServiceDue;
+              if (r.machineCondition) {
+                // restore operational status after completed service
+                if (
+                  m.currentStatus === "Under Maintenance" ||
+                  m.currentStatus === "Breakdown"
+                ) {
+                  updates.currentStatus = "Operational";
+                }
+              }
+            } else if (r.status === "In Progress") {
+              updates.currentStatus = "Under Maintenance";
+            }
+            return { ...m, ...updates };
+          });
+          return {
+            serviceRecords: [...(s.serviceRecords || []), r],
+            machines: updatedMachines,
+          };
+        }),
+
+      updateServiceRecord: (r) =>
+        set((s) => {
+          const updatedMachines = (s.machines || []).map((m) => {
+            if (m.id !== r.machineId) return m;
+            const updates: Partial<Machine> = { updatedAt: Date.now() };
+            if (r.status === "Completed") {
+              updates.lastServiceDate = r.serviceDate;
+              if (r.nextServiceDue) updates.nextServiceDue = r.nextServiceDue;
+              updates.currentStatus = "Operational";
+            }
+            return { ...m, ...updates };
+          });
+          return {
+            serviceRecords: (s.serviceRecords || []).map((x) =>
+              x.id === r.id ? r : x,
+            ),
+            machines: updatedMachines,
+          };
+        }),
+
+      deleteServiceRecord: (id) =>
+        set((s) => ({
+          serviceRecords: (s.serviceRecords || []).filter((x) => x.id !== id),
+          serviceParts: (s.serviceParts || []).filter(
+            (x) => x.serviceRecordId !== id,
+          ),
+        })),
+
+      addServicePart: (p) =>
+        set((s) => ({ serviceParts: [...(s.serviceParts || []), p] })),
+
+      updateServicePart: (p) =>
+        set((s) => ({
+          serviceParts: (s.serviceParts || []).map((x) =>
+            x.id === p.id ? p : x,
+          ),
+        })),
+
+      deleteServicePart: (id) =>
+        set((s) => ({
+          serviceParts: (s.serviceParts || []).filter((x) => x.id !== id),
+        })),
+
+      addMachineDocument: (d) =>
+        set((s) => ({ machineDocuments: [...(s.machineDocuments || []), d] })),
+
+      deleteMachineDocument: (id) =>
+        set((s) => ({
+          machineDocuments: (s.machineDocuments || []).filter(
+            (x) => x.id !== id,
+          ),
+        })),
+
+      addMachineUsageLog: (l) =>
+        set((s) => {
+          const updatedMachines = (s.machines || []).map((m) => {
+            if (m.id !== l.machineId) return m;
+            return {
+              ...m,
+              totalRunningHours: m.totalRunningHours + l.hoursUsed,
+              updatedAt: Date.now(),
+            };
+          });
+          return {
+            machineUsageLogs: [...(s.machineUsageLogs || []), l],
+            machines: updatedMachines,
+          };
+        }),
+
+      deleteMachineUsageLog: (id) => {
+        const s = get();
+        const log = (s.machineUsageLogs || []).find((l) => l.id === id);
+        if (!log) return;
+        set((st) => ({
+          machineUsageLogs: (st.machineUsageLogs || []).filter(
+            (x) => x.id !== id,
+          ),
+          machines: (st.machines || []).map((m) =>
+            m.id === log.machineId
+              ? {
+                  ...m,
+                  totalRunningHours: Math.max(
+                    0,
+                    m.totalRunningHours - log.hoursUsed,
+                  ),
+                  updatedAt: Date.now(),
+                }
+              : m,
+          ),
+        }));
+      },
+
+      reportBreakdown: (machineId, cause, createdBy) => {
+        const s = get();
+        const machine = (s.machines || []).find((m) => m.id === machineId);
+        if (!machine) return;
+        const svcNumber = get().generateServiceNumber(machineId);
+        const svcRecord: ServiceRecord = {
+          id: crypto.randomUUID(),
+          machineId,
+          serviceNumber: svcNumber,
+          serviceDate: new Date().toISOString().split("T")[0],
+          serviceType: "Breakdown",
+          performedBy: "Internal",
+          serviceCost: 0,
+          travelCost: 0,
+          downtimeHours: 0,
+          breakdownCause: cause,
+          machineCondition: "Poor",
+          status: "In Progress",
+          createdBy,
+          createdAt: Date.now(),
+        };
+        set((st) => ({
+          machines: (st.machines || []).map((m) =>
+            m.id === machineId
+              ? { ...m, currentStatus: "Breakdown", updatedAt: Date.now() }
+              : m,
+          ),
+          serviceRecords: [...(st.serviceRecords || []), svcRecord],
+        }));
+      },
+
+      resolveBreakdown: (machineId, serviceRecordId, condition) =>
+        set((s) => ({
+          machines: (s.machines || []).map((m) =>
+            m.id === machineId
+              ? { ...m, currentStatus: "Operational", updatedAt: Date.now() }
+              : m,
+          ),
+          serviceRecords: (s.serviceRecords || []).map((r) =>
+            r.id === serviceRecordId
+              ? { ...r, status: "Completed", machineCondition: condition }
+              : r,
+          ),
+        })),
+
+      // ── Export Engine actions ──────────────────────────────────
+      addExportJob: (j) =>
+        set((s) => ({ exportJobs: [...(s.exportJobs || []), j] })),
+
+      updateExportJob: (j) =>
+        set((s) => ({
+          exportJobs: (s.exportJobs || []).map((x) => (x.id === j.id ? j : x)),
+        })),
+
+      clearExportJobs: () => set(() => ({ exportJobs: [] })),
+
+      // ── Salary Advance actions ────────────────────────────────────
+      addSalaryAdvance: (a) =>
+        set((s) => ({ salaryAdvances: [...(s.salaryAdvances || []), a] })),
+
+      updateSalaryAdvance: (a) =>
+        set((s) => ({
+          salaryAdvances: (s.salaryAdvances || []).map((x) =>
+            x.id === a.id ? a : x,
+          ),
+        })),
+
+      deleteSalaryAdvance: (id) =>
+        set((s) => ({
+          salaryAdvances: (s.salaryAdvances || []).filter((x) => x.id !== id),
+        })),
+
+      // ── Expense Float actions ─────────────────────────────────────
+      // Phase 27 Batch 3 — expense_floats is now server-backed.
+      // spent_amount/balance_amount/status/settled_at are 100%
+      // trigger-owned (see lib/expenseFloatsApi.ts's notes) - the old
+      // local deriveFloatTotals recompute here is dead weight now, since
+      // every caller passes in the row the remote call actually
+      // returned. floatCounter is kept purely as a local "next suggested
+      // number" UX hint for PettyExpenses.tsx's Issue Float dialog - the
+      // real collision-safe number comes from
+      // createExpenseFloatRemote's bounded retry against live server
+      // state, never from this counter alone.
+      addExpenseFloat: (f) =>
+        set((s) => ({
+          expenseFloats: [...(s.expenseFloats || []), f],
+          floatCounter: (s.floatCounter || 0) + 1,
+        })),
+
+      updateExpenseFloat: (f) =>
+        set((s) => ({
+          expenseFloats: (s.expenseFloats || []).map((x) =>
+            x.id === f.id ? f : x,
+          ),
+        })),
+
+      deleteExpenseFloat: (id) =>
+        set((s) => ({
+          expenseFloats: (s.expenseFloats || []).filter((x) => x.id !== id),
+        })),
+
+      // ── Production Movement actions ───────────────────────────────
+      addProductionMovement: (m) =>
+        set((s) => ({
+          productionMovements: [...(s.productionMovements || []), m],
+        })),
+
+      // ── Repeat Order action ───────────────────────────────────────
+      repeatProject: async (projectId, options) => {
+        const s = get();
+        const src = (s.projects || []).find((p) => p.id === projectId);
+        if (!src) return null;
+
+        // Resolve the canonical customer-visible base name
+        const baseCustomerName =
+          src.customerVisibleName || src.originalProjectName || src.projectName;
+
+        // Count existing repeat orders from this source (or its parent)
+        const rootId = src.parentProjectId || src.sourceProjectId || projectId;
+        const existingRepeats = (s.projects || []).filter(
+          (p) =>
+            p.parentProjectId === rootId ||
+            p.parentProjectId === projectId ||
+            p.sourceProjectId === rootId ||
+            p.sourceProjectId === projectId,
+        );
+        const seq = existingRepeats.length + 1;
+
+        const internalOrderCode = `ORD-${String(seq).padStart(3, "0")}`;
+        // projectName keeps the full internal tracking name; customerVisibleName is the clean name
+        const internalProjectName = `${baseCustomerName} - ${internalOrderCode}`;
+
+        const year = new Date().getFullYear();
+        const projCount = (s.projects || []).length + 1;
+        const initialProjectNo = `PROJ-${year}-${String(projCount).padStart(3, "0")}`;
+
+        // Phase 22 — remote-first. The Project row goes through the same
+        // remote boundary and bounded project-number retry as primary
+        // creation. Design files/BOM items/internal costing/production
+        // stages stay local-only clones exactly as before - none of
+        // those domains are migrated this phase (Decision 1), so this is
+        // not a partial migration of repeatProject, it's the same "only
+        // this domain's own table moves" boundary already applied
+        // everywhere else.
+        const result = await createProjectRemote({
+          projectNo: initialProjectNo,
+          customerId: src.customerId,
+          projectName: options.newName || internalProjectName,
+          workDescription: src.workDescription,
+          totalQty: src.totalQty,
+          productionVersion: src.productionVersion,
+          customerVisibleName: baseCustomerName,
+          internalOrderCode,
+          projectType: "REPEAT_ORDER",
+          parentProjectId: rootId,
+          originalProjectName: baseCustomerName,
+          sourceProjectId: rootId,
+          repeatOrderSeq: seq,
+          activityLog: [
+            {
+              id: crypto.randomUUID(),
+              type: "project_created",
+              description: `Repeat order ${internalOrderCode} created from ${baseCustomerName}`,
+              performedBy: "system",
+              timestamp: Date.now(),
+            },
+          ],
+        });
+
+        if (result.status !== "success" || !result.data) {
+          return null;
+        }
+
+        const newId = result.data.id;
+        const newProject: Project = {
+          ...result.data,
+          // Inherited from source - matches the original spread-based
+          // behavior exactly (assignedEmployeeIds was never explicitly
+          // reset by repeatProject).
+          assignedEmployeeIds: src.assignedEmployeeIds,
+          // Reset operational fields - matches original behavior exactly.
+          pos: [],
+          poNumber: undefined,
+          poDate: undefined,
+          poFiles: [],
+        };
+
+        // Deep-clone design files
+        const newDesignFiles = options.copyDesignFiles
+          ? (s.designFiles || [])
+              .filter((f) => f.projectId === projectId)
+              .map((f) => ({ ...f, id: crypto.randomUUID(), projectId: newId }))
+          : [];
+
+        // Deep-clone BOM items
+        const newBomItems = options.copyBOM
+          ? (s.bomItems || [])
+              .filter((b) => b.projectId === projectId)
+              .map((b) => ({
+                ...b,
+                id: crypto.randomUUID(),
+                projectId: newId,
+                createdAt: Date.now(),
+              }))
+          : [];
+
+        // Deep-clone internal costing (structure only, not values)
+        const srcCosting = (s.internalCostings || []).find(
+          (c) => c.projectId === projectId,
+        );
+        const newCosting =
+          options.copyCosting && srcCosting
+            ? [{ ...srcCosting, id: crypto.randomUUID(), projectId: newId }]
+            : [];
+
+        // Deep-clone production stages (reset progress)
+        const srcProd = (s.projectProductions || []).find(
+          (p) => p.projectId === projectId,
+        );
+        const newProd: ProjectProduction[] =
+          options.copyStages && srcProd
+            ? [
+                {
+                  id: crypto.randomUUID(),
+                  projectId: newId,
+                  version: srcProd.version,
+                  stages: srcProd.stages.map((st) => ({
+                    ...st,
+                    status: "NotStarted" as ProjectStageStatus,
+                    notes: "",
+                    quantitySent: 0,
+                    sentDateTime: "",
+                    receivedQuantity: 0,
+                    receivedDateTime: "",
+                    startTime: "",
+                    endTime: "",
+                    transactions: [],
+                    sentQty: 0,
+                    receivedQty: 0,
+                    okQty: 0,
+                    rejectedQty: 0,
+                    reworkQty: 0,
+                    wipInProgressQty: 0,
+                    wipCompletedQty: 0,
+                    wipDispatchedQty: 0,
+                    // Phase 32 (Task #173) - this is a NEW, independent
+                    // stage instance in the new project, not the same
+                    // stage as the source; `...st` above would otherwise
+                    // carry the source's stageId over verbatim, making
+                    // two unrelated stages (in two different projects)
+                    // share one id. Every cloned stage gets its own fresh
+                    // id, same as every other stage-creation path.
+                    stageId: crypto.randomUUID(),
+                  })),
+                },
+              ]
+            : [];
+
+        set((st) => ({
+          projects: [...(st.projects || []), newProject],
+          designFiles: [...(st.designFiles || []), ...newDesignFiles],
+          bomItems: [...(st.bomItems || []), ...newBomItems],
+          internalCostings: [...(st.internalCostings || []), ...newCosting],
+          projectProductions: [...(st.projectProductions || []), ...newProd],
+        }));
+
+        return newId;
+      },
+
+      restoreFromBackup: (data) =>
+        set(() => {
+          const backupQuotations = (data.quotations as Quotation[]) || [];
+          const { revisions: migratedRevisions, purchaseOrders: migratedPOs } =
+            migrateQuotationsToRevisions(
+              backupQuotations,
+              (data.quotationRevisions as QuotationRevision[]) || [],
+              (data.quotationPurchaseOrders as QuotationPurchaseOrder[]) || [],
+            );
+          const backupFloats = (data.expenseFloats as ExpenseFloat[]) || [];
+          const pettyExpensesWithLegacySpend = migrateExpenseFloatLegacySpend(
+            backupFloats,
+            (data.pettyExpenses as PettyExpense[]) || [],
+          );
+          const expenseFloatsDerived = backupFloats.map((f) => ({
+            ...f,
+            ...deriveFloatTotals(f, pettyExpensesWithLegacySpend),
+          }));
+          const advanceRecordsWithMigratedSA =
+            migrateSalaryAdvancesToAdvanceRecords(
+              (data.salaryAdvances as SalaryAdvance[]) || [],
+              (data.advanceRecords as AdvanceRecord[]) || [],
+            );
+          return {
+            customers: (data.customers as Customer[]) || [],
+            projects: (data.projects as Project[]) || [],
+            quotations: backupQuotations,
+            quotationRevisions: migratedRevisions,
+            quotationPurchaseOrders: migratedPOs,
+            purchaseOrders: (data.purchaseOrders as PurchaseOrder[]) || [],
+            masterPOs: (data.masterPOs as MasterPO[]) || [],
+            companyPOs: (data.companyPOs as CompanyPO[]) || [],
+            inventoryItems: (data.inventoryItems as InventoryItem[]) || [],
+            materialRequisitions:
+              (data.materialRequisitions as MaterialRequisition[]) || [],
+            // Phase 32 (Task #173) - a backup exported before this feature
+            // existed won't have stageId on most stages; backfill here too
+            // (not just in `merge`) since restoreFromBackup sets state
+            // directly, bypassing merge until the next page reload.
+            projectProductions: migrateProjectProductionStageIds(
+              (data.projectProductions as ProjectProduction[]) || [],
+            ),
+            deliveryChallans:
+              (data.deliveryChallans as DeliveryChallan[]) || [],
+            invoices: (data.invoices as Invoice[]) || [],
+            payments: (data.payments as Payment[]) || [],
+            pettyExpenses: pettyExpensesWithLegacySpend,
+            employees: (data.employees as Employee[]) || [],
+            employeeDocuments:
+              (data.employeeDocuments as EmployeeDocument[]) || [],
+            vendors: (data.vendors as Vendor[]) || [],
+            payables: (data.payables as Payable[]) || [],
+            payablePayments: (data.payablePayments as PayablePayment[]) || [],
+            materialUsages: (data.materialUsages as MaterialUsage[]) || [],
+            materialPurchases:
+              (data.materialPurchases as MaterialPurchase[]) || [],
+            outsourcedWorks: (data.outsourcedWorks as OutsourcedWork[]) || [],
+            advanceRecords: advanceRecordsWithMigratedSA,
+            salaryPayments: (data.salaryPayments as SalaryPayment[]) || [],
+            inventoryPurchases:
+              (data.inventoryPurchases as InventoryPurchase[]) || [],
+            bomItems: (data.bomItems as BomItem[]) || [],
+            bomRequisitions: (data.bomRequisitions as BomRequisition[]) || [],
+            qualityInspections:
+              (data.qualityInspections as QualityInspection[]) || [],
+            designFiles: (data.designFiles as DesignFile[]) || [],
+            internalCostings:
+              (data.internalCostings as InternalCosting[]) || [],
+            attendanceRecords:
+              (data.attendanceRecords as AttendanceRecord[]) || [],
+            projectDeliveries:
+              (data.projectDeliveries as ProjectDelivery[]) || [],
+            projectItems: (data.projectItems as ProjectItem[]) || [],
+            machines: (data.machines as Machine[]) || [],
+            serviceRecords: (data.serviceRecords as ServiceRecord[]) || [],
+            serviceParts: (data.serviceParts as ServicePart[]) || [],
+            machineDocuments:
+              (data.machineDocuments as MachineDocument[]) || [],
+            machineUsageLogs:
+              (data.machineUsageLogs as MachineUsageLog[]) || [],
+            auditLogs: (data.auditLogs as AuditLogEntry[]) || [],
+            salaryAdvances: (data.salaryAdvances as SalaryAdvance[]) || [],
+            expenseFloats: expenseFloatsDerived,
+            productionMovements:
+              (data.productionMovements as ProductionMovement[]) || [],
+          };
+        }),
       addPayablePayment: (p) =>
         set((s) => {
           const payable = s.payables.find((x) => x.id === p.payableId);
@@ -1532,14 +3305,40 @@ export const useStore = create<Store>()(
       name: "fabflow-erp-store",
       merge: (persistedState: unknown, currentState) => {
         const ps = (persistedState as Partial<typeof currentState>) || {};
+        const mergedQuotations = ps.quotations || currentState.quotations || [];
+        const { revisions: migratedRevisions, purchaseOrders: migratedPOs } =
+          migrateQuotationsToRevisions(
+            mergedQuotations,
+            ps.quotationRevisions || currentState.quotationRevisions || [],
+            ps.quotationPurchaseOrders ||
+              currentState.quotationPurchaseOrders ||
+              [],
+          );
+        const mergedFloats =
+          ps.expenseFloats || currentState.expenseFloats || [];
+        const pettyExpensesWithLegacySpend = migrateExpenseFloatLegacySpend(
+          mergedFloats,
+          ps.pettyExpenses || currentState.pettyExpenses || [],
+        );
+        const mergedFloatsDerived = mergedFloats.map((f) => ({
+          ...f,
+          ...deriveFloatTotals(f, pettyExpensesWithLegacySpend),
+        }));
+        const advanceRecordsWithMigratedSA =
+          migrateSalaryAdvancesToAdvanceRecords(
+            ps.salaryAdvances || currentState.salaryAdvances || [],
+            ps.advanceRecords || currentState.advanceRecords || [],
+          );
         return {
           ...currentState,
           ...ps,
-          pettyExpenses: ps.pettyExpenses || currentState.pettyExpenses || [],
+          pettyExpenses: pettyExpensesWithLegacySpend,
           companyPOs: ps.companyPOs || currentState.companyPOs || [],
           vendors: ps.vendors || currentState.vendors || [],
           projects: ps.projects || currentState.projects || [],
           employees: ps.employees || currentState.employees || [],
+          employeeDocuments:
+            ps.employeeDocuments || currentState.employeeDocuments || [],
           inventoryItems:
             ps.inventoryItems || currentState.inventoryItems || [],
           bomItems: ps.bomItems || currentState.bomItems || [],
@@ -1565,8 +3364,9 @@ export const useStore = create<Store>()(
             ps.materialPurchases || currentState.materialPurchases || [],
           outsourcedWorks:
             ps.outsourcedWorks || currentState.outsourcedWorks || [],
-          projectProductions:
+          projectProductions: migrateProjectProductionStageIds(
             ps.projectProductions || currentState.projectProductions || [],
+          ),
           projectDeliveries:
             ps.projectDeliveries || currentState.projectDeliveries || [],
           designFiles: ps.designFiles || currentState.designFiles || [],
@@ -1577,13 +3377,37 @@ export const useStore = create<Store>()(
             ps.attendanceRecords || currentState.attendanceRecords || [],
           salaryPayments:
             ps.salaryPayments || currentState.salaryPayments || [],
-          advanceRecords:
-            ps.advanceRecords || currentState.advanceRecords || [],
+          advanceRecords: advanceRecordsWithMigratedSA,
           inventoryPurchases:
             ps.inventoryPurchases || currentState.inventoryPurchases || [],
           reminderLogs: ps.reminderLogs || currentState.reminderLogs || [],
           projectItems: ps.projectItems || currentState.projectItems || [],
-          quotations: ps.quotations || currentState.quotations || [],
+          quotations: mergedQuotations,
+          quotationRevisions: migratedRevisions,
+          quotationPurchaseOrders: migratedPOs,
+          machines: ps.machines || currentState.machines || [],
+          serviceRecords:
+            ps.serviceRecords || currentState.serviceRecords || [],
+          serviceParts: ps.serviceParts || currentState.serviceParts || [],
+          machineDocuments:
+            ps.machineDocuments || currentState.machineDocuments || [],
+          machineUsageLogs:
+            ps.machineUsageLogs || currentState.machineUsageLogs || [],
+          exportJobs: ps.exportJobs || currentState.exportJobs || [],
+          auditLogs: ps.auditLogs || currentState.auditLogs || [],
+          stockReservations:
+            ps.stockReservations || currentState.stockReservations || [],
+          scrapRecords: ps.scrapRecords || currentState.scrapRecords || [],
+          salaryAdvances:
+            ps.salaryAdvances || currentState.salaryAdvances || [],
+          expenseFloats: mergedFloatsDerived,
+          productionMovements:
+            ps.productionMovements || currentState.productionMovements || [],
+          floatCounter: ps.floatCounter ?? currentState.floatCounter ?? 0,
+          // Deep-merge so a persisted store from before a new counter key
+          // (e.g. EMP) was added doesn't silently drop it and produce NaN
+          // the first time generateDocNo(prefix) runs on that key.
+          counters: { ...currentState.counters, ...(ps.counters || {}) },
         };
       },
     },

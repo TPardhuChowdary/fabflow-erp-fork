@@ -18,6 +18,10 @@ import {
 import { Download, Eye, ShieldOff, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import {
+  deleteMasterPORemote,
+  updateMasterPORemote,
+} from "../lib/purchaseOrdersApi";
 import { canDelete, canEdit, canView } from "../permissions";
 import { useStore } from "../store";
 import type { MasterPO, ProjectPOStatus } from "../types";
@@ -48,16 +52,36 @@ export function PurchaseOrders() {
       (proj.pos || []).some((po) => po.sharedPoId === sharedPoId),
     );
 
-  const updateStatus = (id: string, status: MasterPOStatus) => {
+  const updateStatus = async (id: string, status: MasterPOStatus) => {
     if (!pEdit) {
       toast.error("Access restricted: edit permission required");
       return;
     }
     const po = (masterPOs || []).find((x) => x.id === id);
-    if (po) {
-      updateMasterPO({ ...po, status });
-      toast.success("Status updated");
+    if (!po) return;
+    const result = await updateMasterPORemote({
+      id,
+      poNumber: po.poNumber,
+      poDate: po.poDate,
+      customerId: po.customerId,
+      quotationId: po.quotationId,
+      files: po.files,
+      status,
+    });
+    if (result.status === "unauthenticated") {
+      toast.error("Not signed in to the server - status was not updated");
+      return;
     }
+    if (result.status === "denied" || result.status === "error") {
+      toast.error(result.error ?? "Could not update status");
+      return;
+    }
+    if (!result.data) {
+      toast.error("Could not update status");
+      return;
+    }
+    updateMasterPO(result.data);
+    toast.success("Status updated");
   };
 
   const openFile = (file: { ref?: string; type?: string; name?: string }) => {
@@ -282,13 +306,29 @@ export function PurchaseOrders() {
                           variant="ghost"
                           size="sm"
                           className="h-6 px-2"
-                          onClick={() => {
+                          onClick={async () => {
                             if (
                               !window.confirm(
                                 `Are you sure you want to delete PO "${po.poNumber}"? This cannot be undone.`,
                               )
                             )
                               return;
+                            const result = await deleteMasterPORemote(po.id);
+                            if (result.status === "unauthenticated") {
+                              toast.error(
+                                "Not signed in to the server - PO was not deleted",
+                              );
+                              return;
+                            }
+                            if (
+                              result.status === "denied" ||
+                              result.status === "error"
+                            ) {
+                              toast.error(
+                                result.error ?? "Could not delete PO",
+                              );
+                              return;
+                            }
                             deleteMasterPO(po.id);
                             toast.success("Purchase order deleted");
                           }}

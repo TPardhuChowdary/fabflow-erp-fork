@@ -18,8 +18,10 @@ import {
 import { Plus } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { useAuth } from "../AuthContext";
+import { createVendorRemote } from "../lib/vendorsApi";
+import { canCreate } from "../permissions";
 import { useStore } from "../store";
-import type { Vendor } from "../types";
 
 const ADD_NEW_SENTINEL = "__add_new__";
 
@@ -37,7 +39,10 @@ export function VendorSelect({
   "data-ocid": dataOcid,
 }: Props) {
   const { vendors, addVendor } = useStore();
+  const { currentUser } = useAuth();
+  const pCreate = canCreate(currentUser, "vendors");
   const [modalOpen, setModalOpen] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [form, setForm] = useState({
     name: "",
     phone: "",
@@ -49,6 +54,7 @@ export function VendorSelect({
 
   const handleSelect = (val: string) => {
     if (val === ADD_NEW_SENTINEL) {
+      if (!pCreate) return;
       setModalOpen(true);
       return;
     }
@@ -56,7 +62,14 @@ export function VendorSelect({
     if (vendor) onChange(vendor.id, vendor.name);
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
+    // Phase 21A — defensive re-check, mirrors the trigger-hiding gate
+    // below. The UI already hides the trigger for a non-vendors.create
+    // user, but the handler itself must not trust that alone.
+    if (!pCreate) {
+      toast.error("You do not have permission to add vendors");
+      return;
+    }
     if (!form.name.trim()) {
       toast.error("Vendor name is required");
       return;
@@ -72,19 +85,36 @@ export function VendorSelect({
       setForm({ name: "", phone: "", address: "", gstNumber: "" });
       return;
     }
-    const newVendor: Vendor = {
-      id: crypto.randomUUID(),
-      name: form.name.trim(),
-      phone: form.phone.trim(),
-      address: form.address.trim(),
-      gstNumber: form.gstNumber.trim() || undefined,
-      createdAt: Date.now(),
-    };
-    addVendor(newVendor);
-    onChange(newVendor.id, newVendor.name);
-    toast.success("Vendor added");
-    setModalOpen(false);
-    setForm({ name: "", phone: "", address: "", gstNumber: "" });
+    if (isSaving) return;
+    setIsSaving(true);
+    try {
+      // Phase 21A — remote-first, same contract as Vendors.tsx.
+      const result = await createVendorRemote({
+        name: form.name.trim(),
+        phone: form.phone.trim(),
+        address: form.address.trim(),
+        gstNumber: form.gstNumber.trim() || undefined,
+      });
+      if (result.status === "unauthenticated") {
+        toast.error("Not signed in to the server - vendor was not saved");
+        return;
+      }
+      if (result.status === "denied" || result.status === "error") {
+        toast.error(result.error ?? "Could not save vendor");
+        return;
+      }
+      if (!result.data) {
+        toast.error("Could not save vendor");
+        return;
+      }
+      addVendor(result.data);
+      onChange(result.data.id, result.data.name);
+      toast.success("Vendor added");
+      setModalOpen(false);
+      setForm({ name: "", phone: "", address: "", gstNumber: "" });
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -105,13 +135,15 @@ export function VendorSelect({
               {v.name}
             </SelectItem>
           ))}
-          <div className="border-t border-border mt-1 pt-1">
-            <SelectItem value={ADD_NEW_SENTINEL}>
-              <span className="flex items-center gap-1.5 text-primary font-medium">
-                <Plus className="w-3.5 h-3.5" /> Add New Vendor
-              </span>
-            </SelectItem>
-          </div>
+          {pCreate && (
+            <div className="border-t border-border mt-1 pt-1">
+              <SelectItem value={ADD_NEW_SENTINEL}>
+                <span className="flex items-center gap-1.5 text-primary font-medium">
+                  <Plus className="w-3.5 h-3.5" /> Add New Vendor
+                </span>
+              </SelectItem>
+            </div>
+          )}
         </SelectContent>
       </Select>
 
@@ -178,6 +210,7 @@ export function VendorSelect({
             <Button
               size="sm"
               onClick={handleSave}
+              disabled={isSaving}
               data-ocid="vendor_select.dialog.submit_button"
             >
               Add Vendor

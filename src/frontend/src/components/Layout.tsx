@@ -3,29 +3,36 @@ import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 import {
   Archive,
+  BookOpen,
   Building2,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ClipboardCheck,
   ClipboardList,
   CreditCard,
   DollarSign,
   Factory,
+  FileDown,
   FileText,
-  FlaskConical,
   FolderKanban,
   LayoutDashboard,
+  LibraryBig,
   LogOut,
   Menu,
   Package,
+  PencilRuler,
   Receipt,
   Settings,
   Settings2,
+  ShieldCheck,
   ShoppingCart,
   Truck,
+  UserCheck,
   UserCircle2,
   Users,
   Wallet,
+  Wrench,
 } from "lucide-react";
 import { type ReactNode, useState } from "react";
 import { useAuth } from "../AuthContext";
@@ -108,7 +115,14 @@ const navGroups: NavGroup[] = [
   },
   {
     label: "Production",
-    moduleKeys: ["production", "material_requisitions", "inventory"],
+    moduleKeys: [
+      "production",
+      "material_requisitions",
+      "inventory",
+      "machinery",
+      "scrap",
+      "drawing_editor",
+    ],
     items: [
       {
         label: "Production",
@@ -128,23 +142,65 @@ const navGroups: NavGroup[] = [
         icon: Archive,
         moduleKey: "inventory",
       },
+      {
+        label: "Machinery",
+        page: "machinery",
+        icon: Wrench,
+        moduleKey: "machinery",
+      },
+      {
+        label: "Scrap",
+        page: "scrap",
+        icon: Package,
+        moduleKey: "inventory",
+      },
+      {
+        label: "Drawing Repository",
+        page: "drawing-editor",
+        icon: PencilRuler,
+        moduleKey: "drawing_editor",
+      },
     ],
   },
   {
-    label: "Quality & Logistics",
-    moduleKeys: ["quality_inspection", "delivery_challans"],
+    label: "Logistics",
+    moduleKeys: ["delivery_challans"],
     items: [
-      {
-        label: "Quality Inspection",
-        page: "quality",
-        icon: FlaskConical,
-        moduleKey: "quality_inspection",
-      },
       {
         label: "Delivery Challans",
         page: "delivery-challans",
         icon: Truck,
         moduleKey: "delivery_challans",
+      },
+    ],
+  },
+  {
+    label: "Quality Management (QMS)",
+    moduleKeys: ["quality_characteristics", "inspection_sheets"],
+    items: [
+      {
+        label: "QMS Dashboard",
+        page: "qms-dashboard",
+        icon: ShieldCheck,
+        moduleKey: "quality_characteristics",
+      },
+      {
+        label: "Characteristic Library",
+        page: "qms-characteristics",
+        icon: LibraryBig,
+        moduleKey: "quality_characteristics",
+      },
+      {
+        label: "Inspection Sheets",
+        page: "qms-inspection-sheets",
+        icon: ClipboardCheck,
+        moduleKey: "inspection_sheets",
+      },
+      {
+        label: "My Assigned Inspections",
+        page: "qms-my-inspections",
+        icon: UserCheck,
+        moduleKey: "inspection_sheets",
       },
     ],
   },
@@ -175,6 +231,18 @@ const navGroups: NavGroup[] = [
         page: "petty-expenses",
         icon: DollarSign,
         moduleKey: "petty_expenses",
+      },
+    ],
+  },
+  {
+    label: "Accounts",
+    moduleKeys: ["ledger"],
+    items: [
+      {
+        label: "Ledger",
+        page: "ledger",
+        icon: BookOpen,
+        moduleKey: "ledger",
       },
     ],
   },
@@ -229,7 +297,8 @@ export function Layout({ currentPage, onNavigate, children }: Props) {
   const isActive = (page: Page) =>
     currentPage === page ||
     (page === "projects" && currentPage === "project-detail") ||
-    (page === "employees" && currentPage === "employee-detail");
+    (page === "employees" && currentPage === "employee-detail") ||
+    (page === "machinery" && currentPage === "machine-detail");
 
   const isItemVisible = (item: NavItem) => {
     if (item.moduleKey === "__always__") return true;

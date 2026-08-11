@@ -1,9 +1,12 @@
 import { Toaster } from "@/components/ui/sonner";
 import { useEffect, useState } from "react";
 import { AuthProvider, useAuth } from "./AuthContext";
+import { ForcePasswordChangeScreen } from "./components/ForcePasswordChangeScreen";
 import { InvoicePrintView } from "./components/InvoicePrintView";
 import { Layout } from "./components/Layout";
 import { QuotationPrintView } from "./components/QuotationPrintView";
+import { DrawingEditorPage } from "./drawingEditor/pages/DrawingEditorPage";
+import { useSupabaseHydration } from "./hooks/useSupabaseHydration";
 import CompanyPOs from "./pages/CompanyPOs";
 import { CustomerHistory } from "./pages/CustomerHistory";
 import { Customers } from "./pages/Customers";
@@ -11,9 +14,13 @@ import { Dashboard } from "./pages/Dashboard";
 import { DeliveryChallans } from "./pages/DeliveryChallans";
 import { EmployeeDetail } from "./pages/EmployeeDetail";
 import { Employees } from "./pages/Employees";
+import { ExportEngine } from "./pages/ExportEngine";
 import { Inventory } from "./pages/Inventory";
 import { Invoices } from "./pages/Invoices";
+import { Ledger } from "./pages/Ledger";
 import { LoginPage } from "./pages/LoginPage";
+import { MachineDetail } from "./pages/MachineDetail";
+import { Machinery } from "./pages/Machinery";
 import { MaterialRequisitions } from "./pages/MaterialRequisitions";
 import { Payables } from "./pages/Payables";
 import { Payments } from "./pages/Payments";
@@ -24,14 +31,23 @@ import { Projects } from "./pages/Projects";
 import { PurchaseOrders } from "./pages/PurchaseOrders";
 import { Quality } from "./pages/Quality";
 import { Quotations } from "./pages/Quotations";
+import { ScrapManagement } from "./pages/ScrapManagement";
 import { Settings } from "./pages/Settings";
 import { Vendors } from "./pages/Vendors";
 import { canView } from "./permissions";
+import { InspectionSheetsList } from "./qms/pages/InspectionSheetsList";
+import { InspectorDashboard } from "./qms/pages/InspectorDashboard";
+import { QmsDashboard } from "./qms/pages/QmsDashboard";
+import { QualityCharacteristicLibrary } from "./qms/pages/QualityCharacteristicLibrary";
 import { useStore } from "./store";
 import type { Invoice, Page, Quotation } from "./types";
 
 function AppInner() {
   const { currentUser, isInitializing } = useAuth();
+  // Phase 18 — independent of the local-auth gate above: checks its own
+  // Supabase Auth session and safely no-ops if none exists (see
+  // useSupabaseHydration.ts for the full rationale).
+  useSupabaseHydration();
   const [page, setPage] = useState<Page>("dashboard");
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>("");
   const [selectedProjectId, setSelectedProjectId] = useState<string>("");
@@ -40,6 +56,49 @@ function AppInner() {
   const [selectedQuotation, setSelectedQuotation] = useState<Quotation | null>(
     null,
   );
+  const [selectedMachineId, setSelectedMachineId] = useState<string>("");
+  const [exportContext, setExportContext] = useState<{
+    type: "project" | "customer";
+    id: string;
+    name: string;
+  } | null>(null);
+  const [selectedDrawingEditorContext, setSelectedDrawingEditorContext] =
+    useState<{
+      ownerType?: "project" | "machine";
+      ownerId?: string;
+      drawingId?: string;
+    } | null>(null);
+  /** Carries a one-shot "land on this tab, highlight this row" instruction
+   * for a cross-module navigation (e.g. Petty Expense History's "View
+   * Inventory Record"). Consumed by Inventory/MachineDetail/EmployeeDetail
+   * as initialTab/highlight props. */
+  const [moduleNavContext, setModuleNavContext] = useState<{
+    tab?: string;
+    highlightId?: string;
+  } | null>(null);
+
+  // Clear the carried-over project/drawing context as soon as the user
+  // leaves the editor — otherwise clicking the plain global nav item after
+  // visiting a project would incorrectly reopen that project's context.
+  useEffect(() => {
+    if (page !== "drawing-editor" && selectedDrawingEditorContext) {
+      setSelectedDrawingEditorContext(null);
+    }
+  }, [page, selectedDrawingEditorContext]);
+
+  // Same rationale as above, for moduleNavContext: only relevant on the
+  // three pages it can target, otherwise clear it so a later plain visit
+  // to that page doesn't inherit a stale highlight/tab.
+  useEffect(() => {
+    if (
+      page !== "inventory" &&
+      page !== "machine-detail" &&
+      page !== "employee-detail" &&
+      moduleNavContext
+    ) {
+      setModuleNavContext(null);
+    }
+  }, [page, moduleNavContext]);
   const { customers } = useStore();
 
   const sendEmailReminder = async (inv: Invoice) => {
@@ -117,6 +176,10 @@ function AppInner() {
     return <LoginPage />;
   }
 
+  if (currentUser.mustChangePassword) {
+    return <ForcePasswordChangeScreen />;
+  }
+
   const accessDenied = (
     <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
       <div className="flex items-center justify-center w-16 h-16 rounded-full bg-destructive/10">
@@ -156,6 +219,10 @@ function AppInner() {
               setSelectedProjectId(id);
               setPage("project-detail");
             }}
+            onGenerateReport={(id, name) => {
+              setExportContext({ type: "customer", id, name });
+              setPage("export-engine");
+            }}
           />
         );
       case "projects":
@@ -173,6 +240,18 @@ function AppInner() {
           <ProjectDetail
             projectId={selectedProjectId}
             onBack={() => setPage("projects")}
+            onGenerateReport={(id, name) => {
+              setExportContext({ type: "project", id, name });
+              setPage("export-engine");
+            }}
+            onOpenDrawingEditor={(context) => {
+              setSelectedDrawingEditorContext({
+                ownerType: "project",
+                ownerId: context.projectId,
+                drawingId: context.drawingId,
+              });
+              setPage("drawing-editor");
+            }}
           />
         );
       case "employees":
@@ -189,10 +268,18 @@ function AppInner() {
           <EmployeeDetail
             employeeId={selectedEmployeeId}
             onBack={() => setPage("employees")}
+            initialTab={moduleNavContext?.tab}
           />
         );
       case "inventory":
-        return <Inventory />;
+        return (
+          <Inventory
+            initialTab={
+              moduleNavContext?.tab as "stock" | "purchases" | undefined
+            }
+            highlightPurchaseId={moduleNavContext?.highlightId}
+          />
+        );
       case "settings":
         if (!canView(currentUser, "settings")) return accessDenied;
         return <Settings />;
@@ -204,7 +291,14 @@ function AppInner() {
       case "company-po":
         return <CompanyPOs />;
       case "production":
-        return <Production />;
+        return (
+          <Production
+            onOpenProject={(id) => {
+              setSelectedProjectId(id);
+              setPage("project-detail");
+            }}
+          />
+        );
       case "material-requisitions":
         if (!canView(currentUser, "material_requisitions")) return accessDenied;
         return <MaterialRequisitions />;
@@ -222,9 +316,119 @@ function AppInner() {
         return <Payables />;
       case "petty-expenses":
         if (!canView(currentUser, "petty_expenses")) return accessDenied;
-        return <PettyExpenses />;
+        return (
+          <PettyExpenses
+            onViewInventoryPurchase={(purchaseId) => {
+              setModuleNavContext({
+                tab: "purchases",
+                highlightId: purchaseId,
+              });
+              setPage("inventory");
+            }}
+            onViewMachineService={(machineId, serviceId) => {
+              if (!canView(currentUser, "machinery")) return;
+              setSelectedMachineId(machineId);
+              setModuleNavContext({ tab: "service", highlightId: serviceId });
+              setPage("machine-detail");
+            }}
+            onViewEmployeeRecord={(employeeId) => {
+              if (!canView(currentUser, "employees")) return;
+              setSelectedEmployeeId(employeeId);
+              setModuleNavContext({ tab: "salary" });
+              setPage("employee-detail");
+            }}
+          />
+        );
       case "vendors":
         return <Vendors onNavigate={setPage} />;
+      case "machinery":
+        if (!canView(currentUser, "machinery")) return accessDenied;
+        return (
+          <Machinery
+            onViewMachine={(id) => {
+              setSelectedMachineId(id);
+              setPage("machine-detail");
+            }}
+          />
+        );
+      case "machine-detail":
+        if (!canView(currentUser, "machinery")) return accessDenied;
+        return (
+          <MachineDetail
+            machineId={selectedMachineId}
+            onBack={() => setPage("machinery")}
+            initialTab={moduleNavContext?.tab}
+            highlightServiceId={moduleNavContext?.highlightId}
+            onOpenDrawingEditor={(context) => {
+              setSelectedDrawingEditorContext({
+                ownerType: "machine",
+                ownerId: context.machineId,
+                drawingId: context.drawingId,
+              });
+              setPage("drawing-editor");
+            }}
+          />
+        );
+      case "export-engine":
+        if (!canView(currentUser, "export_engine")) return accessDenied;
+        return (
+          <ExportEngine
+            context={exportContext}
+            onBack={() => {
+              if (exportContext?.type === "project") setPage("project-detail");
+              else setPage("customers");
+            }}
+          />
+        );
+      case "scrap":
+        return <ScrapManagement />;
+      case "qms-dashboard":
+        if (!canView(currentUser, "quality_characteristics"))
+          return accessDenied;
+        return <QmsDashboard onNavigate={setPage} />;
+      case "qms-characteristics":
+        if (!canView(currentUser, "quality_characteristics"))
+          return accessDenied;
+        return <QualityCharacteristicLibrary />;
+      case "qms-inspection-sheets":
+        if (!canView(currentUser, "inspection_sheets")) return accessDenied;
+        return (
+          <InspectionSheetsList
+            onViewProject={(id) => {
+              setSelectedProjectId(id);
+              setPage("project-detail");
+            }}
+          />
+        );
+      case "qms-my-inspections":
+        if (!canView(currentUser, "inspection_sheets")) return accessDenied;
+        return (
+          <InspectorDashboard
+            onOpenProject={(id) => {
+              setSelectedProjectId(id);
+              setPage("project-detail");
+            }}
+          />
+        );
+      case "drawing-editor":
+        if (!canView(currentUser, "drawing_editor")) return accessDenied;
+        return (
+          <DrawingEditorPage
+            initialOwnerType={selectedDrawingEditorContext?.ownerType}
+            initialOwnerId={selectedDrawingEditorContext?.ownerId}
+            initialDrawingId={selectedDrawingEditorContext?.drawingId}
+            onExitContext={
+              selectedDrawingEditorContext?.ownerType === "machine"
+                ? () => setPage("machine-detail")
+                : selectedDrawingEditorContext?.ownerType === "project"
+                  ? () => setPage("project-detail")
+                  : undefined
+            }
+          />
+        );
+      case "ledger":
+        if (!canView(currentUser, "ledger")) return accessDenied;
+        return <Ledger />;
       default:
         return <Dashboard onNavigate={setPage} />;
     }

@@ -51,6 +51,12 @@ import {
 } from "../lib/documentUtils";
 
 import {
+  createDeliveryChallanRemote,
+  deleteDeliveryChallanRemote,
+  updateDeliveryChallanRemote,
+} from "../lib/deliveryChallansApi";
+import { getCustomerVisibleName } from "../lib/utils";
+import {
   canCreate,
   canDelete,
   canDownload,
@@ -64,14 +70,29 @@ import type {
   DCProjectEntry,
   DCStatus,
   DeliveryChallan,
+  DispatchMethod,
   Project,
 } from "../types";
+
+export const DISPATCH_METHODS: DispatchMethod[] = [
+  "Company Vehicle",
+  "Customer Pickup",
+  "Courier",
+  "Transport / Logistics",
+];
 
 interface DCForm {
   selectedProjectIds: string[];
   customerId: string;
+  dispatchMethod: DispatchMethod;
   vehicleNo: string;
   driverName: string;
+  courierCompany: string;
+  trackingNumber: string;
+  transportCompany: string;
+  lrNumber: string;
+  collectedBy: string;
+  mobileNumber: string;
   dispatchDate: string;
   receiverName: string;
   dispatchQtys: Record<string, number>;
@@ -82,14 +103,77 @@ interface DCForm {
 const emptyForm = (): DCForm => ({
   selectedProjectIds: [],
   customerId: "",
+  dispatchMethod: "Company Vehicle",
   vehicleNo: "",
   driverName: "",
+  courierCompany: "",
+  trackingNumber: "",
+  transportCompany: "",
+  lrNumber: "",
+  collectedBy: "",
+  mobileNumber: "",
   dispatchDate: new Date().toISOString().split("T")[0],
   receiverName: "",
   dispatchQtys: {},
   useCustomerAddress: true,
   customDeliveryAddress: "",
 });
+
+/** Keeps only the dispatch fields relevant to the selected method, clearing
+ * the rest — so switching methods never leaves stale data (e.g. a leftover
+ * vehicle number) attached to a Courier/Transport/Pickup challan. */
+function buildDispatchFields(
+  method: DispatchMethod,
+  values: {
+    vehicleNo: string;
+    driverName: string;
+    courierCompany: string;
+    trackingNumber: string;
+    transportCompany: string;
+    lrNumber: string;
+    collectedBy: string;
+    mobileNumber: string;
+  },
+): Pick<
+  DeliveryChallan,
+  | "dispatchMethod"
+  | "vehicleNo"
+  | "driverName"
+  | "courierCompany"
+  | "trackingNumber"
+  | "transportCompany"
+  | "lrNumber"
+  | "collectedBy"
+  | "mobileNumber"
+> {
+  return {
+    dispatchMethod: method,
+    vehicleNo:
+      method === "Company Vehicle" ? values.vehicleNo || undefined : undefined,
+    driverName:
+      method === "Company Vehicle" ? values.driverName || undefined : undefined,
+    courierCompany:
+      method === "Courier" ? values.courierCompany || undefined : undefined,
+    trackingNumber:
+      method === "Courier" ? values.trackingNumber || undefined : undefined,
+    transportCompany:
+      method === "Transport / Logistics"
+        ? values.transportCompany || undefined
+        : undefined,
+    lrNumber:
+      method === "Transport / Logistics"
+        ? values.lrNumber || undefined
+        : undefined,
+    collectedBy:
+      method === "Customer Pickup"
+        ? values.collectedBy || undefined
+        : undefined,
+    mobileNumber:
+      method === "Customer Pickup"
+        ? values.mobileNumber || undefined
+        : undefined,
+  };
+}
 
 export function DeliveryChallans() {
   const { currentUser } = useAuth();
@@ -104,6 +188,7 @@ export function DeliveryChallans() {
     deliveryChallans,
     projects,
     customers,
+    invoices,
     addDeliveryChallan,
     updateDeliveryChallan,
     deleteDeliveryChallan,
@@ -125,15 +210,29 @@ export function DeliveryChallans() {
   );
   const [editForm, setEditForm] = useState<{
     qtys: Record<string, number>;
+    dispatchMethod: DispatchMethod;
     vehicleNo: string;
     driverName: string;
+    courierCompany: string;
+    trackingNumber: string;
+    transportCompany: string;
+    lrNumber: string;
+    collectedBy: string;
+    mobileNumber: string;
     receiverName: string;
     useCustomerAddress: boolean;
     customDeliveryAddress: string;
   }>({
     qtys: {},
+    dispatchMethod: "Company Vehicle",
     vehicleNo: "",
     driverName: "",
+    courierCompany: "",
+    trackingNumber: "",
+    transportCompany: "",
+    lrNumber: "",
+    collectedBy: "",
+    mobileNumber: "",
     receiverName: "",
     useCustomerAddress: true,
     customDeliveryAddress: "",
@@ -286,8 +385,15 @@ export function DeliveryChallans() {
     }
     setEditForm({
       qtys,
+      dispatchMethod: challan.dispatchMethod ?? "Company Vehicle",
       vehicleNo: challan.vehicleNo || "",
       driverName: challan.driverName || "",
+      courierCompany: challan.courierCompany || "",
+      trackingNumber: challan.trackingNumber || "",
+      transportCompany: challan.transportCompany || "",
+      lrNumber: challan.lrNumber || "",
+      collectedBy: challan.collectedBy || "",
+      mobileNumber: challan.mobileNumber || "",
       receiverName: challan.receiverName || "",
       useCustomerAddress: challan.deliveryAddress?.type !== "custom",
       customDeliveryAddress:
@@ -329,8 +435,7 @@ export function DeliveryChallans() {
     }
   }
 
-  function handleSaveEdit() {
-    console.log("FORM SUBMITTED");
+  async function handleSaveEdit() {
     if (isEditSaving) return;
     setIsEditSaving(true);
     try {
@@ -373,8 +478,7 @@ export function DeliveryChallans() {
       const updated: DeliveryChallan = {
         ...editingChallan,
         projectEntries: updatedEntries,
-        vehicleNo: editForm.vehicleNo,
-        driverName: editForm.driverName,
+        ...buildDispatchFields(editForm.dispatchMethod, editForm),
         receiverName: editForm.receiverName,
         deliveryAddress: {
           type: editForm.useCustomerAddress ? "customer" : "custom",
@@ -385,11 +489,44 @@ export function DeliveryChallans() {
         },
       };
 
-      updateDeliveryChallan(updated);
+      const result = await updateDeliveryChallanRemote({
+        id: updated.id,
+        dcNo: updated.dcNo,
+        customerId: updated.customerId,
+        items: updated.items,
+        projectEntries: updated.projectEntries,
+        dispatchMethod: updated.dispatchMethod,
+        vehicleNo: updated.vehicleNo,
+        driverName: updated.driverName,
+        courierCompany: updated.courierCompany,
+        trackingNumber: updated.trackingNumber,
+        transportCompany: updated.transportCompany,
+        lrNumber: updated.lrNumber,
+        collectedBy: updated.collectedBy,
+        mobileNumber: updated.mobileNumber,
+        dispatchDate: updated.dispatchDate,
+        receiverName: updated.receiverName,
+        status: updated.status,
+        deliveryAddress: updated.deliveryAddress,
+      });
+
+      if (result.status === "unauthenticated") {
+        toast.error("You must be signed in to update a delivery challan");
+        return;
+      }
+      if (result.status === "denied") {
+        toast.error("You do not have permission to update delivery challans");
+        return;
+      }
+      if (result.status === "error" || !result.data) {
+        toast.error(result.error || "Failed to update delivery challan");
+        return;
+      }
+
+      updateDeliveryChallan(result.data);
       setShowEditDialog(false);
       setEditingChallan(null);
       toast.success("Delivery Challan updated");
-      console.log("SAVE COMPLETE");
     } finally {
       setIsEditSaving(false);
     }
@@ -397,16 +534,50 @@ export function DeliveryChallans() {
 
   // ── Status update ────────────────────────────────────────────────
 
-  const updateStatus = (id: string, status: DCStatus) => {
+  const updateStatus = async (id: string, status: DCStatus) => {
     if (!pEdit) {
       toast.error("Access restricted: edit permission required");
       return;
     }
     const dc = safeChallans.find((x) => x.id === id);
-    if (dc) {
-      updateDeliveryChallan({ ...dc, status });
-      toast.success("Status updated");
+    if (!dc) return;
+
+    const result = await updateDeliveryChallanRemote({
+      id: dc.id,
+      dcNo: dc.dcNo,
+      customerId: dc.customerId,
+      items: dc.items,
+      projectEntries: dc.projectEntries,
+      dispatchMethod: dc.dispatchMethod,
+      vehicleNo: dc.vehicleNo,
+      driverName: dc.driverName,
+      courierCompany: dc.courierCompany,
+      trackingNumber: dc.trackingNumber,
+      transportCompany: dc.transportCompany,
+      lrNumber: dc.lrNumber,
+      collectedBy: dc.collectedBy,
+      mobileNumber: dc.mobileNumber,
+      dispatchDate: dc.dispatchDate,
+      receiverName: dc.receiverName,
+      status,
+      deliveryAddress: dc.deliveryAddress,
+    });
+
+    if (result.status === "unauthenticated") {
+      toast.error("You must be signed in to update a delivery challan");
+      return;
     }
+    if (result.status === "denied") {
+      toast.error("You do not have permission to update delivery challans");
+      return;
+    }
+    if (result.status === "error" || !result.data) {
+      toast.error(result.error || "Failed to update status");
+      return;
+    }
+
+    updateDeliveryChallan(result.data);
+    toast.success("Status updated");
   };
 
   // ── Project selection ────────────────────────────────────────────
@@ -482,12 +653,10 @@ export function DeliveryChallans() {
 
   // ── Save new challan ─────────────────────────────────────────────
 
-  function handleSave() {
-    console.log("FORM SUBMITTED");
+  async function handleSave() {
     if (isSaving) return;
     setIsSaving(true);
     try {
-      console.log("Creating challan:", form);
       if (form.selectedProjectIds.length === 0) {
         toast.error("Select at least one project");
         return;
@@ -547,21 +716,17 @@ export function DeliveryChallans() {
         toast.error(
           `Challan number ${dcNoToUse} already exists. Please use a different number.`,
         );
-        setIsSaving(false);
         return;
       }
       const dcNo = dcNoToUse;
-      addDeliveryChallan({
-        id: crypto.randomUUID(),
+      const result = await createDeliveryChallanRemote({
         dcNo,
         customerId: form.customerId,
         projectEntries,
-        vehicleNo: form.vehicleNo,
-        driverName: form.driverName,
+        ...buildDispatchFields(form.dispatchMethod, form),
         dispatchDate: form.dispatchDate,
         receiverName: form.receiverName,
         status: "Prepared",
-        createdAt: Date.now(),
         items: [],
         deliveryAddress: {
           type: form.useCustomerAddress ? "customer" : "custom",
@@ -571,12 +736,26 @@ export function DeliveryChallans() {
         },
       });
 
+      if (result.status === "unauthenticated") {
+        toast.error("You must be signed in to create a delivery challan");
+        return;
+      }
+      if (result.status === "denied") {
+        toast.error("You do not have permission to create delivery challans");
+        return;
+      }
+      if (result.status === "error" || !result.data) {
+        toast.error(result.error || "Failed to create delivery challan");
+        return;
+      }
+
+      addDeliveryChallan(result.data);
+
       toast.success(`Delivery Challan ${dcNo} created`);
       setOpen(false);
       setForm(emptyForm());
       setDcNumber("");
       setQtyErrors({});
-      console.log("SAVE COMPLETE");
     } finally {
       setIsSaving(false);
     }
@@ -661,11 +840,14 @@ export function DeliveryChallans() {
                 const projectNames =
                   (dc.projectEntries || []).length > 0
                     ? (dc.projectEntries || [])
-                        .map(
-                          (e) =>
-                            safeProjects.find((p) => p.id === e.projectId)
-                              ?.projectName || e.projectId,
-                        )
+                        .map((e) => {
+                          const proj = safeProjects.find(
+                            (p) => p.id === e.projectId,
+                          );
+                          return proj
+                            ? getCustomerVisibleName(proj)
+                            : e.projectId;
+                        })
                         .join(", ")
                     : "N/A";
                 return (
@@ -807,13 +989,48 @@ export function DeliveryChallans() {
                             type="button"
                             title="Delete"
                             className="p-1 rounded hover:bg-muted text-red-500"
-                            onClick={() => {
+                            onClick={async () => {
                               if (
                                 !window.confirm(
                                   `Are you sure you want to delete challan "${dc.dcNo}"? This cannot be undone.`,
                                 )
                               )
                                 return;
+                              // Relocated from the store's deleteDeliveryChallan
+                              // action (now a pure local sync) - this is still
+                              // a local business rule, but it must run before
+                              // the remote delete call, not after.
+                              const hasInvoices = (invoices || []).some(
+                                (inv) => inv.dcId === dc.id,
+                              );
+                              if (hasInvoices) {
+                                toast.error(
+                                  "Cannot delete delivery challan. Linked invoices exist.",
+                                );
+                                return;
+                              }
+                              const result = await deleteDeliveryChallanRemote(
+                                dc.id,
+                              );
+                              if (result.status === "unauthenticated") {
+                                toast.error(
+                                  "You must be signed in to delete a delivery challan",
+                                );
+                                return;
+                              }
+                              if (result.status === "denied") {
+                                toast.error(
+                                  "You do not have permission to delete delivery challans",
+                                );
+                                return;
+                              }
+                              if (result.status === "error") {
+                                toast.error(
+                                  result.error ||
+                                    "Failed to delete delivery challan",
+                                );
+                                return;
+                              }
                               deleteDeliveryChallan(dc.id);
                               toast.success("Delivery challan deleted");
                             }}
@@ -890,34 +1107,180 @@ export function DeliveryChallans() {
                 <div className="space-y-4">
                   {/* Logistics fields */}
                   <div className="form-grid">
-                    <div>
-                      <Label className="text-xs">Vehicle No</Label>
-                      <Input
-                        value={editForm.vehicleNo}
-                        onChange={(e) =>
+                    <div className="col-span-3">
+                      <Label className="text-xs">Dispatch Method</Label>
+                      <Select
+                        value={editForm.dispatchMethod}
+                        onValueChange={(v) =>
                           setEditForm((p) => ({
                             ...p,
-                            vehicleNo: e.target.value,
+                            dispatchMethod: v as DispatchMethod,
                           }))
                         }
-                        className="h-8 text-sm mt-1"
-                        data-ocid="delivery_challans.edit.vehicle.input"
-                      />
+                      >
+                        <SelectTrigger
+                          className="h-8 text-sm mt-1"
+                          data-ocid="delivery_challans.edit.dispatch_method.select"
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {DISPATCH_METHODS.map((m) => (
+                            <SelectItem key={m} value={m} className="text-sm">
+                              {m}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
                     </div>
-                    <div>
-                      <Label className="text-xs">Driver Name</Label>
-                      <Input
-                        value={editForm.driverName}
-                        onChange={(e) =>
-                          setEditForm((p) => ({
-                            ...p,
-                            driverName: e.target.value,
-                          }))
-                        }
-                        className="h-8 text-sm mt-1"
-                        data-ocid="delivery_challans.edit.driver.input"
-                      />
-                    </div>
+
+                    {editForm.dispatchMethod === "Company Vehicle" && (
+                      <>
+                        <div>
+                          <Label className="text-xs">Vehicle No</Label>
+                          <Input
+                            value={editForm.vehicleNo}
+                            onChange={(e) =>
+                              setEditForm((p) => ({
+                                ...p,
+                                vehicleNo: e.target.value,
+                              }))
+                            }
+                            className="h-8 text-sm mt-1"
+                            data-ocid="delivery_challans.edit.vehicle.input"
+                          />
+                        </div>
+                        <div>
+                          <Label className="text-xs">Driver Name</Label>
+                          <Input
+                            value={editForm.driverName}
+                            onChange={(e) =>
+                              setEditForm((p) => ({
+                                ...p,
+                                driverName: e.target.value,
+                              }))
+                            }
+                            className="h-8 text-sm mt-1"
+                            data-ocid="delivery_challans.edit.driver.input"
+                          />
+                        </div>
+                      </>
+                    )}
+
+                    {editForm.dispatchMethod === "Courier" && (
+                      <>
+                        <div>
+                          <Label className="text-xs">Courier Company</Label>
+                          <Input
+                            value={editForm.courierCompany}
+                            onChange={(e) =>
+                              setEditForm((p) => ({
+                                ...p,
+                                courierCompany: e.target.value,
+                              }))
+                            }
+                            placeholder="e.g. DTDC"
+                            className="h-8 text-sm mt-1"
+                            data-ocid="delivery_challans.edit.courier_company.input"
+                          />
+                        </div>
+                        <div>
+                          <Label className="text-xs">
+                            Tracking / AWB Number
+                          </Label>
+                          <Input
+                            value={editForm.trackingNumber}
+                            onChange={(e) =>
+                              setEditForm((p) => ({
+                                ...p,
+                                trackingNumber: e.target.value,
+                              }))
+                            }
+                            placeholder="e.g. D123456789"
+                            className="h-8 text-sm mt-1"
+                            data-ocid="delivery_challans.edit.tracking_number.input"
+                          />
+                        </div>
+                      </>
+                    )}
+
+                    {editForm.dispatchMethod === "Transport / Logistics" && (
+                      <>
+                        <div>
+                          <Label className="text-xs">Transport Company</Label>
+                          <Input
+                            value={editForm.transportCompany}
+                            onChange={(e) =>
+                              setEditForm((p) => ({
+                                ...p,
+                                transportCompany: e.target.value,
+                              }))
+                            }
+                            placeholder="e.g. VRL Logistics"
+                            className="h-8 text-sm mt-1"
+                            data-ocid="delivery_challans.edit.transport_company.input"
+                          />
+                        </div>
+                        <div>
+                          <Label className="text-xs">
+                            LR / Consignment Number
+                          </Label>
+                          <Input
+                            value={editForm.lrNumber}
+                            onChange={(e) =>
+                              setEditForm((p) => ({
+                                ...p,
+                                lrNumber: e.target.value,
+                              }))
+                            }
+                            placeholder="e.g. 54896321"
+                            className="h-8 text-sm mt-1"
+                            data-ocid="delivery_challans.edit.lr_number.input"
+                          />
+                        </div>
+                      </>
+                    )}
+
+                    {editForm.dispatchMethod === "Customer Pickup" && (
+                      <>
+                        <div>
+                          <Label className="text-xs">Collected By</Label>
+                          <Input
+                            value={editForm.collectedBy}
+                            onChange={(e) =>
+                              setEditForm((p) => ({
+                                ...p,
+                                collectedBy: e.target.value,
+                              }))
+                            }
+                            placeholder="e.g. Ravi"
+                            className="h-8 text-sm mt-1"
+                            data-ocid="delivery_challans.edit.collected_by.input"
+                          />
+                        </div>
+                        <div>
+                          <Label className="text-xs">
+                            Mobile Number{" "}
+                            <span className="text-muted-foreground">
+                              (optional)
+                            </span>
+                          </Label>
+                          <Input
+                            value={editForm.mobileNumber}
+                            onChange={(e) =>
+                              setEditForm((p) => ({
+                                ...p,
+                                mobileNumber: e.target.value,
+                              }))
+                            }
+                            placeholder="e.g. 9876543210"
+                            className="h-8 text-sm mt-1"
+                            data-ocid="delivery_challans.edit.mobile_number.input"
+                          />
+                        </div>
+                      </>
+                    )}
+
                     <div>
                       <Label className="text-xs">Receiver Name</Label>
                       <Input
@@ -988,7 +1351,9 @@ export function DeliveryChallans() {
                                 return (
                                   <TableRow key={entry.projectId}>
                                     <TableCell className="text-xs font-medium">
-                                      {proj?.projectName || entry.projectId}
+                                      {proj
+                                        ? getCustomerVisibleName(proj)
+                                        : entry.projectId}
                                     </TableCell>
                                     <TableCell className="text-right">
                                       <div className="flex flex-col items-end gap-1">
@@ -1114,8 +1479,12 @@ export function DeliveryChallans() {
                               value={p.id}
                               className="text-sm"
                             >
-                              {p.projectName}
-                              {p.projectNo ? ` (${p.projectNo})` : ""}
+                              {getCustomerVisibleName(p)}
+                              {p.internalOrderCode
+                                ? ` · ${p.internalOrderCode}`
+                                : p.projectNo
+                                  ? ` (${p.projectNo})`
+                                  : ""}
                             </SelectItem>
                           ))
                         )}
@@ -1133,7 +1502,7 @@ export function DeliveryChallans() {
                             variant="secondary"
                             className="flex items-center gap-1 text-xs"
                           >
-                            {p?.projectName || pid}
+                            {p ? getCustomerVisibleName(p) : pid}
                             <button
                               type="button"
                               onClick={() => handleRemoveProject(pid)}
@@ -1237,7 +1606,12 @@ export function DeliveryChallans() {
                             return (
                               <TableRow key={pid}>
                                 <TableCell className="text-xs font-medium">
-                                  {p.projectName}
+                                  {getCustomerVisibleName(p)}
+                                  {p.internalOrderCode && (
+                                    <span className="ml-1 font-mono text-[10px] text-amber-600">
+                                      ({p.internalOrderCode})
+                                    </span>
+                                  )}
                                   {p.totalQty == null && (
                                     <span className="ml-1 text-amber-600">
                                       (\u26A0 no total qty)
@@ -1317,35 +1691,179 @@ export function DeliveryChallans() {
                       data-ocid="delivery_challans.form.dispatch_date.input"
                     />
                   </div>
-                  <div>
-                    <Label className="text-xs">Vehicle Number</Label>
-                    <Input
-                      value={form.vehicleNo}
-                      onChange={(e) =>
+                  <div className="col-span-3">
+                    <Label className="text-xs">Dispatch Method *</Label>
+                    <Select
+                      value={form.dispatchMethod}
+                      onValueChange={(v) =>
                         setForm((prev) => ({
                           ...prev,
-                          vehicleNo: e.target.value,
+                          dispatchMethod: v as DispatchMethod,
                         }))
                       }
-                      placeholder="MH01AB1234"
-                      className="h-8 text-sm mt-1"
-                      data-ocid="delivery_challans.form.vehicle_no.input"
-                    />
+                    >
+                      <SelectTrigger
+                        className="h-8 text-sm mt-1"
+                        data-ocid="delivery_challans.form.dispatch_method.select"
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {DISPATCH_METHODS.map((m) => (
+                          <SelectItem key={m} value={m} className="text-sm">
+                            {m}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                   </div>
-                  <div>
-                    <Label className="text-xs">Driver Name</Label>
-                    <Input
-                      value={form.driverName}
-                      onChange={(e) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          driverName: e.target.value,
-                        }))
-                      }
-                      className="h-8 text-sm mt-1"
-                      data-ocid="delivery_challans.form.driver_name.input"
-                    />
-                  </div>
+
+                  {form.dispatchMethod === "Company Vehicle" && (
+                    <>
+                      <div>
+                        <Label className="text-xs">Vehicle Number</Label>
+                        <Input
+                          value={form.vehicleNo}
+                          onChange={(e) =>
+                            setForm((prev) => ({
+                              ...prev,
+                              vehicleNo: e.target.value,
+                            }))
+                          }
+                          placeholder="MH01AB1234"
+                          className="h-8 text-sm mt-1"
+                          data-ocid="delivery_challans.form.vehicle_no.input"
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-xs">Driver Name</Label>
+                        <Input
+                          value={form.driverName}
+                          onChange={(e) =>
+                            setForm((prev) => ({
+                              ...prev,
+                              driverName: e.target.value,
+                            }))
+                          }
+                          className="h-8 text-sm mt-1"
+                          data-ocid="delivery_challans.form.driver_name.input"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {form.dispatchMethod === "Courier" && (
+                    <>
+                      <div>
+                        <Label className="text-xs">Courier Company</Label>
+                        <Input
+                          value={form.courierCompany}
+                          onChange={(e) =>
+                            setForm((prev) => ({
+                              ...prev,
+                              courierCompany: e.target.value,
+                            }))
+                          }
+                          placeholder="e.g. DTDC"
+                          className="h-8 text-sm mt-1"
+                          data-ocid="delivery_challans.form.courier_company.input"
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-xs">Tracking / AWB Number</Label>
+                        <Input
+                          value={form.trackingNumber}
+                          onChange={(e) =>
+                            setForm((prev) => ({
+                              ...prev,
+                              trackingNumber: e.target.value,
+                            }))
+                          }
+                          placeholder="e.g. D123456789"
+                          className="h-8 text-sm mt-1"
+                          data-ocid="delivery_challans.form.tracking_number.input"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {form.dispatchMethod === "Transport / Logistics" && (
+                    <>
+                      <div>
+                        <Label className="text-xs">Transport Company</Label>
+                        <Input
+                          value={form.transportCompany}
+                          onChange={(e) =>
+                            setForm((prev) => ({
+                              ...prev,
+                              transportCompany: e.target.value,
+                            }))
+                          }
+                          placeholder="e.g. VRL Logistics"
+                          className="h-8 text-sm mt-1"
+                          data-ocid="delivery_challans.form.transport_company.input"
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-xs">
+                          LR / Consignment Number
+                        </Label>
+                        <Input
+                          value={form.lrNumber}
+                          onChange={(e) =>
+                            setForm((prev) => ({
+                              ...prev,
+                              lrNumber: e.target.value,
+                            }))
+                          }
+                          placeholder="e.g. 54896321"
+                          className="h-8 text-sm mt-1"
+                          data-ocid="delivery_challans.form.lr_number.input"
+                        />
+                      </div>
+                    </>
+                  )}
+
+                  {form.dispatchMethod === "Customer Pickup" && (
+                    <>
+                      <div>
+                        <Label className="text-xs">Collected By</Label>
+                        <Input
+                          value={form.collectedBy}
+                          onChange={(e) =>
+                            setForm((prev) => ({
+                              ...prev,
+                              collectedBy: e.target.value,
+                            }))
+                          }
+                          placeholder="e.g. Ravi"
+                          className="h-8 text-sm mt-1"
+                          data-ocid="delivery_challans.form.collected_by.input"
+                        />
+                      </div>
+                      <div>
+                        <Label className="text-xs">
+                          Mobile Number{" "}
+                          <span className="text-muted-foreground">
+                            (optional)
+                          </span>
+                        </Label>
+                        <Input
+                          value={form.mobileNumber}
+                          onChange={(e) =>
+                            setForm((prev) => ({
+                              ...prev,
+                              mobileNumber: e.target.value,
+                            }))
+                          }
+                          placeholder="e.g. 9876543210"
+                          className="h-8 text-sm mt-1"
+                          data-ocid="delivery_challans.form.mobile_number.input"
+                        />
+                      </div>
+                    </>
+                  )}
+
                   <div>
                     <Label className="text-xs">Receiver Name</Label>
                     <Input

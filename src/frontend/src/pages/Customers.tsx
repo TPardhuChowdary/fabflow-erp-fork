@@ -20,6 +20,11 @@ import { ShieldOff } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import {
+  createCustomerRemote,
+  deleteCustomerRemote,
+  updateCustomerRemote,
+} from "../lib/customersApi";
 import { canCreate, canDelete, canEdit, canView } from "../permissions";
 import { useStore } from "../store";
 import type { Customer } from "../types";
@@ -52,6 +57,7 @@ export function Customers({ onViewHistory }: Props) {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<Customer | null>(null);
   const [form, setForm] = useState(empty());
+  const [isSaving, setIsSaving] = useState(false);
 
   const filtered = customers.filter(
     (c) =>
@@ -82,8 +88,13 @@ export function Customers({ onViewHistory }: Props) {
     setOpen(true);
   };
 
-  const handleSave = () => {
-    console.log("Saving customer:", form);
+  // Phase 19 — remote-first: the write goes to Supabase before Zustand is
+  // ever touched. Only a confirmed "success" result (the actual persisted
+  // row) updates local state; unauthenticated/error/denied leave Zustand
+  // exactly as it was and surface a real toast - never a fabricated
+  // success. Mirrors Employees.tsx's Phase 18B pattern exactly.
+  const handleSave = async () => {
+    if (isSaving) return;
     if (!form.name || !form.name.trim()) {
       toast.error("Customer name is required");
       return;
@@ -99,26 +110,47 @@ export function Customers({ onViewHistory }: Props) {
       emails: emailsArr,
       primaryEmail: primaryEmail || legacyEmail,
     };
-    if (editing) {
-      if (!pEdit) {
-        toast.error("Access restricted: edit permission required");
-        return;
+    setIsSaving(true);
+    try {
+      if (editing) {
+        if (!pEdit) {
+          toast.error("Access restricted: edit permission required");
+          return;
+        }
+        const result = await updateCustomerRemote({ ...editing, ...saveData });
+        if (result.status === "unauthenticated") {
+          toast.error("Sign in required to update customers");
+          return;
+        }
+        if (result.status === "error" || result.status === "denied") {
+          toast.error(result.error || "Failed to update customer");
+          return;
+        }
+        if (!result.data) return;
+        updateCustomer(result.data);
+        toast.success("Customer updated");
+      } else {
+        if (!pCreate) {
+          toast.error("Access restricted: create permission required");
+          return;
+        }
+        const result = await createCustomerRemote(saveData);
+        if (result.status === "unauthenticated") {
+          toast.error("Sign in required to create customers");
+          return;
+        }
+        if (result.status === "error") {
+          toast.error(result.error || "Failed to create customer");
+          return;
+        }
+        if (!result.data) return;
+        addCustomer(result.data);
+        toast.success("Customer created");
       }
-      updateCustomer({ ...editing, ...saveData });
-      toast.success("Customer updated");
-    } else {
-      if (!pCreate) {
-        toast.error("Access restricted: create permission required");
-        return;
-      }
-      addCustomer({
-        id: crypto.randomUUID(),
-        createdAt: Date.now(),
-        ...saveData,
-      });
-      toast.success("Customer created");
+      setOpen(false);
+    } finally {
+      setIsSaving(false);
     }
-    setOpen(false);
   };
 
   const f =
@@ -225,7 +257,7 @@ export function Customers({ onViewHistory }: Props) {
                           variant="ghost"
                           size="sm"
                           className="h-6 px-2"
-                          onClick={() => {
+                          onClick={async () => {
                             if (!canDelete(currentUser, "customers")) {
                               toast.error(
                                 "Access restricted: delete permission required",
@@ -238,6 +270,45 @@ export function Customers({ onViewHistory }: Props) {
                               )
                             )
                               return;
+                            // Local linked-record guard, fail-fast BEFORE
+                            // any remote call - same check store.ts's
+                            // deleteCustomer runs, duplicated here so we
+                            // never even attempt a remote delete for a
+                            // customer with linked quotations/invoices/
+                            // projects (mirrors Employees.tsx's Phase 18B
+                            // pattern).
+                            const s = useStore.getState();
+                            const hasQuotations = (s.quotations || []).some(
+                              (q) => q.customerId === c.id,
+                            );
+                            const hasInvoices = (s.invoices || []).some(
+                              (inv) => inv.customerId === c.id,
+                            );
+                            const hasProjects = (s.projects || []).some(
+                              (p) => p.customerId === c.id,
+                            );
+                            if (hasQuotations || hasInvoices || hasProjects) {
+                              toast.error(
+                                "Cannot delete customer. Linked transactions or projects exist.",
+                              );
+                              return;
+                            }
+                            const result = await deleteCustomerRemote(c.id);
+                            if (result.status === "unauthenticated") {
+                              toast.error(
+                                "Sign in required to delete customers",
+                              );
+                              return;
+                            }
+                            if (
+                              result.status === "error" ||
+                              result.status === "denied"
+                            ) {
+                              toast.error(
+                                result.error || "Failed to delete customer",
+                              );
+                              return;
+                            }
                             deleteCustomer(c.id);
                             toast.success("Customer deleted");
                           }}
@@ -519,9 +590,10 @@ export function Customers({ onViewHistory }: Props) {
               <Button
                 type="submit"
                 size="sm"
+                disabled={isSaving}
                 data-ocid="customers.form.submit_button"
               >
-                Save
+                {isSaving ? "Saving..." : "Save"}
               </Button>
             </div>
           </form>

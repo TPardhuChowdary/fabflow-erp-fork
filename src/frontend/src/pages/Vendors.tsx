@@ -22,6 +22,11 @@ import { ShieldOff } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import {
+  createVendorRemote,
+  deleteVendorRemote,
+  updateVendorRemote,
+} from "../lib/vendorsApi";
 import { canCreate, canDelete, canEdit, canView } from "../permissions";
 import { useStore } from "../store";
 import type { Page, Vendor } from "../types";
@@ -94,12 +99,10 @@ export function Vendors({ onNavigate: _onNavigate }: Props) {
     });
   };
 
-  const handleSaveAdd = () => {
-    console.log("FORM SUBMITTED");
+  const handleSaveAdd = async () => {
     if (isSaving) return;
     setIsSaving(true);
     try {
-      console.log("Saving vendor:", form);
       if (!form.name.trim()) {
         toast.error("Vendor name is required");
         return;
@@ -111,50 +114,82 @@ export function Vendors({ onNavigate: _onNavigate }: Props) {
         toast.error("A vendor with this name already exists");
         return;
       }
-      addVendor({
-        id: crypto.randomUUID(),
+      // Phase 21A — remote-first. addVendor() is only called with the row
+      // Supabase actually persisted (result.data), never with a locally
+      // fabricated id/createdAt.
+      const result = await createVendorRemote({
         name: form.name.trim(),
         phone: form.phone.trim(),
         address: form.address.trim(),
         gstNumber: form.gstNumber.trim() || undefined,
-        createdAt: Date.now(),
       });
+      if (result.status === "unauthenticated") {
+        toast.error("Not signed in to the server - vendor was not saved");
+        return;
+      }
+      if (result.status === "denied" || result.status === "error") {
+        toast.error(result.error ?? "Could not save vendor");
+        return;
+      }
+      if (!result.data) {
+        toast.error("Could not save vendor");
+        return;
+      }
+      addVendor(result.data);
       toast.success("Vendor added");
       setAddOpen(false);
-      console.log("SAVE COMPLETE");
     } finally {
       setIsSaving(false);
     }
   };
 
-  const handleSaveEdit = () => {
-    console.log("FORM SUBMITTED");
+  const handleSaveEdit = async () => {
     if (isSaving) return;
     setIsSaving(true);
     try {
-      console.log("Saving vendor:", form);
       if (!editVendor) return;
       if (!form.name.trim()) {
         toast.error("Vendor name is required");
         return;
       }
-      updateVendor({
+      const result = await updateVendorRemote({
         ...editVendor,
         name: form.name.trim(),
         phone: form.phone.trim(),
         address: form.address.trim(),
         gstNumber: form.gstNumber.trim() || undefined,
       });
+      if (result.status === "unauthenticated") {
+        toast.error("Not signed in to the server - vendor was not updated");
+        return;
+      }
+      if (result.status === "denied" || result.status === "error") {
+        toast.error(result.error ?? "Could not update vendor");
+        return;
+      }
+      if (!result.data) {
+        toast.error("Could not update vendor");
+        return;
+      }
+      updateVendor(result.data);
       toast.success("Vendor updated");
       setEditVendor(null);
-      console.log("SAVE COMPLETE");
     } finally {
       setIsSaving(false);
     }
   };
 
-  const confirmDelete = () => {
+  const confirmDelete = async () => {
     if (!deleteId) return;
+    const result = await deleteVendorRemote(deleteId);
+    if (result.status === "unauthenticated") {
+      toast.error("Not signed in to the server - vendor was not deleted");
+      return;
+    }
+    if (result.status === "denied" || result.status === "error") {
+      toast.error(result.error ?? "Could not delete vendor");
+      return;
+    }
     deleteVendor(deleteId);
     toast.success("Vendor deleted");
     if (selectedVendor?.id === deleteId) setSelectedVendor(null);

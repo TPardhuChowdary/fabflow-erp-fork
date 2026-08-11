@@ -1,12 +1,17 @@
+import type React from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
+  AlertTriangle,
   ArrowRight,
+  CheckCircle2,
   CreditCard,
   FileText,
   Package,
   Receipt,
   TrendingUp,
+  Wrench,
+  Zap,
 } from "lucide-react";
 import { StatusBadge } from "../components/StatusBadge";
 import { useStore } from "../store";
@@ -17,7 +22,7 @@ interface Props {
 }
 
 export function Dashboard({ onNavigate }: Props) {
-  const { invoices, payments, customers, projects, quotations } = useStore();
+  const { invoices, payments, customers, projects, quotations, machines, inventoryItems, payables } = useStore();
 
   const activeProjects = (projects || []).length;
   const activeQuotations = (quotations || []).filter(
@@ -60,6 +65,98 @@ export function Dashboard({ onNavigate }: Props) {
       maximumFractionDigits: 0,
     }).format(n);
 
+  // ── Operational Alerts ──────────────────────────────────────────
+  const today = new Date();
+  const todayMs = today.getTime();
+
+  const overdueInvoices = (invoices || []).filter(
+    (i) => i.status !== "Paid" && i.invoiceType !== "proforma" && i.dueDate && new Date(i.dueDate).getTime() < todayMs,
+  );
+
+  const overduePayables = (payables || []).filter(
+    (p) => p.paidAmount < p.totalAmount && p.dueDate && new Date(p.dueDate).getTime() < todayMs,
+  );
+
+  const breakdownMachines = (machines || []).filter((m) => m.currentStatus === "Breakdown");
+
+  const serviceOverdueMachines = (machines || []).filter((m) => {
+    if (!m.nextServiceDue || m.currentStatus === "Decommissioned") return false;
+    return new Date(m.nextServiceDue).getTime() < todayMs;
+  });
+
+  const lowStockItems = (inventoryItems || []).filter((item) => {
+    const reorder = (item as any).reorderLevel;
+    return reorder != null && (item.quantityAvailable ?? 0) <= reorder;
+  });
+
+  interface Alert {
+    id: string;
+    level: "critical" | "warning" | "info";
+    icon: React.ReactNode;
+    title: string;
+    detail: string;
+    navigate?: Page;
+  }
+
+  const alerts: Alert[] = [];
+
+  if (breakdownMachines.length > 0) {
+    alerts.push({
+      id: "breakdown",
+      level: "critical",
+      icon: <Zap className="w-4 h-4" />,
+      title: `${breakdownMachines.length} Machine Breakdown${breakdownMachines.length > 1 ? "s" : ""}`,
+      detail: breakdownMachines.map((m) => m.name).join(", "),
+      navigate: "machinery",
+    });
+  }
+
+  if (overdueInvoices.length > 0) {
+    const total = overdueInvoices.reduce((s, i) => s + ((i.totalAmount ?? 0) - (i.paidAmount ?? 0)), 0);
+    alerts.push({
+      id: "overdue-inv",
+      level: "critical",
+      icon: <Receipt className="w-4 h-4" />,
+      title: `${overdueInvoices.length} Overdue Invoice${overdueInvoices.length > 1 ? "s" : ""}`,
+      detail: `${fmt(total)} outstanding`,
+      navigate: "invoices",
+    });
+  }
+
+  if (overduePayables.length > 0) {
+    const total = overduePayables.reduce((s, p) => s + ((p.totalAmount ?? 0) - (p.paidAmount ?? 0)), 0);
+    alerts.push({
+      id: "overdue-pay",
+      level: "warning",
+      icon: <CreditCard className="w-4 h-4" />,
+      title: `${overduePayables.length} Overdue Payable${overduePayables.length > 1 ? "s" : ""}`,
+      detail: `${fmt(total)} due to vendors`,
+      navigate: "payables",
+    });
+  }
+
+  if (serviceOverdueMachines.length > 0) {
+    alerts.push({
+      id: "service-due",
+      level: "warning",
+      icon: <Wrench className="w-4 h-4" />,
+      title: `${serviceOverdueMachines.length} Machine${serviceOverdueMachines.length > 1 ? "s" : ""} Service Overdue`,
+      detail: serviceOverdueMachines.map((m) => m.name).join(", "),
+      navigate: "machinery",
+    });
+  }
+
+  if (lowStockItems.length > 0) {
+    alerts.push({
+      id: "low-stock",
+      level: "warning",
+      icon: <Package className="w-4 h-4" />,
+      title: `${lowStockItems.length} Low Stock Item${lowStockItems.length > 1 ? "s" : ""}`,
+      detail: lowStockItems.map((i) => i.name).slice(0, 3).join(", ") + (lowStockItems.length > 3 ? "…" : ""),
+      navigate: "inventory",
+    });
+  }
+
   return (
     <div className="space-y-6" data-ocid="dashboard.page">
       <div className="flex items-center justify-between">
@@ -92,6 +189,43 @@ export function Dashboard({ onNavigate }: Props) {
           </Button>
         </div>
       </div>
+
+      {/* Factory Alerts */}
+      {alerts.length > 0 ? (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800" data-ocid="dashboard.alerts.section">
+          <div className="flex items-center gap-2 px-4 py-2.5 border-b border-amber-200 dark:border-amber-800">
+            <AlertTriangle className="w-4 h-4 text-amber-600" />
+            <span className="text-sm font-semibold text-amber-800 dark:text-amber-300">Factory Alerts</span>
+            <span className="ml-auto text-xs text-amber-600 dark:text-amber-400">{alerts.length} action{alerts.length > 1 ? "s" : ""} needed</span>
+          </div>
+          <div className="divide-y divide-amber-100 dark:divide-amber-900">
+            {alerts.map((alert) => (
+              <div
+                key={alert.id}
+                className={`flex items-center gap-3 px-4 py-2.5 ${alert.navigate ? "cursor-pointer hover:bg-amber-100/60 dark:hover:bg-amber-900/30 transition-colors" : ""}`}
+                onClick={() => alert.navigate && onNavigate(alert.navigate)}
+                onKeyDown={(e) => e.key === "Enter" && alert.navigate && onNavigate(alert.navigate)}
+                role={alert.navigate ? "button" : undefined}
+                tabIndex={alert.navigate ? 0 : undefined}
+              >
+                <div className={`flex items-center justify-center w-7 h-7 rounded-full shrink-0 ${alert.level === "critical" ? "bg-red-100 text-red-600 dark:bg-red-900/50 dark:text-red-400" : "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-400"}`}>
+                  {alert.icon}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className={`text-xs font-semibold ${alert.level === "critical" ? "text-red-700 dark:text-red-400" : "text-amber-800 dark:text-amber-300"}`}>{alert.title}</p>
+                  <p className="text-[11px] text-muted-foreground truncate">{alert.detail}</p>
+                </div>
+                {alert.navigate && <ArrowRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />}
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center gap-2 px-4 py-3 rounded-xl border border-green-200 bg-green-50 dark:bg-green-950/20 dark:border-green-800" data-ocid="dashboard.no_alerts">
+          <CheckCircle2 className="w-4 h-4 text-green-600 shrink-0" />
+          <span className="text-sm text-green-700 dark:text-green-400 font-medium">All clear — no operational alerts</span>
+        </div>
+      )}
 
       {/* KPI Cards */}
       <div

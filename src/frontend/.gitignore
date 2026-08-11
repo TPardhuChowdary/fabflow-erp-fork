@@ -1,0 +1,8 @@
+# Phase 17A: no .gitignore existed anywhere in this repository before this
+# file was added, which meant .env was untracked only by accident (never
+# staged), not protected by any rule. This file protects local secrets
+# (Supabase URL/anon key, any future local overrides) from ever being
+# committed by a future `git add -A` or similar.
+.env
+.env.local
+.env.*.local

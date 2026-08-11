@@ -17,6 +17,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { canView } from "../permissions";
 import { useStore } from "../store";
 import type { Invoice, Page, Quotation } from "../types";
+import { getCustomerVisibleName } from "../lib/utils";
 
 interface Props {
   customerId: string;
@@ -24,6 +25,7 @@ interface Props {
   onViewInvoice: (inv: Invoice) => void;
   onViewQuotation: (q: Quotation) => void;
   onViewProject?: (id: string) => void;
+  onGenerateReport?: (customerId: string, customerName: string) => void;
 }
 
 const fmt = (n: number) => `₹${n.toLocaleString("en-IN")}`;
@@ -32,6 +34,7 @@ export function CustomerHistory({
   customerId,
   onNavigate,
   onViewProject,
+  onGenerateReport,
 }: Props) {
   const { currentUser } = useAuth();
   const { customers, invoices, quotations, projects } = useStore();
@@ -40,6 +43,8 @@ export function CustomerHistory({
   const [selectedQuotation, setSelectedQuotation] = useState<Quotation | null>(
     null,
   );
+
+  const { payments } = useStore();
 
   const custInvoices = invoices
     .filter((inv) => inv.customerId === customerId)
@@ -52,6 +57,30 @@ export function CustomerHistory({
   const custProjects = projects
     .filter((p) => p.customerId === customerId)
     .sort((a, b) => b.createdAt - a.createdAt);
+
+  // Analytics
+  const totalRevenue = custInvoices.reduce((s, i) => s + (i.totalAmount ?? 0), 0);
+  const totalPaid = custInvoices.reduce((s, i) => s + (i.paidAmount ?? 0), 0);
+  const outstanding = totalRevenue - totalPaid;
+  const acceptedQuotations = custQuotations.filter((q) => q.status === "Accepted").length;
+  const conversionRate = custQuotations.length > 0 ? Math.round((acceptedQuotations / custQuotations.length) * 100) : 0;
+
+  // Average payment delay: days between invoiceDate and first payment for paid invoices
+  const paymentDelays: number[] = custInvoices
+    .filter((i) => i.status === "Paid" && i.invoiceDate)
+    .map((inv) => {
+      const pmt = payments.filter((p) => p.invoiceId === inv.id).sort((a, b) => a.createdAt - b.createdAt)[0];
+      if (!pmt || !inv.invoiceDate) return null;
+      return Math.max(0, Math.floor((pmt.createdAt - new Date(inv.invoiceDate).getTime()) / (1000 * 60 * 60 * 24)));
+    })
+    .filter((d): d is number => d !== null);
+  const avgPaymentDelay = paymentDelays.length > 0
+    ? Math.round(paymentDelays.reduce((s, d) => s + d, 0) / paymentDelays.length)
+    : null;
+
+  const lastOrderDate = custProjects.length > 0
+    ? new Date(custProjects[0].createdAt).toLocaleDateString("en-IN")
+    : null;
 
   if (!canView(currentUser, "customers")) {
     return (
@@ -109,7 +138,18 @@ export function CustomerHistory({
             </div>
           </div>
         </div>
-        <div className="flex gap-3 text-sm">
+        <div className="flex gap-3 text-sm flex-wrap justify-end">
+          {onGenerateReport && (
+            <button
+              type="button"
+              onClick={() => onGenerateReport(customer.id, customer.name)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border bg-card hover:bg-muted text-sm font-medium transition-colors self-start"
+              title="Generate customer history pack"
+            >
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14,2 14,8 20,8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10,9 9,9 8,9"/></svg>
+              Export History
+            </button>
+          )}
           <div className="text-center px-4 py-2 bg-muted/40 rounded-lg">
             <div className="text-xl font-bold">{custProjects.length}</div>
             <div className="text-xs text-muted-foreground">Projects</div>
@@ -122,6 +162,30 @@ export function CustomerHistory({
             <div className="text-xl font-bold">{custQuotations.length}</div>
             <div className="text-xs text-muted-foreground">Quotations</div>
           </div>
+        </div>
+      </div>
+
+      {/* Customer Analytics */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="rounded-lg border bg-card p-4">
+          <p className="text-xs text-muted-foreground uppercase tracking-wide">Total Revenue</p>
+          <p className="text-xl font-bold mt-1 text-green-600">{fmt(totalRevenue)}</p>
+        </div>
+        <div className="rounded-lg border bg-card p-4">
+          <p className="text-xs text-muted-foreground uppercase tracking-wide">Outstanding</p>
+          <p className={`text-xl font-bold mt-1 ${outstanding > 0 ? "text-red-600" : "text-muted-foreground"}`}>{fmt(outstanding)}</p>
+        </div>
+        <div className="rounded-lg border bg-card p-4">
+          <p className="text-xs text-muted-foreground uppercase tracking-wide">Quotation Conversion</p>
+          <p className="text-xl font-bold mt-1 text-blue-600">{conversionRate}%</p>
+          <p className="text-[11px] text-muted-foreground mt-0.5">{acceptedQuotations} of {custQuotations.length} accepted</p>
+        </div>
+        <div className="rounded-lg border bg-card p-4">
+          <p className="text-xs text-muted-foreground uppercase tracking-wide">Avg Payment Delay</p>
+          <p className={`text-xl font-bold mt-1 ${avgPaymentDelay !== null && avgPaymentDelay > 30 ? "text-orange-600" : "text-foreground"}`}>
+            {avgPaymentDelay !== null ? `${avgPaymentDelay}d` : "—"}
+          </p>
+          {lastOrderDate && <p className="text-[11px] text-muted-foreground mt-0.5">Last order: {lastOrderDate}</p>}
         </div>
       </div>
 
@@ -187,7 +251,14 @@ export function CustomerHistory({
                         {p.projectNo}
                       </TableCell>
                       <TableCell className="text-sm font-medium">
-                        {p.projectName}
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span>{getCustomerVisibleName(p)}</span>
+                          {p.internalOrderCode && (
+                            <span className="font-mono text-[10px] text-amber-600 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">
+                              {p.internalOrderCode}
+                            </span>
+                          )}
+                        </div>
                       </TableCell>
                       <TableCell className="text-xs text-muted-foreground max-w-[180px] truncate">
                         {p.workDescription || "—"}

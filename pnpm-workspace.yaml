@@ -1,5 +1,11 @@
 packages:
   - src/**/*
+allowBuilds:
+  '@biomejs/biome': true
+  canvas: false
+  core-js: false
+  esbuild: true
+  sharp: true
 onlyBuiltDependencies:
   - '@biomejs/biome'
   - esbuild

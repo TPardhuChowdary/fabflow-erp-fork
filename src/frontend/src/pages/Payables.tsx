@@ -1,3 +1,4 @@
+import React from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -413,9 +414,8 @@ export function Payables() {
                   .sort((a, b) => b.createdAt - a.createdAt);
 
                 return (
-                  <>
+                  <React.Fragment key={payable.id}>
                     <TableRow
-                      key={payable.id}
                       data-ocid={`payables.list.row.${i + 1}`}
                     >
                       <TableCell className="pr-0">
@@ -599,7 +599,7 @@ export function Payables() {
                         </TableCell>
                       </TableRow>
                     )}
-                  </>
+                  </React.Fragment>
                 );
               })}
             </TableBody>

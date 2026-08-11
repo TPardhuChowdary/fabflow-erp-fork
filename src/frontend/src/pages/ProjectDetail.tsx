@@ -27,12 +27,14 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { printDocument } from "@/lib/documentUtils";
 import {
   AlertTriangle,
   ArrowLeft,
   ChevronDown,
   ChevronUp,
   Download,
+  Eye,
   FileText,
   Paperclip,
   Pencil,
@@ -42,12 +44,58 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import { DesignFilePreviewDialog } from "../components/DesignFilePreviewDialog";
+import { ProductionStageInspectionControl } from "../components/ProductionStageInspectionControl";
 import { ProjectItemsTab } from "../components/ProjectItemsTab";
 import { VendorSelect } from "../components/VendorSelect";
-import { canCreate, canDelete, canEdit, canView } from "../permissions";
+import { WorkDrawingPreviewDialog } from "../components/WorkDrawingPreviewDialog";
+import { getChildDrawings } from "../drawingEditor/api/drawings";
+import { DrawingTreeRow } from "../drawingEditor/components/DrawingTreeNode";
+import { buildDrawingSubtree } from "../drawingEditor/lib/drawingTree";
+import { loadPdf } from "../drawingEditor/lib/pdfRenderer";
+import { composeLatestView } from "../drawingEditor/lib/workOrderPreview";
+import { useDrawingEditorStore } from "../drawingEditor/store/useDrawingEditorStore";
+import type { DrawingDocument } from "../drawingEditor/types";
+import {
+  createBomItemRemote,
+  deleteBomItemRemote,
+  updateBomItemRemote,
+} from "../lib/bomItemsApi";
+import { hydrateBomRequisitions } from "../lib/hydration";
+import { createInventoryItemRemote } from "../lib/inventoryApi";
+import {
+  createInventoryUsageRemote,
+  deleteInventoryUsageRemote,
+  restoreInventoryStockRemote,
+  updateInventoryUsageRemote,
+} from "../lib/inventoryUsagesApi";
+import {
+  createOutsourcedWorkRemote,
+  deleteOutsourcedWorkRemote,
+  updateOutsourcedWorkRemote,
+} from "../lib/outsourcedWorksApi";
+import {
+  addProjectEmployeeRemote,
+  removeProjectEmployeeRemote,
+} from "../lib/projectEmployeesApi";
+import { updateProjectPurchaseOrderStatusRemote } from "../lib/purchaseOrdersApi";
+import { getCustomerVisibleName } from "../lib/utils";
+import { createVendorRemote } from "../lib/vendorsApi";
+import {
+  canCreate,
+  canDelete,
+  canEdit,
+  canView,
+  hasPermission,
+} from "../permissions";
+import { QmsGateOverrideDialog } from "../qms/components/QmsGateOverrideDialog";
+import { getStageInspectionGate } from "../qms/lib/productionGate";
+import { ProjectInspectionTab } from "../qms/pages/ProjectInspectionTab";
+import { ProjectQmsInspectionsTab } from "../qms/pages/ProjectQmsInspectionsTab";
+import { useQmsStore } from "../qms/store/useQmsStore";
 import { useStore } from "../store";
 import type {
   BomItem,
@@ -57,7 +105,6 @@ import type {
   ManualAdjustment,
   MaterialPurchase,
   MaterialUsage,
-  OutsourcedWork,
   ProjectDelivery,
   ProjectItem,
   ProjectItemStatus,
@@ -73,6 +120,11 @@ import type {
 interface Props {
   projectId: string;
   onBack: () => void;
+  onGenerateReport?: (projectId: string, projectName: string) => void;
+  onOpenDrawingEditor?: (context: {
+    projectId: string;
+    drawingId?: string;
+  }) => void;
 }
 
 const fmt = (n: number) => `₹${n.toLocaleString("en-IN")}`;
@@ -128,11 +180,17 @@ function SentToSelect({
   stageIdx: number;
 }) {
   const { vendors, addVendor } = useStore();
+  const { currentUser } = useAuth();
+  // Phase 21A — this component has no prior useAuth() call; the "sent to"
+  // vendor picker's quick-add gets its own vendors.create check here.
+  const pCreateVendor = canCreate(currentUser, "vendors");
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [newVendorName, setNewVendorName] = useState("");
+  const [isSavingVendor, setIsSavingVendor] = useState(false);
 
   const handleSelect = (val: string) => {
     if (val === "__add_new__") {
+      if (!pCreateVendor) return;
       setAddModalOpen(true);
       return;
     }
@@ -144,26 +202,51 @@ function SentToSelect({
     if (v) onChange(v.id, v.name);
   };
 
-  const handleAddVendor = () => {
+  const handleAddVendor = async () => {
+    // Phase 21A — defensive re-check, mirrors the trigger-hiding gate
+    // below.
+    if (!pCreateVendor) {
+      toast.error("You do not have permission to add vendors");
+      return;
+    }
     if (!newVendorName.trim()) return;
     const exists = vendors.find(
       (v) => v.name.trim().toLowerCase() === newVendorName.trim().toLowerCase(),
     );
     if (exists) {
       onChange(exists.id, exists.name);
-    } else {
-      const newV = {
-        id: crypto.randomUUID(),
+      setAddModalOpen(false);
+      setNewVendorName("");
+      return;
+    }
+    if (isSavingVendor) return;
+    setIsSavingVendor(true);
+    try {
+      // Phase 21A — remote-first, same contract as Vendors.tsx.
+      const result = await createVendorRemote({
         name: newVendorName.trim(),
         phone: "",
         address: "",
-        createdAt: Date.now(),
-      };
-      addVendor(newV);
-      onChange(newV.id, newV.name);
+      });
+      if (result.status === "unauthenticated") {
+        toast.error("Not signed in to the server - vendor was not saved");
+        return;
+      }
+      if (result.status === "denied" || result.status === "error") {
+        toast.error(result.error ?? "Could not save vendor");
+        return;
+      }
+      if (!result.data) {
+        toast.error("Could not save vendor");
+        return;
+      }
+      addVendor(result.data);
+      onChange(result.data.id, result.data.name);
+      setAddModalOpen(false);
+      setNewVendorName("");
+    } finally {
+      setIsSavingVendor(false);
     }
-    setAddModalOpen(false);
-    setNewVendorName("");
   };
 
   const displayValue = vendorId === "inhouse" ? "inhouse" : vendorId || "";
@@ -194,14 +277,16 @@ function SentToSelect({
               {v.name}
             </SelectItem>
           ))}
-          <div className="border-t border-border mt-1 pt-1">
-            <SelectItem
-              value="__add_new__"
-              className="text-xs text-primary font-medium"
-            >
-              + Add New Vendor
-            </SelectItem>
-          </div>
+          {pCreateVendor && (
+            <div className="border-t border-border mt-1 pt-1">
+              <SelectItem
+                value="__add_new__"
+                className="text-xs text-primary font-medium"
+              >
+                + Add New Vendor
+              </SelectItem>
+            </div>
+          )}
         </SelectContent>
       </Select>
 
@@ -226,7 +311,11 @@ function SentToSelect({
             >
               Cancel
             </Button>
-            <Button size="sm" onClick={handleAddVendor}>
+            <Button
+              size="sm"
+              onClick={handleAddVendor}
+              disabled={isSavingVendor}
+            >
               Add
             </Button>
           </DialogFooter>
@@ -236,7 +325,12 @@ function SentToSelect({
   );
 }
 
-export function ProjectDetail({ projectId, onBack }: Props) {
+export function ProjectDetail({
+  projectId,
+  onBack,
+  onGenerateReport,
+  onOpenDrawingEditor,
+}: Props) {
   const {
     projects,
     customers,
@@ -260,7 +354,6 @@ export function ProjectDetail({ projectId, onBack }: Props) {
     updateProjectStagesV2,
     upsertProjectDelivery,
     updateProject,
-    addProjectPO,
     updateProjectPO,
     employees,
     inventoryItems,
@@ -272,6 +365,8 @@ export function ProjectDetail({ projectId, onBack }: Props) {
     addBomItem,
     updateBomItem,
     deleteBomItem,
+    setBomRequisitionsFromServer,
+    setBomRequisitionsHydrationStatus,
     projectItems,
     addProjectItem,
     updateProjectItem,
@@ -280,9 +375,14 @@ export function ProjectDetail({ projectId, onBack }: Props) {
     deliveryChallans,
     addInventoryItem,
     invoices,
-    qualityInspections,
     pettyExpenses,
     vendors,
+    addProjectActivity,
+    repeatProject,
+    addProductionMovement,
+    productionMovements,
+    addAuditLog,
+    settings,
   } = useStore();
 
   const { currentUser } = useAuth();
@@ -291,6 +391,128 @@ export function ProjectDetail({ projectId, onBack }: Props) {
   const pCreate = canCreate(currentUser, "projects");
   const pDelete = canDelete(currentUser, "projects");
   const pAddOutsourced = pCreate;
+  // Phase 20 — the "Add New Material" quick-add below writes a real
+  // inventory_items row via the same RLS as Inventory.tsx, so it needs
+  // its own inventory.create check, not the projects-module one above.
+  const pCreateInventory = canCreate(currentUser, "inventory");
+
+  const dView = canView(currentUser, "drawing_editor");
+  const dEdit = canEdit(currentUser, "drawing_editor");
+  const dDelete = canDelete(currentUser, "drawing_editor");
+  const {
+    drawings: allDrawings,
+    loaded: drawingsLoaded,
+    loadDrawings,
+    deleteDrawing: deleteDrawingDoc,
+    findOrCreateMasterDrawing,
+  } = useDrawingEditorStore();
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: load once on mount
+  useEffect(() => {
+    if (!drawingsLoaded) loadDrawings();
+  }, [drawingsLoaded]);
+
+  // Feeds the dispatch-readiness badge and Production Summary panel below —
+  // replaces the legacy standalone Quality Inspection module's per-project
+  // Approved/Rejected Qty, now sourced from QMS instead.
+  const { inspectionSheets, stageCompletions, loadInspectionSheets } =
+    useQmsStore();
+  // Phase 32 (Task #174) - the QMS Library (InspectionStageDefinition) and
+  // this project's Phase 32 inspection instances, for the Production
+  // Stage "Inspection Required" linking control below. inspectionStages
+  // is the same Library list StageSelector.tsx already uses;
+  // projectQmsInspections is Supabase-hydrated app-wide (Task #172), no
+  // manual load needed here.
+  const {
+    inspectionStages,
+    inspectionStagesLoaded,
+    loadInspectionStages,
+    projectQmsInspections,
+    projectQmsInspectionOverrides,
+    createProjectQmsInspectionOverride,
+  } = useQmsStore();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: load once on mount
+  useEffect(() => {
+    loadInspectionSheets();
+    useQmsStore.getState().loadStageCompletions();
+    if (!inspectionStagesLoaded) loadInspectionStages();
+  }, []);
+  const canManageInspectionLink =
+    hasPermission(currentUser, "inspection_sheets.generate") ||
+    hasPermission(currentUser, "inspection_sheets.complete");
+  // Phase 32 (Task #176) - supervisor/admin Production-gate override.
+  // Raw hasPermission() call, matching the inspection_sheets module's
+  // established non-standard action vocabulary convention (see
+  // canManageInspectionLink above) - admin always passes regardless of
+  // this key's presence in any per-user permission map.
+  const canOverrideGate = hasPermission(
+    currentUser,
+    "inspection_sheets.override",
+  );
+  const projectQmsInspectionsForThisProject = projectQmsInspections.filter(
+    (i) => i.projectId === projectId,
+  );
+  const projectQmsInspectionOverridesForThisProject =
+    projectQmsInspectionOverrides.filter((o) =>
+      projectQmsInspectionsForThisProject.some(
+        (i) => i.id === o.projectQmsInspectionId,
+      ),
+    );
+
+  /** Sums accepted/rejected piece counts across every stage of this
+   * project's current inspection sheet (highest revision — same selection
+   * rule ProjectInspectionTab uses). Returns zeros if no sheet exists yet. */
+  const getQualityQtyTotals = (projId: string) => {
+    const projectSheets = inspectionSheets.filter(
+      (s) => s.projectId === projId,
+    );
+    const sheet =
+      projectSheets.length > 0
+        ? projectSheets.reduce((latest, s) =>
+            s.revision > latest.revision ? s : latest,
+          )
+        : undefined;
+    const completions = sheet
+      ? stageCompletions.filter((c) => c.sheetId === sheet.id)
+      : [];
+    return {
+      acceptedQtyTotal: completions.reduce(
+        (sum, c) => sum + (c.acceptedQty || 0),
+        0,
+      ),
+      rejectedQtyTotal: completions.reduce(
+        (sum, c) => sum + (c.rejectedQty || 0),
+        0,
+      ),
+    };
+  };
+
+  const userId = currentUser?.id ?? "";
+  const userName = currentUser?.username ?? "unknown";
+
+  const handleDrawingDelete = async (drawing: (typeof allDrawings)[number]) => {
+    const children = await getChildDrawings(drawing.id);
+    if (children.length > 0) {
+      toast.error(
+        `Can't delete "${drawing.fileName}" — ${children.length} Production Drawing${children.length === 1 ? "" : "s"} still linked to it. Delete those first.`,
+      );
+      return;
+    }
+    if (
+      !window.confirm(`Delete "${drawing.fileName}" and all its saved views?`)
+    )
+      return;
+    await deleteDrawingDoc(drawing.id);
+    addAuditLog({
+      module: "drawing_editor",
+      action: "delete",
+      entityId: drawing.id,
+      entityLabel: drawing.fileName,
+      changedBy: userName,
+    });
+    toast.success("Drawing deleted");
+  };
+
   // Legacy role aliases (kept for backward compat) - now derived from permissions
   const isRestrictedRole = !pEdit;
   const isAdmin = pEdit;
@@ -298,6 +520,9 @@ export function ProjectDetail({ projectId, onBack }: Props) {
   const customer = customers.find((c) => c.id === project?.customerId);
 
   const projDesignFiles = designFiles.filter((f) => f.projectId === projectId);
+  const [previewFile, setPreviewFile] = useState<DesignFile | null>(null);
+  const [previewWorkDrawing, setPreviewWorkDrawing] =
+    useState<DrawingDocument | null>(null);
   const existingCosting = internalCostings.find(
     (c) => c.projectId === projectId,
   );
@@ -365,6 +590,21 @@ export function ProjectDetail({ projectId, onBack }: Props) {
 
   const [expandedStage, setExpandedStage] = useState<number | null>(0);
 
+  // Phase 32 (Task #176) - controlled so the "Open Inspection" gate action
+  // can switch straight to the QMS tab; every other tab keeps its previous
+  // uncontrolled default ("overview" on first load).
+  const [activeTab, setActiveTab] = useState("overview");
+
+  // Phase 32 (Task #176) - supervisor/admin override dialog for a blocked
+  // Production Stage gate. Set only when a gate-blocked "Mark Complete"
+  // attempt is made by a user holding inspection_sheets.override.
+  const [gateOverrideDialog, setGateOverrideDialog] = useState<{
+    idx: number;
+    stageName: string;
+    stageId: string;
+    gate: Extract<ReturnType<typeof getStageInspectionGate>, { linked: true }>;
+  } | null>(null);
+
   // V2 production state
   const isV2 = project?.productionVersion === "v2";
   const v2Stages = existingProduction?.stages ?? [];
@@ -423,7 +663,16 @@ export function ProjectDetail({ projectId, onBack }: Props) {
     (x) => x.id === bomForm.inventoryItemId,
   );
 
-  const handleAddNewMaterial = () => {
+  // Phase 20 — this quick-add writes a real inventory_items row through
+  // the same remote-first API/RLS boundary as Inventory.tsx's own Add
+  // Material flow, gated by inventory.create (checked here defensively
+  // even though the trigger button below is already hidden for
+  // unauthorized users - same defense-in-depth pattern as Employees.tsx).
+  const handleAddNewMaterial = async () => {
+    if (!pCreateInventory) {
+      toast.error("Access restricted: inventory create permission required");
+      return;
+    }
     if (!newMatForm.name.trim()) {
       toast.error("Material name is required");
       return;
@@ -440,19 +689,26 @@ export function ProjectDetail({ projectId, onBack }: Props) {
       return;
     }
     const estPrice = Number(newMatForm.estimatedPrice || 0);
-    const newItem: InventoryItem = {
-      id: `inv-${Date.now()}`,
+    const result = await createInventoryItemRemote({
       name: newMatForm.name.trim(),
       unit: newMatForm.unit,
-      quantityAvailable: 0,
-      lastUpdated: Date.now(),
-      estimatedPrice: estPrice,
-    };
-    addInventoryItem(newItem);
-    setBomForm((f) => ({ ...f, inventoryItemId: newItem.id }));
+      reorderLevel: undefined,
+      unitCost: undefined,
+      estimatedPrice: estPrice || undefined,
+    });
+    if (result.status === "unauthenticated") {
+      toast.error("Sign in required to add inventory items");
+      return;
+    }
+    if (result.status === "error" || !result.data) {
+      toast.error(result.error || "Failed to add inventory item");
+      return;
+    }
+    addInventoryItem(result.data);
+    setBomForm((f) => ({ ...f, inventoryItemId: result.data!.id }));
     setNewMatDialog(false);
     setNewMatForm({ name: "", unit: "pcs", estimatedPrice: "" });
-    toast.success(`${newItem.name} added to material list`);
+    toast.success(`${result.data.name} added to material list`);
   };
 
   const openAddBom = () => {
@@ -474,7 +730,20 @@ export function ProjectDetail({ projectId, onBack }: Props) {
     setBomDialog(true);
   };
 
-  const handleSaveBom = () => {
+  // After any project_bom_items write, trg_project_bom_items_recompute
+  // upserts/deletes the matching bom_requisitions row server-side (see
+  // lib/bomItemsApi.ts) - re-hydrate bom_requisitions on demand to see
+  // the result, never compute it locally anymore.
+  const refreshBomRequisitions = async () => {
+    const result = await hydrateBomRequisitions();
+    if (result.status === "success" && result.data) {
+      setBomRequisitionsFromServer(result.data);
+    } else {
+      setBomRequisitionsHydrationStatus(result.status, result.error);
+    }
+  };
+
+  const handleSaveBom = async () => {
     if (!pEdit) {
       toast.error("No permission to edit BOM");
       return;
@@ -496,24 +765,53 @@ export function ProjectDetail({ projectId, onBack }: Props) {
       invItem?.unitCost ?? invItem?.estimatedPrice ?? 0,
     );
     if (editingBomId) {
-      updateBomItem(editingBomId, {
+      const existing = bomItems.find((b) => b.id === editingBomId);
+      if (!existing) return;
+      const result = await updateBomItemRemote({
+        ...existing,
         inventoryItemId: bomForm.inventoryItemId,
         materialName: invItem.name,
         requiredQuantity: qty,
         estimatedPrice: estimatedPrice,
       });
+      if (result.status === "unauthenticated") {
+        toast.error("Not signed in to the server - BOM item was not saved");
+        return;
+      }
+      if (result.status === "denied" || result.status === "error") {
+        toast.error(result.error ?? "Could not save BOM item");
+        return;
+      }
+      if (!result.data) {
+        toast.error("Could not save BOM item");
+        return;
+      }
+      updateBomItem(editingBomId, result.data);
       toast.success("BOM item updated");
+      await refreshBomRequisitions();
     } else {
-      addBomItem({
-        id: crypto.randomUUID(),
+      const result = await createBomItemRemote({
         projectId: projectId!,
         inventoryItemId: bomForm.inventoryItemId,
         materialName: invItem.name,
         requiredQuantity: qty,
         estimatedPrice: estimatedPrice,
-        createdAt: Date.now(),
       });
+      if (result.status === "unauthenticated") {
+        toast.error("Not signed in to the server - BOM item was not saved");
+        return;
+      }
+      if (result.status === "denied" || result.status === "error") {
+        toast.error(result.error ?? "Could not save BOM item");
+        return;
+      }
+      if (!result.data) {
+        toast.error("Could not save BOM item");
+        return;
+      }
+      addBomItem(result.data);
       toast.success("BOM item added");
+      await refreshBomRequisitions();
     }
     setBomDialog(false);
   };
@@ -530,7 +828,7 @@ export function ProjectDetail({ projectId, onBack }: Props) {
     (x) => x.id === usageForm.inventoryItemId,
   );
 
-  const handleAddUsage = () => {
+  const handleAddUsage = async () => {
     if (!usageForm.inventoryItemId) {
       toast.error("Please select a material");
       return;
@@ -540,27 +838,36 @@ export function ProjectDetail({ projectId, onBack }: Props) {
       toast.error("Enter a valid quantity");
       return;
     }
+    // Fast-path client guard - the DB's trg_negative_stock is the real,
+    // authoritative gate (see lib/inventoryUsagesApi.ts); this just
+    // avoids an obviously-doomed round trip.
     if (selectedUsageItem && qty > selectedUsageItem.quantityAvailable) {
       toast.error(
         `Insufficient stock. Available: ${selectedUsageItem.quantityAvailable} ${selectedUsageItem.unit}`,
       );
       return;
     }
-    const usage: MaterialUsage = {
-      id: `mu-${Date.now()}`,
+    const result = await createInventoryUsageRemote({
       projectId,
       inventoryItemId: usageForm.inventoryItemId,
       materialName: selectedUsageItem?.name ?? "",
       quantityUsed: qty,
       usedDate: usageForm.usedDate,
       notes: usageForm.notes,
-      createdAt: Date.now(),
-    };
-    const ok = addMaterialUsage(usage);
-    if (!ok) {
-      toast.error("Insufficient stock. Cannot save usage.");
+    });
+    if (result.status === "unauthenticated") {
+      toast.error("Not signed in to the server - usage was not saved");
       return;
     }
+    if (result.status === "denied" || result.status === "error") {
+      toast.error(result.error ?? "Insufficient stock. Cannot save usage.");
+      return;
+    }
+    if (!result.data) {
+      toast.error("Could not save usage");
+      return;
+    }
+    addMaterialUsage(result.data);
     toast.success("Material usage recorded");
     setUsageForm({
       inventoryItemId: "",
@@ -618,17 +925,6 @@ export function ProjectDetail({ projectId, onBack }: Props) {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Multi-PO state
-  const [poDialog, setPoDialog] = useState(false);
-  const poFileRef = useRef<HTMLInputElement>(null);
-  const emptyPoForm = () => ({
-    poNumber: "",
-    poDate: "",
-    quantity: 0,
-    status: "Open" as ProjectPOStatus,
-    file: undefined as PurchaseAttachment | undefined,
-  });
-  const [poAddForm, setPoAddForm] = useState(emptyPoForm());
   const [adjForm, setAdjForm] = useState<{
     name: string;
     amount: string;
@@ -636,39 +932,91 @@ export function ProjectDetail({ projectId, onBack }: Props) {
   }>({ name: "", amount: "", type: "Add Cost" });
   const [showAdjForm, setShowAdjForm] = useState(false);
 
-  const handleAddPO = () => {
+  // Repeat Order state
+  const [repeatDialog, setRepeatDialog] = useState(false);
+  const [repeatForm, setRepeatForm] = useState({
+    newName: "",
+    copyDesignFiles: true,
+    copyBOM: true,
+    copyCosting: true,
+    copyStages: true,
+    copyQC: true,
+    copyNotes: true,
+  });
+  // WIP Move Qty state
+  const [moveQtyDialog, setMoveQtyDialog] = useState(false);
+  const [moveForm, setMoveForm] = useState({
+    fromStage: "",
+    toStage: "",
+    qty: 0,
+    notes: "",
+  });
+
+  const openRepeatOrder = () => {
     if (!project) return;
-    if (!poAddForm.poNumber.trim()) {
-      toast.error("PO Number is required");
+    const rootId =
+      project.parentProjectId || project.sourceProjectId || project.id;
+    const existingRepeats = (projects || []).filter(
+      (p) => p.parentProjectId === rootId || p.sourceProjectId === rootId,
+    ).length;
+    const nextSeq = existingRepeats + 1;
+    const baseName = getCustomerVisibleName(project);
+    const internalCode = `ORD-${String(nextSeq).padStart(3, "0")}`;
+    setRepeatForm({
+      newName: `${baseName} - ${internalCode}`,
+      copyDesignFiles: true,
+      copyBOM: true,
+      copyCosting: true,
+      copyStages: true,
+      copyQC: true,
+      copyNotes: true,
+    });
+    setRepeatDialog(true);
+  };
+
+  const handleCreateRepeatOrder = async () => {
+    if (!project) return;
+    if (!repeatForm.newName.trim()) {
+      toast.error("Project name is required");
       return;
     }
-    addProjectPO(project.id, { id: crypto.randomUUID(), ...poAddForm });
-    setPoAddForm(emptyPoForm());
-    setPoDialog(false);
-    toast.success("PO added");
+    const newId = await repeatProject(project.id, repeatForm);
+    if (newId) {
+      toast.success(`Repeat order "${repeatForm.newName}" created`);
+      setRepeatDialog(false);
+    } else {
+      toast.error("Failed to create repeat order");
+    }
   };
 
-  const handlePoFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      setPoAddForm((f) => ({
-        ...f,
-        file: {
-          ref: reader.result as string,
-          type: file.type === "application/pdf" ? "pdf" : "image",
-          name: file.name,
-        },
-      }));
-    };
-    reader.readAsDataURL(file);
-    if (poFileRef.current) poFileRef.current.value = "";
-  };
-
-  const handleUpdatePOStatus = (po: ProjectPO, newStatus: ProjectPOStatus) => {
+  // Phase 27 Batch 2 — the standalone "Add PO" flow was retired: DB
+  // project_purchase_orders.master_po_id is NOT NULL by design (see
+  // database/phase-03/phase3_quotations_company_pos_FINAL.sql), so every
+  // project PO must now originate from a Quotation's "Record PO" flow,
+  // which always creates a real master_pos row first. Explicit user
+  // decision (Phase 27 Batch 2) - not a silent removal.
+  const handleUpdatePOStatus = async (
+    po: ProjectPO,
+    newStatus: ProjectPOStatus,
+  ) => {
     if (!project) return;
-    updateProjectPO(project.id, { ...po, status: newStatus });
+    const result = await updateProjectPurchaseOrderStatusRemote(
+      po.id,
+      newStatus,
+    );
+    if (result.status === "unauthenticated") {
+      toast.error("Not signed in to the server - status was not updated");
+      return;
+    }
+    if (result.status === "denied" || result.status === "error") {
+      toast.error(result.error ?? "Could not update PO status");
+      return;
+    }
+    if (!result.data) {
+      toast.error("Could not update PO status");
+      return;
+    }
+    updateProjectPO(project.id, result.data.po);
   };
 
   if (!pView) {
@@ -742,6 +1090,63 @@ export function ProjectDetail({ projectId, onBack }: Props) {
     a.href = f.fileData;
     a.download = f.fileName;
     a.click();
+  };
+
+  /** "Edit" on a Design File — the original upload is never touched.
+   * Resolves the file's existing Master Drawing (if this is a repeat
+   * click) or promotes it into a new one, then opens the Engineering
+   * Drawing Editor in Context Mode already pointed at it. */
+  const handleEditDesignFile = async (f: DesignFile) => {
+    if (
+      f.fileType !== "application/pdf" &&
+      !f.fileName.toLowerCase().endsWith(".pdf")
+    ) {
+      toast.error(
+        "Only PDF design files can be opened in the Engineering Drawing Editor.",
+      );
+      return;
+    }
+    try {
+      const blob = await (await fetch(f.fileData)).blob();
+      const pdf = await loadPdf(blob);
+      const master = await findOrCreateMasterDrawing({
+        sourceDesignFileId: f.id,
+        fileName: f.fileName,
+        pdfBlob: blob,
+        numPages: pdf.numPages,
+        uploadedBy: userId,
+        uploadedByName: userName,
+        ownerType: "project",
+        ownerId: projectId,
+      });
+      onOpenDrawingEditor?.({ projectId, drawingId: master.id });
+    } catch {
+      toast.error("Could not open this file in the Drawing Editor.");
+    }
+  };
+
+  /** Prints exactly what Preview would show for a Work Drawing — composed
+   * fresh from its latest saved state, no export dialog. */
+  const handlePrintWorkDrawing = async (drawing: DrawingDocument) => {
+    const canvas = await composeLatestView(drawing, {
+      companyName: settings?.companyName || "Your Company",
+      companyLogoDataUrl: settings?.companyLogo || undefined,
+    });
+    if (!canvas) {
+      toast.error(`"${drawing.fileName}" hasn't been saved yet.`);
+      return;
+    }
+    const containerId = `work-drawing-print-${Date.now()}`;
+    const container = document.createElement("div");
+    container.id = containerId;
+    container.style.cssText = "position:fixed;left:-9999px;top:-9999px;";
+    const img = document.createElement("img");
+    img.src = canvas.toDataURL("image/png");
+    img.style.cssText = "display:block;width:100%;";
+    container.appendChild(img);
+    document.body.appendChild(container);
+    await printDocument(containerId);
+    container.remove();
   };
 
   const handleSaveCosting = () => {
@@ -845,7 +1250,7 @@ export function ProjectDetail({ projectId, onBack }: Props) {
     }));
   };
 
-  const handleAddOutsourced = () => {
+  const handleAddOutsourced = async () => {
     if (!outForm.vendorId) {
       toast.error("Please select a vendor");
       return;
@@ -868,11 +1273,26 @@ export function ProjectDetail({ projectId, onBack }: Props) {
         alert("Access restricted");
         return;
       }
-      updateOutsourcedWork({
+      const result = await updateOutsourcedWorkRemote({
         id: outEditId,
         projectId: project.id,
         ...outForm,
       });
+      if (result.status === "unauthenticated") {
+        toast.error(
+          "Not signed in to the server - outsourced work was not saved",
+        );
+        return;
+      }
+      if (result.status === "denied" || result.status === "error") {
+        toast.error(result.error ?? "Could not save outsourced work");
+        return;
+      }
+      if (!result.data) {
+        toast.error("Could not save outsourced work");
+        return;
+      }
+      updateOutsourcedWork(result.data);
       toast.success("Outsourced work updated");
       resetForm();
     } else {
@@ -880,23 +1300,47 @@ export function ProjectDetail({ projectId, onBack }: Props) {
         alert("Access restricted");
         return;
       }
-      const o: OutsourcedWork = {
-        id: crypto.randomUUID(),
+      const result = await createOutsourcedWorkRemote({
         projectId: project.id,
         ...outForm,
-      };
-      addOutsourcedWork(o);
+      });
+      if (result.status === "unauthenticated") {
+        toast.error(
+          "Not signed in to the server - outsourced work was not saved",
+        );
+        return;
+      }
+      if (result.status === "denied" || result.status === "error") {
+        toast.error(result.error ?? "Could not save outsourced work");
+        return;
+      }
+      if (!result.data) {
+        toast.error("Could not save outsourced work");
+        return;
+      }
+      addOutsourcedWork(result.data);
       toast.success("Outsourced work recorded");
       resetForm();
     }
   };
 
-  const handleDeleteOutsourced = (id: string) => {
+  const handleDeleteOutsourced = async (id: string) => {
     if (!pDelete) {
       alert("Access restricted");
       return;
     }
     if (!confirm("Delete this outsourced work entry?")) return;
+    const result = await deleteOutsourcedWorkRemote(id);
+    if (result.status === "unauthenticated") {
+      toast.error(
+        "Not signed in to the server - outsourced work was not deleted",
+      );
+      return;
+    }
+    if (result.status === "denied" || result.status === "error") {
+      toast.error(result.error ?? "Could not delete outsourced work");
+      return;
+    }
     deleteOutsourcedWork(id);
     toast.success("Outsourced work deleted");
   };
@@ -979,6 +1423,9 @@ export function ProjectDetail({ projectId, onBack }: Props) {
       endTime: "",
       requiresMaterialTracking: newStageRequiresMaterial,
       transactions: [],
+      // Phase 32 (Task #173) - stable identity, generated once here, never
+      // touched by reorder/edit/remove.
+      stageId: crypto.randomUUID(),
     };
     updateProjectStagesV2(projectId, [...v2Stages, newStage]);
     setAddStageDialog(false);
@@ -988,9 +1435,26 @@ export function ProjectDetail({ projectId, onBack }: Props) {
   };
 
   const handleRemoveStage = (idx: number) => {
+    const removedStage = v2Stages[idx];
     const updated = v2Stages.filter((_, i) => i !== idx);
     updateProjectStagesV2(projectId, updated);
     toast.success("Stage removed");
+
+    // Phase 32 (Task #174) - approved rule: deleting a Production Stage
+    // must not delete its linked QMS inspection or history, only the
+    // stage-relationship. Clear the link (never the inspection itself)
+    // if this stage had one - the inspection remains in the project's
+    // QMS data, now independent, exactly as if it had never been linked.
+    if (removedStage.stageId) {
+      const linked = projectQmsInspectionsForThisProject.find(
+        (i) => i.requiredProductionStageId === removedStage.stageId,
+      );
+      if (linked) {
+        useQmsStore.getState().updateProjectQmsInspection(linked.id, {
+          requiredProductionStageId: null,
+        });
+      }
+    }
   };
 
   const handleMoveStage = (idx: number, dir: "up" | "down") => {
@@ -1002,6 +1466,31 @@ export function ProjectDetail({ projectId, onBack }: Props) {
   };
 
   const handleCompleteStage = (idx: number) => {
+    const stage = v2Stages[idx];
+    // Phase 32 (Task #176) - QMS inspection gate: an additional condition
+    // alongside whatever validation already applies to this stage. Follows
+    // the inspection's server-derived status only (rule §6) - never
+    // recalculated here.
+    const gate = getStageInspectionGate(
+      stage?.stageId,
+      projectQmsInspectionsForThisProject,
+      projectQmsInspectionOverridesForThisProject,
+    );
+    if (gate.linked && !gate.canProceed) {
+      if (canOverrideGate) {
+        setGateOverrideDialog({
+          idx,
+          stageName: stage.stageName,
+          stageId: stage.stageId as string,
+          gate,
+        });
+      } else {
+        toast.error(
+          `Cannot complete "${stage.stageName}": ${gate.blockReason}`,
+        );
+      }
+      return;
+    }
     const updated = v2Stages.map((s, i) =>
       i === idx ? { ...s, status: "Completed" as ProjectStageStatus } : s,
     );
@@ -1052,15 +1541,21 @@ export function ProjectDetail({ projectId, onBack }: Props) {
             </Badge>
           </div>
           <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-            <h1 className="text-xl font-bold">{project.projectName}</h1>
+            <h1 className="text-xl font-bold">
+              {getCustomerVisibleName(project)}
+            </h1>
+            {project.internalOrderCode && (
+              <span className="text-xs font-mono text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full shrink-0">
+                {project.internalOrderCode}
+              </span>
+            )}
             {(() => {
               const prodRecord = projectProductions.find(
                 (pp) => pp.projectId === project.id,
               );
               const pStages = prodRecord?.stages || [];
-              const projQIs = (qualityInspections || []).filter(
-                (q) => q.projectId === project.id,
-              );
+              const { acceptedQtyTotal, rejectedQtyTotal } =
+                getQualityQtyTotals(project.id);
               const hasRework = pStages.some(
                 (s) => s.isRework && s.status !== "Completed",
               );
@@ -1069,9 +1564,8 @@ export function ProjectDetail({ projectId, onBack }: Props) {
                 pStages
                   .filter((s) => !s.isRework)
                   .every((s) => s.status === "Completed");
-              const hasRejected = projQIs.some(
-                (q) => (q.rejectedQty || 0) > 0 && (q.approvedQty || 0) === 0,
-              );
+              const hasRejected =
+                rejectedQtyTotal > 0 && acceptedQtyTotal === 0;
               const dispQty = (deliveryChallans || []).reduce(
                 (sum, dc) =>
                   sum +
@@ -1115,9 +1609,47 @@ export function ProjectDetail({ projectId, onBack }: Props) {
             </p>
           )}
         </div>
+        {pCreate && (
+          <button
+            type="button"
+            onClick={openRepeatOrder}
+            className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border bg-card hover:bg-muted text-sm font-medium transition-colors"
+            title="Create repeat order from this project"
+          >
+            <Plus className="w-4 h-4" />
+            Repeat Order
+          </button>
+        )}
+        {onGenerateReport && (
+          <button
+            type="button"
+            onClick={() => onGenerateReport(project.id, project.projectName)}
+            className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border bg-card hover:bg-muted text-sm font-medium transition-colors"
+            title="Generate project report / dossier"
+          >
+            <svg
+              className="w-4 h-4"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+            >
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14,2 14,8 20,8" />
+              <line x1="16" y1="13" x2="8" y2="13" />
+              <line x1="16" y1="17" x2="8" y2="17" />
+              <polyline points="10,9 9,9 8,9" />
+            </svg>
+            Generate Report
+          </button>
+        )}
       </div>
 
-      <Tabs defaultValue="overview" data-ocid="project-detail.panel">
+      <Tabs
+        value={activeTab}
+        onValueChange={setActiveTab}
+        data-ocid="project-detail.panel"
+      >
         <div className="space-y-1">
           {/* Planning group */}
           <div className="flex flex-wrap items-center gap-1">
@@ -1188,6 +1720,15 @@ export function ProjectDetail({ projectId, onBack }: Props) {
               >
                 Outsourced
               </TabsTrigger>
+              <TabsTrigger
+                value="inspection"
+                data-ocid="project-detail.inspection.tab"
+              >
+                Inspection
+              </TabsTrigger>
+              <TabsTrigger value="qms" data-ocid="project-detail.qms.tab">
+                QMS
+              </TabsTrigger>
             </TabsList>
           </div>
           {/* Closure group */}
@@ -1210,6 +1751,12 @@ export function ProjectDetail({ projectId, onBack }: Props) {
                   Profit &amp; Costing
                 </TabsTrigger>
               )}
+              <TabsTrigger
+                value="timeline"
+                data-ocid="project-detail.timeline.tab"
+              >
+                Timeline
+              </TabsTrigger>
             </TabsList>
           </div>
         </div>
@@ -1255,6 +1802,30 @@ export function ProjectDetail({ projectId, onBack }: Props) {
                 </p>
                 <p className="mt-0.5">{project.workDescription || "—"}</p>
               </div>
+              {project.projectType === "REPEAT_ORDER" && (
+                <div className="sm:col-span-2">
+                  <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                    Repeat Order
+                  </p>
+                  <div className="mt-0.5 flex items-center gap-2 flex-wrap">
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-50 border border-amber-200 text-amber-700 text-xs font-medium">
+                      <span className="font-mono">
+                        {project.internalOrderCode}
+                      </span>
+                      <span>·</span>
+                      <span>
+                        Internal tracking code — not shown to customer
+                      </span>
+                    </span>
+                    {project.originalProjectName && (
+                      <span className="text-xs text-muted-foreground">
+                        Customer sees:{" "}
+                        <strong>{project.originalProjectName}</strong>
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
               <div className="sm:col-span-2">
                 {(() => {
                   if (project.totalQty == null) {
@@ -1311,20 +1882,11 @@ export function ProjectDetail({ projectId, onBack }: Props) {
                   (pp) => pp.projectId === project.id,
                 );
                 const pStages = prodRecord?.stages || [];
-                const projQIs = (qualityInspections || []).filter(
-                  (q) => q.projectId === project.id,
-                );
+                const { acceptedQtyTotal: approvedQtyTotal, rejectedQtyTotal } =
+                  getQualityQtyTotals(project.id);
                 const producedQty = pStages
                   .filter((s) => s.status === "Completed" && !s.isRework)
                   .reduce((sum, s) => sum + (s.receivedQty || 0), 0);
-                const approvedQtyTotal = projQIs.reduce(
-                  (sum, q) => sum + (q.approvedQty || 0),
-                  0,
-                );
-                const rejectedQtyTotal = projQIs.reduce(
-                  (sum, q) => sum + (q.rejectedQty || 0),
-                  0,
-                );
                 const reworkCount = pStages.filter((s) => s.isRework).length;
                 const dispatchedQtySummary = (deliveryChallans || []).reduce(
                   (sum, dc) =>
@@ -1417,17 +1979,9 @@ export function ProjectDetail({ projectId, onBack }: Props) {
                   <p className="text-xs text-muted-foreground uppercase tracking-wide font-semibold">
                     Purchase Orders
                   </p>
-                  {!isRestrictedRole && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7 text-xs"
-                      onClick={() => setPoDialog(true)}
-                      data-ocid="project-detail.po.open_modal_button"
-                    >
-                      <Plus className="w-3 h-3 mr-1" /> Add PO
-                    </Button>
-                  )}
+                  <p className="text-[11px] text-muted-foreground">
+                    Recorded from the Quotations module
+                  </p>
                 </div>
 
                 {(project.pos || []).length === 0 ? (
@@ -1637,142 +2191,6 @@ export function ProjectDetail({ projectId, onBack }: Props) {
                     </table>
                   </div>
                 )}
-
-                {/* Add PO Dialog */}
-                <Dialog open={poDialog} onOpenChange={setPoDialog}>
-                  <DialogContent data-ocid="project-detail.po.dialog">
-                    <DialogHeader>
-                      <DialogTitle>Add Purchase Order</DialogTitle>
-                    </DialogHeader>
-                    <div className="space-y-3 mt-2">
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <div className="space-y-1">
-                          <Label className="text-xs">PO Number *</Label>
-                          <Input
-                            className="h-8 text-sm"
-                            placeholder="e.g. TSP/PO/2026/1234"
-                            value={poAddForm.poNumber}
-                            onChange={(e) =>
-                              setPoAddForm((f) => ({
-                                ...f,
-                                poNumber: e.target.value,
-                              }))
-                            }
-                            data-ocid="project-detail.po.input"
-                          />
-                        </div>
-                        <div className="space-y-1">
-                          <Label className="text-xs">PO Date</Label>
-                          <Input
-                            type="date"
-                            className="h-8 text-sm"
-                            value={poAddForm.poDate}
-                            onChange={(e) =>
-                              setPoAddForm((f) => ({
-                                ...f,
-                                poDate: e.target.value,
-                              }))
-                            }
-                          />
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <div className="space-y-1">
-                          <Label className="text-xs">Quantity</Label>
-                          <Input
-                            type="number"
-                            className="h-8 text-sm"
-                            min={0}
-                            value={poAddForm.quantity}
-                            onChange={(e) =>
-                              setPoAddForm((f) => ({
-                                ...f,
-                                quantity: Number(e.target.value),
-                              }))
-                            }
-                          />
-                        </div>
-                        <div className="space-y-1">
-                          <Label className="text-xs">Status</Label>
-                          <Select
-                            value={poAddForm.status}
-                            onValueChange={(v) =>
-                              setPoAddForm((f) => ({
-                                ...f,
-                                status: v as ProjectPOStatus,
-                              }))
-                            }
-                          >
-                            <SelectTrigger
-                              className="h-8 text-sm"
-                              data-ocid="project-detail.po.select"
-                            >
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="Open">Open</SelectItem>
-                              <SelectItem value="In Progress">
-                                In Progress
-                              </SelectItem>
-                              <SelectItem value="Completed">
-                                Completed
-                              </SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </div>
-                      </div>
-                      <div className="space-y-1">
-                        <Label className="text-xs">
-                          Upload PO File (optional)
-                        </Label>
-                        <div className="flex items-center gap-2">
-                          <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            className="h-7 text-xs"
-                            onClick={() => poFileRef.current?.click()}
-                            data-ocid="project-detail.po.upload_button"
-                          >
-                            <Paperclip className="w-3 h-3 mr-1" /> Choose File
-                          </Button>
-                          {poAddForm.file && (
-                            <span className="text-xs text-muted-foreground truncate max-w-[150px]">
-                              {poAddForm.file.name}
-                            </span>
-                          )}
-                          <input
-                            ref={poFileRef}
-                            type="file"
-                            accept=".pdf,.jpg,.jpeg,.png"
-                            className="hidden"
-                            onChange={handlePoFileUpload}
-                          />
-                        </div>
-                      </div>
-                    </div>
-                    <DialogFooter>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => {
-                          setPoDialog(false);
-                          setPoAddForm(emptyPoForm());
-                        }}
-                        data-ocid="project-detail.po.cancel_button"
-                      >
-                        Cancel
-                      </Button>
-                      <Button
-                        size="sm"
-                        onClick={handleAddPO}
-                        data-ocid="project-detail.po.submit_button"
-                      >
-                        Add PO
-                      </Button>
-                    </DialogFooter>
-                  </DialogContent>
-                </Dialog>
               </div>
               {isAdmin && (
                 <div className="sm:col-span-2 pt-2 border-t border-border">
@@ -1792,7 +2210,35 @@ export function ProjectDetail({ projectId, onBack }: Props) {
                           <button
                             key={emp.id}
                             type="button"
-                            onClick={() => {
+                            onClick={async () => {
+                              // Diff-based single-pair write, never a
+                              // wholesale replace of the join table (see
+                              // lib/projectEmployeesApi.ts).
+                              const result = isAssigned
+                                ? await removeProjectEmployeeRemote(
+                                    project.id,
+                                    emp.id,
+                                  )
+                                : await addProjectEmployeeRemote(
+                                    project.id,
+                                    emp.id,
+                                  );
+                              if (result.status === "unauthenticated") {
+                                toast.error(
+                                  "Not signed in to the server - assignment was not saved",
+                                );
+                                return;
+                              }
+                              if (
+                                result.status === "denied" ||
+                                result.status === "error"
+                              ) {
+                                toast.error(
+                                  result.error ??
+                                    "Could not save employee assignment",
+                                );
+                                return;
+                              }
                               const current = project.assignedEmployeeIds ?? [];
                               const updated = isAssigned
                                 ? current.filter((id) => id !== emp.id)
@@ -1863,9 +2309,6 @@ export function ProjectDetail({ projectId, onBack }: Props) {
                       File Name
                     </TableHead>
                     <TableHead className="text-xs font-semibold">
-                      Type
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold">
                       Uploaded
                     </TableHead>
                     <TableHead className="text-xs font-semibold w-24">
@@ -1874,55 +2317,127 @@ export function ProjectDetail({ projectId, onBack }: Props) {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {projDesignFiles.map((f, i) => (
-                    <TableRow
-                      key={f.id}
-                      data-ocid={`project-detail.design.item.${i + 1}`}
-                    >
-                      <TableCell className="text-sm font-medium">
-                        {f.fileName}
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {f.fileType}
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {new Date(f.uploadedAt).toLocaleDateString("en-IN")}
-                      </TableCell>
-                      <TableCell className="flex gap-1">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-6 px-2"
-                          onClick={() => handleDownloadFile(f)}
-                          data-ocid={`project-detail.design.secondary_button.${i + 1}`}
+                  {projDesignFiles.map((f, i) => {
+                    // Read-only lookup — never findOrCreateMasterDrawing,
+                    // which would create a hidden Working Drawing just from
+                    // rendering this list. Only Edit (below) may create one.
+                    const master = allDrawings.find(
+                      (d) => d.sourceDesignFileId === f.id,
+                    );
+                    const workDrawings = master
+                      ? buildDrawingSubtree(master, allDrawings).children
+                      : [];
+                    return (
+                      <Fragment key={f.id}>
+                        <TableRow
+                          data-ocid={`project-detail.design.item.${i + 1}`}
                         >
-                          <Download className="w-3.5 h-3.5" />
-                        </Button>
-                        {pDelete && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-6 px-2 text-destructive hover:text-destructive"
-                            onClick={() => {
-                              if (!pDelete) {
-                                alert("Access restricted");
-                                return;
+                          <TableCell className="text-sm font-medium">
+                            <div className="flex items-center gap-1.5">
+                              <span>{f.fileName}</span>
+                              <Badge
+                                variant="outline"
+                                className="text-[10px] px-1 py-0"
+                              >
+                                Original
+                              </Badge>
+                              {master && (
+                                <Badge
+                                  variant="outline"
+                                  className="text-[10px] px-1 py-0 border-blue-400 text-blue-600"
+                                >
+                                  Edited
+                                </Badge>
+                              )}
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {new Date(f.uploadedAt).toLocaleDateString("en-IN")}
+                          </TableCell>
+                          <TableCell className="flex gap-1">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 px-2"
+                              onClick={() => setPreviewFile(f)}
+                              title="Preview Original"
+                              data-ocid={`project-detail.design.preview_button.${i + 1}`}
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                            </Button>
+                            {dEdit && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-6 px-2"
+                                onClick={() => handleEditDesignFile(f)}
+                                title="Edit"
+                                data-ocid={`project-detail.design.edit_button.${i + 1}`}
+                              >
+                                <Pencil className="w-3.5 h-3.5" />
+                              </Button>
+                            )}
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 px-2"
+                              onClick={() => handleDownloadFile(f)}
+                              title="Download Original"
+                              data-ocid={`project-detail.design.secondary_button.${i + 1}`}
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                            </Button>
+                            {pDelete && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-6 px-2 text-destructive hover:text-destructive"
+                                onClick={() => {
+                                  if (!pDelete) {
+                                    alert("Access restricted");
+                                    return;
+                                  }
+                                  deleteDesignFile(f.id);
+                                  toast.success("File removed");
+                                }}
+                                data-ocid={`project-detail.design.delete_button.${i + 1}`}
+                              >
+                                ×
+                              </Button>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                        {dView &&
+                          workDrawings.map((child) => (
+                            <DrawingTreeRow
+                              key={child.drawing.id}
+                              node={child}
+                              depth={1}
+                              canEdit={dEdit}
+                              canDelete={dDelete}
+                              onOpen={(d) =>
+                                onOpenDrawingEditor?.({
+                                  projectId,
+                                  drawingId: d.id,
+                                })
                               }
-                              deleteDesignFile(f.id);
-                              toast.success("File removed");
-                            }}
-                            data-ocid={`project-detail.design.delete_button.${i + 1}`}
-                          >
-                            ×
-                          </Button>
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  ))}
+                              onDelete={handleDrawingDelete}
+                              onPreview={setPreviewWorkDrawing}
+                              onPrint={handlePrintWorkDrawing}
+                              showRename={false}
+                              showLink={false}
+                              showDuplicate={false}
+                              openLabel="Edit"
+                              compact
+                            />
+                          ))}
+                      </Fragment>
+                    );
+                  })}
                   {projDesignFiles.length === 0 && (
                     <TableRow>
                       <TableCell
-                        colSpan={4}
+                        colSpan={3}
                         className="text-center py-8 text-sm text-muted-foreground"
                         data-ocid="project-detail.design.empty_state"
                       >
@@ -1934,6 +2449,21 @@ export function ProjectDetail({ projectId, onBack }: Props) {
               </Table>
             </div>
           </div>
+          <DesignFilePreviewDialog
+            file={previewFile}
+            open={!!previewFile}
+            onOpenChange={(o) => !o && setPreviewFile(null)}
+            onDownload={handleDownloadFile}
+          />
+          <WorkDrawingPreviewDialog
+            drawing={previewWorkDrawing}
+            open={!!previewWorkDrawing}
+            onOpenChange={(o) => !o && setPreviewWorkDrawing(null)}
+            company={{
+              companyName: settings?.companyName || "Your Company",
+              companyLogoDataUrl: settings?.companyLogo || undefined,
+            }}
+          />
         </TabsContent>
 
         {/* Tab 3 — Internal Costing */}
@@ -1959,6 +2489,11 @@ export function ProjectDetail({ projectId, onBack }: Props) {
                     ["assemblyCost", "Assembly Cost"],
                     ["packingCost", "Packing Cost"],
                     ["labourCost", "Labour Cost"],
+                    ["machineCost", "Machine / Equipment Cost"],
+                    ["outsourceCost", "Outsourced Work Cost"],
+                    ["consumablesCost", "Consumables Cost"],
+                    ["electricityCost", "Electricity Cost"],
+                    ["scrapLossCost", "Scrap / Material Loss"],
                     ["transportCost", "Transport Cost"],
                   ] as [keyof typeof costing, string][]
                 ).map(([field, label]) => (
@@ -2921,6 +3456,18 @@ export function ProjectDetail({ projectId, onBack }: Props) {
                                 Material
                               </span>
                             )}
+                            {stage.stageId &&
+                              projectQmsInspectionsForThisProject.some(
+                                (i) =>
+                                  i.requiredProductionStageId === stage.stageId,
+                              ) && (
+                                <span
+                                  className="ml-2 text-[10px] bg-blue-100 text-blue-700 rounded px-1 py-0.5"
+                                  data-ocid={`project-detail.production.inspection_badge.${stage.stageId}`}
+                                >
+                                  Inspection Required
+                                </span>
+                              )}
                             {isLocked && (
                               <span className="ml-2 text-xs text-muted-foreground">
                                 (locked)
@@ -2982,6 +3529,31 @@ export function ProjectDetail({ projectId, onBack }: Props) {
                       {/* Stage Body */}
                       {isExpanded && (
                         <div className="border-t px-4 py-4 space-y-4">
+                          {/* Phase 32 (Task #174) - QMS inspection link.
+                           * Optional, independent of material tracking.
+                           * Task #176 added the actual gate enforcement
+                           * (handleCompleteStage above) and the read-only
+                           * gate status this control now displays. */}
+                          {stage.stageId && (
+                            <div className="border rounded-md px-3 py-2 bg-muted/20">
+                              <ProductionStageInspectionControl
+                                projectId={projectId}
+                                stageId={stage.stageId}
+                                stageName={stage.stageName}
+                                libraryInspections={inspectionStages}
+                                projectInspections={
+                                  projectQmsInspectionsForThisProject
+                                }
+                                projectOverrides={
+                                  projectQmsInspectionOverridesForThisProject
+                                }
+                                onOpenInspection={() => setActiveTab("qms")}
+                                currentUserId={userId}
+                                currentUserName={userName}
+                                canManage={canManageInspectionLink}
+                              />
+                            </div>
+                          )}
                           {stage.requiresMaterialTracking ? (
                             <div className="space-y-3">
                               {/* Totals */}
@@ -3127,6 +3699,16 @@ export function ProjectDetail({ projectId, onBack }: Props) {
                                 <Select
                                   value={stage.status}
                                   onValueChange={(v) => {
+                                    // Phase 32 (Task #176) - "Completed" is
+                                    // the one transition the QMS gate can
+                                    // block, so route it through the same
+                                    // gated handler the "Mark as Complete"
+                                    // button already uses below, instead of
+                                    // writing the status directly here.
+                                    if (v === "Completed") {
+                                      handleCompleteStage(idx);
+                                      return;
+                                    }
                                     const updated = v2Stages.map((s, i) =>
                                       i === idx
                                         ? {
@@ -3160,14 +3742,160 @@ export function ProjectDetail({ projectId, onBack }: Props) {
                                   </SelectContent>
                                 </Select>
                               </div>
-                              {stage.status !== "Completed" && (
-                                <Button
-                                  size="sm"
-                                  onClick={() => handleCompleteStage(idx)}
-                                >
-                                  Mark as Complete
-                                </Button>
-                              )}
+
+                              {/* Quantity Tracking */}
+                              <div>
+                                <div className="flex items-center justify-between mb-2">
+                                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                                    Quantity Tracking
+                                  </p>
+                                  {project?.totalQty && (
+                                    <span className="text-xs text-muted-foreground">
+                                      Ordered:{" "}
+                                      <strong>{project.totalQty}</strong>
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                                  {[
+                                    {
+                                      label: "Input Qty",
+                                      field: "sentQty" as const,
+                                      color:
+                                        "bg-blue-50 border-blue-200 text-blue-700",
+                                    },
+                                    {
+                                      label: "Completed",
+                                      field: "okQty" as const,
+                                      color:
+                                        "bg-green-50 border-green-200 text-green-700",
+                                    },
+                                    {
+                                      label: "Rejected",
+                                      field: "rejectedQty" as const,
+                                      color:
+                                        "bg-red-50 border-red-200 text-red-700",
+                                    },
+                                    {
+                                      label: "Rework",
+                                      field: "reworkQty" as const,
+                                      color:
+                                        "bg-orange-50 border-orange-200 text-orange-700",
+                                    },
+                                  ].map(({ label, field, color }) => (
+                                    <div
+                                      key={field}
+                                      className={`rounded-md border p-2 ${color}`}
+                                    >
+                                      <p className="text-[10px] font-medium mb-1">
+                                        {label}
+                                      </p>
+                                      <input
+                                        type="number"
+                                        min={0}
+                                        className="w-full bg-transparent text-sm font-bold border-none outline-none p-0"
+                                        value={stage[field] ?? 0}
+                                        onChange={(e) => {
+                                          const updated = v2Stages.map(
+                                            (s, i) =>
+                                              i === idx
+                                                ? {
+                                                    ...s,
+                                                    [field]: Math.max(
+                                                      0,
+                                                      Number(e.target.value),
+                                                    ),
+                                                  }
+                                                : s,
+                                          );
+                                          updateProjectStagesV2(
+                                            projectId,
+                                            updated,
+                                          );
+                                        }}
+                                      />
+                                    </div>
+                                  ))}
+                                </div>
+                                {/* Balance — auto-calculated */}
+                                {(() => {
+                                  const input = stage.sentQty ?? 0;
+                                  const completed = stage.okQty ?? 0;
+                                  const rejected = stage.rejectedQty ?? 0;
+                                  const rework = stage.reworkQty ?? 0;
+                                  const balance = Math.max(
+                                    0,
+                                    input - completed - rejected - rework,
+                                  );
+                                  const stageMoves = (
+                                    productionMovements || []
+                                  ).filter(
+                                    (m) =>
+                                      m.projectId === projectId &&
+                                      (m.fromStage === stage.stageName ||
+                                        m.toStage === stage.stageName),
+                                  );
+                                  return (
+                                    <>
+                                      {input > 0 && (
+                                        <div
+                                          className={`mt-2 flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium ${balance > 0 ? "bg-amber-50 border border-amber-200 text-amber-700" : "bg-green-50 border border-green-200 text-green-700"}`}
+                                        >
+                                          <span>
+                                            Balance: <strong>{balance}</strong>
+                                          </span>
+                                          {balance === 0 && completed > 0 && (
+                                            <span>· Stage fully accounted</span>
+                                          )}
+                                        </div>
+                                      )}
+                                      {stageMoves.length > 0 && (
+                                        <div className="mt-1.5 text-[11px] text-muted-foreground">
+                                          {stageMoves.map((m) => (
+                                            <span
+                                              key={m.id}
+                                              className="inline-flex items-center gap-1 mr-2"
+                                            >
+                                              {m.fromStage === stage.stageName
+                                                ? `→ ${m.toStage}: ${m.qty}`
+                                                : `← ${m.fromStage}: ${m.qty}`}
+                                            </span>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </>
+                                  );
+                                })()}
+                              </div>
+
+                              <div className="flex items-center gap-2 flex-wrap">
+                                {stage.status !== "Completed" && (
+                                  <Button
+                                    size="sm"
+                                    onClick={() => handleCompleteStage(idx)}
+                                  >
+                                    Mark as Complete
+                                  </Button>
+                                )}
+                                {pEdit && (
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() => {
+                                      setMoveForm({
+                                        fromStage: stage.stageName,
+                                        toStage: "",
+                                        qty: 0,
+                                        notes: "",
+                                      });
+                                      setMoveQtyDialog(true);
+                                    }}
+                                  >
+                                    Move Qty →
+                                  </Button>
+                                )}
+                              </div>
                             </div>
                           )}
                           {/* Notes */}
@@ -3243,6 +3971,44 @@ export function ProjectDetail({ projectId, onBack }: Props) {
                   </DialogFooter>
                 </DialogContent>
               </Dialog>
+
+              {/* Phase 32 (Task #176) - Supervisor/admin QMS gate override */}
+              {gateOverrideDialog && (
+                <QmsGateOverrideDialog
+                  open={!!gateOverrideDialog}
+                  onOpenChange={(open) => !open && setGateOverrideDialog(null)}
+                  stageName={gateOverrideDialog.stageName}
+                  inspectionName={
+                    gateOverrideDialog.gate.inspection.libraryInspectionName
+                  }
+                  blockReason={gateOverrideDialog.gate.blockReason ?? ""}
+                  onConfirm={async (reason) => {
+                    const result = await createProjectQmsInspectionOverride({
+                      projectQmsInspectionId:
+                        gateOverrideDialog.gate.inspection.id,
+                      requiredProductionStageId: gateOverrideDialog.stageId,
+                      reason,
+                      byUserId: userId,
+                      byUserName: userName,
+                    });
+                    if (result.status !== "success") {
+                      toast.error(result.error || "Could not record override");
+                      return false;
+                    }
+                    const idx = gateOverrideDialog.idx;
+                    const updated = v2Stages.map((s, i) =>
+                      i === idx
+                        ? { ...s, status: "Completed" as ProjectStageStatus }
+                        : s,
+                    );
+                    updateProjectStagesV2(projectId, updated);
+                    toast.success(
+                      "Stage marked complete (supervisor override recorded)",
+                    );
+                    return true;
+                  }}
+                />
+              )}
 
               {/* Send Material Dialog */}
               <Dialog
@@ -3465,6 +4231,16 @@ export function ProjectDetail({ projectId, onBack }: Props) {
           )}
         </TabsContent>
 
+        {/* Tab — Inspection (QMS Phase 2) */}
+        <TabsContent value="inspection" className="mt-4">
+          <ProjectInspectionTab projectId={projectId} />
+        </TabsContent>
+
+        {/* Tab — QMS (Phase 32, Task #175) */}
+        <TabsContent value="qms" className="mt-4">
+          <ProjectQmsInspectionsTab projectId={projectId} />
+        </TabsContent>
+
         {/* Tab 7 — Delivery Details */}
         <TabsContent value="delivery" className="mt-4">
           <Card>
@@ -3634,16 +4410,50 @@ export function ProjectDetail({ projectId, onBack }: Props) {
                               variant="ghost"
                               size="icon"
                               className="h-7 w-7 text-destructive hover:text-destructive"
-                              onClick={() => {
+                              onClick={async () => {
                                 if (!pDelete) {
                                   alert("Access restricted");
                                   return;
+                                }
+                                const result = await deleteInventoryUsageRemote(
+                                  u.id,
+                                );
+                                if (result.status === "unauthenticated") {
+                                  toast.error(
+                                    "Not signed in to the server - usage was not deleted",
+                                  );
+                                  return;
+                                }
+                                if (
+                                  result.status === "denied" ||
+                                  result.status === "error"
+                                ) {
+                                  toast.error(
+                                    result.error ?? "Could not delete usage",
+                                  );
+                                  return;
+                                }
+                                // Disclosed mechanical gap (see
+                                // lib/inventoryUsagesApi.ts): no DB
+                                // trigger restores stock on delete -
+                                // explicitly compensate to preserve
+                                // existing behavior.
+                                const restoreResult =
+                                  await restoreInventoryStockRemote(
+                                    u.inventoryItemId,
+                                    u.quantityUsed,
+                                  );
+                                if (restoreResult.status !== "success") {
+                                  toast.error(
+                                    "Usage deleted, but stock restore failed - please verify inventory manually",
+                                  );
                                 }
                                 deleteMaterialUsage(
                                   u.id,
                                   u.inventoryItemId,
                                   u.quantityUsed,
                                 );
+                                toast.success("Usage deleted");
                               }}
                               data-ocid={`project-detail.material-usage.delete_button.${i + 1}`}
                             >
@@ -3864,18 +4674,40 @@ export function ProjectDetail({ projectId, onBack }: Props) {
                   Cancel
                 </Button>
                 <Button
-                  onClick={() => {
+                  onClick={async () => {
                     if (!editUsageId || !editUsageForm) return;
                     const existing = materialUsages.find(
                       (x) => x.id === editUsageId,
                     );
                     if (!existing) return;
-                    updateMaterialUsage({
+                    const result = await updateInventoryUsageRemote({
                       ...existing,
                       quantityUsed: Number(editUsageForm.quantityUsed),
                       usedDate: editUsageForm.usedDate,
                       notes: editUsageForm.notes,
                     });
+                    if (result.status === "unauthenticated") {
+                      toast.error(
+                        "Not signed in to the server - usage was not saved",
+                      );
+                      return;
+                    }
+                    if (
+                      result.status === "denied" ||
+                      result.status === "error"
+                    ) {
+                      toast.error(result.error ?? "Could not save usage");
+                      return;
+                    }
+                    if (!result.data) {
+                      toast.error("Could not save usage");
+                      return;
+                    }
+                    // Same pre-existing behavior as before this
+                    // migration: updateMaterialUsage does NOT adjust
+                    // stock, matching the DB's own lack of a
+                    // recompute-on-update trigger.
+                    updateMaterialUsage(result.data);
                     setEditUsageId(null);
                     setEditUsageForm(null);
                     toast.success("Usage updated");
@@ -4000,13 +4832,33 @@ export function ProjectDetail({ projectId, onBack }: Props) {
                                 variant="ghost"
                                 size="icon"
                                 className="h-7 w-7 text-destructive hover:text-destructive"
-                                onClick={() => {
+                                onClick={async () => {
                                   if (!pDelete) {
                                     alert("Access restricted");
                                     return;
                                   }
+                                  const result = await deleteBomItemRemote(
+                                    b.id,
+                                  );
+                                  if (result.status === "unauthenticated") {
+                                    toast.error(
+                                      "Not signed in to the server - BOM item was not deleted",
+                                    );
+                                    return;
+                                  }
+                                  if (
+                                    result.status === "denied" ||
+                                    result.status === "error"
+                                  ) {
+                                    toast.error(
+                                      result.error ??
+                                        "Could not delete BOM item",
+                                    );
+                                    return;
+                                  }
                                   deleteBomItem(b.id);
                                   toast.success("BOM item removed");
+                                  await refreshBomRequisitions();
                                 }}
                                 data-ocid={`project-detail.bom.delete_button.${i + 1}`}
                               >
@@ -4078,18 +4930,20 @@ export function ProjectDetail({ projectId, onBack }: Props) {
                     </p>
                   )}
                 </div>
-                <div className="flex justify-end">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 text-xs text-primary"
-                    onClick={() => setNewMatDialog(true)}
-                    data-ocid="project-detail.bom.add_new_material_button"
-                  >
-                    <Plus className="w-3 h-3 mr-1" /> Add New Material
-                  </Button>
-                </div>
+                {pCreateInventory && (
+                  <div className="flex justify-end">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 text-xs text-primary"
+                      onClick={() => setNewMatDialog(true)}
+                      data-ocid="project-detail.bom.add_new_material_button"
+                    >
+                      <Plus className="w-3 h-3 mr-1" /> Add New Material
+                    </Button>
+                  </div>
+                )}
                 <div className="space-y-1.5">
                   <Label className="text-xs">Required Quantity *</Label>
                   <Input
@@ -4747,7 +5601,340 @@ export function ProjectDetail({ projectId, onBack }: Props) {
             );
           })()}
         </TabsContent>
+
+        {/* Timeline Tab */}
+        <TabsContent value="timeline" className="mt-4">
+          {(() => {
+            const activities = [...(project.activityLog || [])].sort(
+              (a, b) => b.timestamp - a.timestamp,
+            );
+            const ACTIVITY_ICONS: Record<string, string> = {
+              project_created: "🗂",
+              quotation_created: "📋",
+              quotation_approved: "✅",
+              po_received: "📦",
+              production_started: "⚙️",
+              production_stage_update: "🔄",
+              material_purchased: "🛒",
+              material_requisition: "📝",
+              qc_passed: "✔️",
+              qc_failed: "❌",
+              dispatch: "🚛",
+              invoice_generated: "🧾",
+              payment_received: "💰",
+              machine_breakdown: "⚠️",
+              report_exported: "📊",
+              note: "💬",
+            };
+            return (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h2 className="text-sm font-semibold">Project Timeline</h2>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      {activities.length} event
+                      {activities.length !== 1 ? "s" : ""} recorded
+                    </p>
+                  </div>
+                  {pEdit && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        const note = window.prompt(
+                          "Add a note to this project's timeline:",
+                        );
+                        if (note?.trim()) {
+                          addProjectActivity(
+                            projectId,
+                            "note",
+                            note.trim(),
+                            currentUser?.username ?? "unknown",
+                          );
+                        }
+                      }}
+                    >
+                      + Add Note
+                    </Button>
+                  )}
+                </div>
+                {activities.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-16 text-center border rounded-lg bg-muted/20">
+                    <span className="text-3xl mb-3">📋</span>
+                    <p className="text-sm font-medium text-muted-foreground">
+                      No activity recorded yet.
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Activity is logged automatically as the project
+                      progresses.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="relative">
+                    <div className="absolute left-4 top-0 bottom-0 w-0.5 bg-border" />
+                    <div className="space-y-0">
+                      {activities.map((act) => (
+                        <div key={act.id} className="relative flex gap-4 pb-4">
+                          <div className="relative z-10 flex items-center justify-center w-8 h-8 rounded-full bg-card border-2 border-border text-sm shrink-0">
+                            {ACTIVITY_ICONS[act.type] ?? "•"}
+                          </div>
+                          <div className="flex-1 min-w-0 bg-card border rounded-lg px-3 py-2.5">
+                            <p className="text-xs font-medium">
+                              {act.description}
+                            </p>
+                            <div className="flex items-center gap-2 mt-1">
+                              <span className="text-[11px] text-muted-foreground">
+                                {new Date(act.timestamp).toLocaleDateString(
+                                  "en-IN",
+                                  {
+                                    day: "numeric",
+                                    month: "short",
+                                    year: "numeric",
+                                    hour: "2-digit",
+                                    minute: "2-digit",
+                                  },
+                                )}
+                              </span>
+                              {act.performedBy && (
+                                <span className="text-[11px] text-muted-foreground">
+                                  · {act.performedBy}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                      {/* Project creation as last item */}
+                      <div className="relative flex gap-4 pb-4">
+                        <div className="relative z-10 flex items-center justify-center w-8 h-8 rounded-full bg-blue-100 border-2 border-blue-300 text-sm shrink-0">
+                          🗂
+                        </div>
+                        <div className="flex-1 min-w-0 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2.5">
+                          <p className="text-xs font-medium text-blue-700">
+                            Project created — {project.projectNo}
+                          </p>
+                          <p className="text-[11px] text-blue-500 mt-1">
+                            {new Date(project.createdAt).toLocaleDateString(
+                              "en-IN",
+                              {
+                                day: "numeric",
+                                month: "short",
+                                year: "numeric",
+                              },
+                            )}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+        </TabsContent>
       </Tabs>
+
+      {/* Repeat Order Dialog */}
+      <Dialog open={repeatDialog} onOpenChange={setRepeatDialog}>
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Create Repeat Order</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="rounded-lg bg-muted p-3 text-sm">
+              <p className="text-xs text-muted-foreground">Source Project</p>
+              <p className="font-semibold">{project?.projectName}</p>
+              <p className="text-xs text-muted-foreground font-mono">
+                {project?.projectNo}
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Internal Name (for ERP tracking)</Label>
+              <Input
+                value={repeatForm.newName}
+                onChange={(e) =>
+                  setRepeatForm((f) => ({ ...f, newName: e.target.value }))
+                }
+                placeholder="e.g. MS Enclosure Set - ORD-002"
+              />
+              <p className="text-[11px] text-muted-foreground">
+                This is the internal tracking name. Customers will see{" "}
+                <strong>
+                  {project ? getCustomerVisibleName(project) : ""}
+                </strong>{" "}
+                on all documents.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                Copy from source
+              </p>
+              {(
+                [
+                  ["copyDesignFiles", "Design Files"],
+                  ["copyBOM", "BOM (Bill of Materials)"],
+                  ["copyCosting", "Internal Costing Structure"],
+                  ["copyStages", "Production Stages (progress reset)"],
+                  ["copyQC", "QC Structure"],
+                  ["copyNotes", "Notes"],
+                ] as [keyof typeof repeatForm, string][]
+              ).map(([key, label]) => (
+                <label
+                  key={key}
+                  className="flex items-center gap-2 cursor-pointer select-none"
+                >
+                  <input
+                    type="checkbox"
+                    checked={repeatForm[key] as boolean}
+                    onChange={(e) =>
+                      setRepeatForm((f) => ({ ...f, [key]: e.target.checked }))
+                    }
+                    className="w-4 h-4 rounded"
+                  />
+                  <span className="text-sm">{label}</span>
+                </label>
+              ))}
+            </div>
+            <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 text-xs text-amber-800 space-y-0.5">
+              <p className="font-semibold">
+                The following will always be reset:
+              </p>
+              <p>
+                Production progress, QC results, invoices, payments, dispatch,
+                usage logs
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setRepeatDialog(false)}
+            >
+              Cancel
+            </Button>
+            <Button type="button" onClick={handleCreateRepeatOrder}>
+              Create Repeat Order
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* WIP Move Qty Dialog */}
+      <Dialog open={moveQtyDialog} onOpenChange={setMoveQtyDialog}>
+        <DialogContent className="max-w-sm max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Move Quantity Between Stages</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label>From Stage</Label>
+                <Select
+                  value={moveForm.fromStage}
+                  onValueChange={(v) =>
+                    setMoveForm((f) => ({ ...f, fromStage: v }))
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(existingProduction?.stages || []).map((s) => (
+                      <SelectItem key={s.stageName} value={s.stageName}>
+                        {s.stageName}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label>To Stage</Label>
+                <Select
+                  value={moveForm.toStage}
+                  onValueChange={(v) =>
+                    setMoveForm((f) => ({ ...f, toStage: v }))
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(existingProduction?.stages || [])
+                      .filter((s) => s.stageName !== moveForm.fromStage)
+                      .map((s) => (
+                        <SelectItem key={s.stageName} value={s.stageName}>
+                          {s.stageName}
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <Label>Quantity *</Label>
+              <Input
+                type="number"
+                min={1}
+                value={moveForm.qty || ""}
+                onChange={(e) =>
+                  setMoveForm((f) => ({ ...f, qty: Number(e.target.value) }))
+                }
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label>Notes</Label>
+              <Textarea
+                rows={2}
+                value={moveForm.notes}
+                onChange={(e) =>
+                  setMoveForm((f) => ({ ...f, notes: e.target.value }))
+                }
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setMoveQtyDialog(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => {
+                if (!moveForm.fromStage || !moveForm.toStage) {
+                  toast.error("Select both stages");
+                  return;
+                }
+                if (moveForm.qty <= 0) {
+                  toast.error("Enter valid quantity");
+                  return;
+                }
+                if (!project) return;
+                addProductionMovement({
+                  id: crypto.randomUUID(),
+                  projectId: project.id,
+                  fromStage: moveForm.fromStage,
+                  toStage: moveForm.toStage,
+                  qty: moveForm.qty,
+                  movementDate: new Date().toISOString().split("T")[0],
+                  notes: moveForm.notes || undefined,
+                  createdBy: currentUser?.username ?? "system",
+                  createdAt: Date.now(),
+                });
+                toast.success(
+                  `Moved ${moveForm.qty} units from ${moveForm.fromStage} → ${moveForm.toStage}`,
+                );
+                setMoveQtyDialog(false);
+              }}
+            >
+              Move Qty
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

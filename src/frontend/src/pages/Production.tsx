@@ -22,7 +22,12 @@ import { ShieldOff } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
-import { canEdit, canView } from "../permissions";
+import { createVendorRemote } from "../lib/vendorsApi";
+import { canCreate, canEdit, canView, hasPermission } from "../permissions";
+import { ProductionGateStatusBadge } from "../qms/components/ProductionGateStatusBadge";
+import { QmsGateOverrideDialog } from "../qms/components/QmsGateOverrideDialog";
+import { getStageInspectionGate } from "../qms/lib/productionGate";
+import { useQmsStore } from "../qms/store/useQmsStore";
 import { useStore } from "../store";
 import type {
   ProjectProductionStage,
@@ -76,11 +81,17 @@ function SentToSelect({
   onChange: (id: string, name: string) => void;
 }) {
   const { vendors, addVendor } = useStore();
+  const { currentUser } = useAuth();
+  // Phase 21A — this component has no prior useAuth() call; the "sent to"
+  // vendor picker's quick-add gets its own vendors.create check here.
+  const pCreateVendor = canCreate(currentUser, "vendors");
   const [addModalOpen, setAddModalOpen] = useState(false);
   const [newVendorName, setNewVendorName] = useState("");
+  const [isSavingVendor, setIsSavingVendor] = useState(false);
 
   const handleSelect = (val: string) => {
     if (val === "__add_new__") {
+      if (!pCreateVendor) return;
       setAddModalOpen(true);
       return;
     }
@@ -92,26 +103,51 @@ function SentToSelect({
     if (v) onChange(v.id, v.name);
   };
 
-  const handleAddVendor = () => {
+  const handleAddVendor = async () => {
+    // Phase 21A — defensive re-check, mirrors the trigger-hiding gate
+    // below.
+    if (!pCreateVendor) {
+      toast.error("You do not have permission to add vendors");
+      return;
+    }
     if (!newVendorName.trim()) return;
     const exists = vendors.find(
       (v) => v.name.trim().toLowerCase() === newVendorName.trim().toLowerCase(),
     );
     if (exists) {
       onChange(exists.id, exists.name);
-    } else {
-      const newV = {
-        id: crypto.randomUUID(),
+      setAddModalOpen(false);
+      setNewVendorName("");
+      return;
+    }
+    if (isSavingVendor) return;
+    setIsSavingVendor(true);
+    try {
+      // Phase 21A — remote-first, same contract as Vendors.tsx.
+      const result = await createVendorRemote({
         name: newVendorName.trim(),
         phone: "",
         address: "",
-        createdAt: Date.now(),
-      };
-      addVendor(newV);
-      onChange(newV.id, newV.name);
+      });
+      if (result.status === "unauthenticated") {
+        toast.error("Not signed in to the server - vendor was not saved");
+        return;
+      }
+      if (result.status === "denied" || result.status === "error") {
+        toast.error(result.error ?? "Could not save vendor");
+        return;
+      }
+      if (!result.data) {
+        toast.error("Could not save vendor");
+        return;
+      }
+      addVendor(result.data);
+      onChange(result.data.id, result.data.name);
+      setAddModalOpen(false);
+      setNewVendorName("");
+    } finally {
+      setIsSavingVendor(false);
     }
-    setAddModalOpen(false);
-    setNewVendorName("");
   };
 
   const displayValue = vendorId === "inhouse" ? "inhouse" : vendorId || "";
@@ -139,14 +175,16 @@ function SentToSelect({
               {v.name}
             </SelectItem>
           ))}
-          <div className="border-t border-border mt-1 pt-1">
-            <SelectItem
-              value="__add_new__"
-              className="text-xs text-primary font-medium"
-            >
-              + Add New Vendor
-            </SelectItem>
-          </div>
+          {pCreateVendor && (
+            <div className="border-t border-border mt-1 pt-1">
+              <SelectItem
+                value="__add_new__"
+                className="text-xs text-primary font-medium"
+              >
+                + Add New Vendor
+              </SelectItem>
+            </div>
+          )}
         </SelectContent>
       </Select>
 
@@ -171,7 +209,11 @@ function SentToSelect({
             >
               Cancel
             </Button>
-            <Button size="sm" onClick={handleAddVendor}>
+            <Button
+              size="sm"
+              onClick={handleAddVendor}
+              disabled={isSavingVendor}
+            >
               Add
             </Button>
           </DialogFooter>
@@ -181,10 +223,26 @@ function SentToSelect({
   );
 }
 
+interface ProductionProps {
+  /** Task #176 - "Open Inspection" action on a gate-blocked/linked stage.
+   * Optional so existing callers/tests that don't pass it keep working;
+   * App.tsx wires it exactly like InspectionSheetsList/InspectorDashboard
+   * already do for the same "jump to this project" pattern. */
+  onOpenProject?: (projectId: string) => void;
+}
+
 // ---- Main Production Dashboard ----
-export function Production() {
+export function Production({ onOpenProject }: ProductionProps = {}) {
   const { currentUser } = useAuth();
   const pEdit = canEdit(currentUser, "production");
+  // Phase 32 (Task #176) - supervisor/admin Production-gate override. Raw
+  // hasPermission() call (not canEdit/canCreate/etc.) since inspection_
+  // sheets uses its own non-standard action vocabulary, matching the
+  // established convention elsewhere in this codebase.
+  const canOverrideGate = hasPermission(
+    currentUser,
+    "inspection_sheets.override",
+  );
 
   const {
     projects,
@@ -194,6 +252,12 @@ export function Production() {
     bomItems,
     inventoryItems,
   } = useStore();
+
+  const {
+    projectQmsInspections,
+    projectQmsInspectionOverrides,
+    createProjectQmsInspectionOverride,
+  } = useQmsStore();
 
   // Which project is expanded
   const [expandedProjectId, setExpandedProjectId] = useState<string | null>(
@@ -250,6 +314,16 @@ export function Production() {
     shortages: string[];
   } | null>(null);
 
+  // Phase 32 (Task #176) - QMS inspection gate override dialog. A
+  // separate condition from material availability above - both must
+  // clear (or be overridden) for a stage to reach "Completed".
+  const [gateOverrideDialog, setGateOverrideDialog] = useState<{
+    projectId: string;
+    stageIdx: number;
+    stageName: string;
+    gate: Extract<ReturnType<typeof getStageInspectionGate>, { linked: true }>;
+  } | null>(null);
+
   // Build enriched project rows
   const projectRows = projects.map((project) => {
     const production = projectProductions.find(
@@ -279,6 +353,13 @@ export function Production() {
   const inProductionCount = projectRows.filter(
     (r) => r.stages.length > 0,
   ).length;
+
+  // Production Queue — all active/in-progress stages across projects
+  const productionQueue = projectRows.flatMap((r) =>
+    r.stages
+      .filter((s) => s.status === "InProgress" || s.status === "Sent")
+      .map((s, stageIdx) => ({ project: r.project, stage: s, stageIdx })),
+  );
 
   // ---- Material availability check ----
   const checkMaterialAvailability = (
@@ -336,6 +417,34 @@ export function Production() {
     }
     const prod = projectProductions.find((pp) => pp.projectId === projectId);
     if (!prod) return;
+    // Phase 32 (Task #176) - QMS inspection gate. An additional condition
+    // to the material check above, independent of it, and only relevant
+    // for the "Completed" transition (rule §4 - the gate is about
+    // proceeding, not starting). Follows the inspection's server-derived
+    // status only (rule §6) - never recalculated here.
+    if (newStatus === "Completed") {
+      const stage = prod.stages?.[stageIdx];
+      const gate = getStageInspectionGate(
+        stage?.stageId,
+        projectQmsInspections.filter((i) => i.projectId === projectId),
+        projectQmsInspectionOverrides,
+      );
+      if (gate.linked && !gate.canProceed) {
+        if (canOverrideGate) {
+          setGateOverrideDialog({
+            projectId,
+            stageIdx,
+            stageName: stage?.stageName ?? "",
+            gate,
+          });
+        } else {
+          toast.error(
+            `Cannot complete "${stage?.stageName}": ${gate.blockReason}`,
+          );
+        }
+        return;
+      }
+    }
     const updated = (prod.stages || []).map((s, i) =>
       i === stageIdx ? { ...s, status: newStatus } : s,
     );
@@ -368,6 +477,29 @@ export function Production() {
         toast.error(`Material not available: ${shortages[0]}`);
         return;
       }
+    }
+    // Phase 32 (Task #176) - QMS inspection gate, independent of the
+    // material check above (rule: "the QMS gate should be an additional
+    // condition").
+    const gate = getStageInspectionGate(
+      stage?.stageId,
+      projectQmsInspections.filter((i) => i.projectId === projectId),
+      projectQmsInspectionOverrides,
+    );
+    if (gate.linked && !gate.canProceed) {
+      if (canOverrideGate) {
+        setGateOverrideDialog({
+          projectId,
+          stageIdx,
+          stageName: stage?.stageName ?? "",
+          gate,
+        });
+      } else {
+        toast.error(
+          `Cannot complete "${stage?.stageName}": ${gate.blockReason}`,
+        );
+      }
+      return;
     }
     const updated = (prod.stages || []).map((s, i) =>
       i === stageIdx ? { ...s, status: "Completed" as ProjectStageStatus } : s,
@@ -558,6 +690,49 @@ export function Production() {
           </p>
         </div>
       </div>
+
+      {/* Active Production Queue */}
+      {productionQueue.length > 0 && (
+        <div className="rounded-xl border bg-card">
+          <div className="flex items-center gap-2 px-4 py-2.5 border-b">
+            <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+              Active Queue
+            </span>
+            <span className="ml-auto text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-medium">
+              {productionQueue.length} stage
+              {productionQueue.length > 1 ? "s" : ""} active
+            </span>
+          </div>
+          <div className="divide-y">
+            {productionQueue.map(({ project, stage }) => (
+              <div
+                key={`${project.id}-${stage.stageName}`}
+                className="flex items-center gap-3 px-4 py-2.5"
+              >
+                <div className="flex-1 min-w-0">
+                  <span className="text-xs font-mono text-muted-foreground">
+                    {project.projectNo}
+                  </span>
+                  <span className="mx-2 text-muted-foreground">·</span>
+                  <span className="text-sm font-medium">{stage.stageName}</span>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {stage.requiresMaterialTracking && (
+                    <span className="text-[10px] bg-blue-50 text-blue-700 border border-blue-200 rounded px-1.5 py-0.5">
+                      Material
+                    </span>
+                  )}
+                  <span
+                    className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${STAGE_STATUS_COLORS[stage.status]}`}
+                  >
+                    {STAGE_STATUS_LABELS[stage.status]}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {projectRows.length === 0 && (
         <div className="text-center py-16 text-muted-foreground">
@@ -841,6 +1016,43 @@ export function Production() {
                               {/* Stage Body */}
                               {isStageExpanded && (
                                 <div className="border-t px-4 py-4 space-y-4">
+                                  {/* Phase 32 (Task #176) - QMS gate status.
+                                   * Read-only here (linking itself is done
+                                   * from ProjectDetail's Production tab) -
+                                   * renders nothing when this stage has no
+                                   * linked inspection, per the "don't
+                                   * clutter unlinked stages" rule. */}
+                                  {(() => {
+                                    const gate = getStageInspectionGate(
+                                      stage.stageId,
+                                      projectQmsInspections.filter(
+                                        (i) => i.projectId === project.id,
+                                      ),
+                                      projectQmsInspectionOverrides,
+                                    );
+                                    if (!gate.linked) return null;
+                                    return (
+                                      <div className="border rounded-md px-3 py-2 bg-muted/20 flex items-center justify-between gap-2 flex-wrap">
+                                        <ProductionGateStatusBadge
+                                          gate={gate}
+                                        />
+                                        {onOpenProject && (
+                                          <Button
+                                            type="button"
+                                            size="sm"
+                                            variant="outline"
+                                            className="h-6 px-2 text-[11px] shrink-0"
+                                            onClick={() =>
+                                              onOpenProject(project.id)
+                                            }
+                                            data-ocid={`production.open_inspection.${stage.stageId}`}
+                                          >
+                                            Open Inspection →
+                                          </Button>
+                                        )}
+                                      </div>
+                                    );
+                                  })()}
                                   {stage.requiresMaterialTracking ? (
                                     <div className="space-y-3">
                                       {/* Totals */}
@@ -1639,6 +1851,48 @@ export function Production() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Phase 32 (Task #176) - Supervisor/admin QMS gate override */}
+      {gateOverrideDialog && (
+        <QmsGateOverrideDialog
+          open={!!gateOverrideDialog}
+          onOpenChange={(open) => !open && setGateOverrideDialog(null)}
+          stageName={gateOverrideDialog.stageName}
+          inspectionName={
+            gateOverrideDialog.gate.inspection.libraryInspectionName
+          }
+          blockReason={gateOverrideDialog.gate.blockReason ?? ""}
+          onConfirm={async (reason) => {
+            const result = await createProjectQmsInspectionOverride({
+              projectQmsInspectionId: gateOverrideDialog.gate.inspection.id,
+              requiredProductionStageId:
+                gateOverrideDialog.gate.inspection.requiredProductionStageId ??
+                "",
+              reason,
+              byUserId: currentUser?.id ?? "",
+              byUserName: currentUser?.username ?? "unknown",
+            });
+            if (result.status !== "success") {
+              toast.error(result.error || "Could not record override");
+              return false;
+            }
+            const prod = projectProductions.find(
+              (pp) => pp.projectId === gateOverrideDialog.projectId,
+            );
+            if (!prod) return false;
+            const updated = (prod.stages || []).map((s, i) =>
+              i === gateOverrideDialog.stageIdx
+                ? { ...s, status: "Completed" as ProjectStageStatus }
+                : s,
+            );
+            updateProjectStagesV2(gateOverrideDialog.projectId, updated);
+            toast.success(
+              "Stage marked complete (supervisor override recorded)",
+            );
+            return true;
+          }}
+        />
+      )}
     </div>
   );
 }

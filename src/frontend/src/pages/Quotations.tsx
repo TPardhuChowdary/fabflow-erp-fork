@@ -25,9 +25,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  Copy,
   Download,
   Edit2,
   Eye,
+  GitBranch,
+  Layers,
   Plus,
   Printer,
   Share2,
@@ -51,6 +54,19 @@ import {
 } from "../lib/documentUtils";
 
 import {
+  createMasterPORemote,
+  createProjectPurchaseOrderRemote,
+  createQuotationPurchaseOrderRemote,
+} from "../lib/purchaseOrdersApi";
+import {
+  createQuotationRemote,
+  createQuotationRevisionRemote,
+  deleteQuotationRemote,
+  updateQuotationRemote,
+  updateQuotationRevisionRemote,
+} from "../lib/quotationsApi";
+import { getCustomerVisibleName } from "../lib/utils";
+import {
   canCreate,
   canDelete,
   canDownload,
@@ -62,10 +78,10 @@ import {
 import { useStore } from "../store";
 import type {
   LineItem,
-  MasterPO,
   PurchaseAttachment,
   Quotation,
   QuotationHistoryEntry,
+  QuotationRevision,
   QuotationStatus,
 } from "../types";
 
@@ -77,12 +93,14 @@ const newItem = (): LineItem => ({
   amount: 0,
 });
 
+const todayStr = () => new Date().toISOString().split("T")[0];
+
 const emptyForm = (defaultTerms = "") => ({
   customerId: "",
   lineItems: [newItem()],
   gstRate: 18,
   validUntil: "",
-  quotationDate: "",
+  quotationDate: todayStr(),
   terms: defaultTerms,
   notes: defaultTerms,
 });
@@ -90,12 +108,17 @@ const emptyForm = (defaultTerms = "") => ({
 export function Quotations() {
   const {
     quotations,
+    quotationRevisions,
+    quotationPurchaseOrders,
     customers,
     projects,
     generateDocNo,
     addQuotation,
     updateQuotation,
     deleteQuotation,
+    addQuotationRevision,
+    updateQuotationRevision,
+    addQuotationPurchaseOrder,
     addProjectPO,
     addMasterPO,
     settings,
@@ -204,15 +227,40 @@ export function Quotations() {
   const [poFormError, setPoFormError] = useState("");
   const [isSavingPO, setIsSavingPO] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [poTargetRevisionId, setPoTargetRevisionId] = useState<string | null>(
+    null,
+  );
 
-  // All project names for Description dropdown
+  // Revision-create mode: reuses the New/Edit dialog, but on save it creates
+  // a new QuotationRevision instead of updating the quotation in place.
+  const [revisionMode, setRevisionMode] = useState(false);
+
+  // All project names for Description dropdown — use customer-visible names
   const projectNames = (projects || [])
-    .map((p) => p.projectName)
+    .map((p) => getCustomerVisibleName(p))
     .filter(Boolean);
 
   const sorted = [...(quotations || [])].sort(
     (a, b) => b.createdAt - a.createdAt,
   );
+
+  // Revisions & Purchase Orders — Quotation -> Revisions -> Purchase Orders
+  const getRevisionsForQuotation = (quotationId: string) =>
+    [...(quotationRevisions || [])]
+      .filter((r) => r.quotationId === quotationId)
+      .sort((a, b) => b.revisionNumber - a.revisionNumber);
+  const getCurrentRevision = (quotationId: string) =>
+    (quotationRevisions || []).find(
+      (r) => r.quotationId === quotationId && r.isCurrent,
+    ) || getRevisionsForQuotation(quotationId)[0];
+  const getPOsForRevision = (revisionId: string) =>
+    (quotationPurchaseOrders || []).filter(
+      (po) => po.revisionId === revisionId,
+    );
+  const getPOsForQuotation = (quotationId: string) =>
+    (quotationPurchaseOrders || []).filter(
+      (po) => po.quotationId === quotationId,
+    );
 
   const updateItem = (
     i: number,
@@ -245,6 +293,44 @@ export function Quotations() {
     });
     setEditingId(q.id);
     setEditMode(true);
+    setRevisionMode(false);
+    setForceEdit(false);
+    setOpen(true);
+  };
+
+  const openDuplicate = (q: Quotation) => {
+    setForm({
+      customerId: q.customerId,
+      lineItems: (q.lineItems || []).map((li) => ({ ...li })),
+      gstRate: q.gstRate || 18,
+      validUntil: q.validUntil || "",
+      quotationDate: todayStr(),
+      terms: q.terms || "",
+      notes: (q as any).notes || q.terms || "",
+    });
+    setEditingId(null);
+    setEditMode(false);
+    setRevisionMode(false);
+    setForceEdit(false);
+    setOpen(true);
+  };
+
+  const openCreateRevision = (q: Quotation) => {
+    const current = getCurrentRevision(q.id);
+    setForm({
+      customerId: q.customerId,
+      lineItems: (current?.lineItems ?? q.lineItems ?? []).map((li) => ({
+        ...li,
+      })),
+      gstRate: current?.gstRate ?? q.gstRate ?? 18,
+      validUntil: current?.validUntil ?? q.validUntil ?? "",
+      quotationDate: todayStr(),
+      terms: current?.terms ?? q.terms ?? "",
+      notes: current?.notes ?? (q as any).notes ?? q.terms ?? "",
+    });
+    setEditingId(q.id);
+    setEditMode(false);
+    setRevisionMode(true);
     setForceEdit(false);
     setOpen(true);
   };
@@ -253,20 +339,19 @@ export function Quotations() {
     setForm(emptyForm());
     setEditMode(false);
     setEditingId(null);
+    setRevisionMode(false);
     setForceEdit(false);
   };
 
-  const handleSave = () => {
-    console.log("FORM SUBMITTED");
+  const handleSave = async () => {
     if (isSaving) return;
     setIsSaving(true);
     try {
-      console.log("Saving quotation:", form);
-      if (editMode && !pEdit) {
+      if ((editMode || revisionMode) && !pEdit) {
         alert("Access restricted");
         return;
       }
-      if (!editMode && !pCreate) {
+      if (!editMode && !revisionMode && !pCreate) {
         alert("Access restricted");
         return;
       }
@@ -282,18 +367,109 @@ export function Quotations() {
       const gstAmtVal = Math.round((subtotalVal * form.gstRate) / 100);
       const totalVal = subtotalVal + gstAmtVal;
 
-      if (editMode && editingId) {
+      if (revisionMode && editingId) {
         const existing = (quotations || []).find((q) => q.id === editingId);
         if (!existing) return;
-        const currentVersion = (existing as any).version || 1;
+        const previousRevision = getCurrentRevision(editingId);
+        const nextRevisionNumber = (previousRevision?.revisionNumber ?? 0) + 1;
+
+        if (previousRevision) {
+          const flipResult = await updateQuotationRevisionRemote({
+            ...previousRevision,
+            isCurrent: false,
+          });
+          if (flipResult.status === "unauthenticated") {
+            toast.error("Not signed in to the server - revision was not saved");
+            return;
+          }
+          if (flipResult.status === "denied" || flipResult.status === "error") {
+            toast.error(flipResult.error ?? "Could not save revision");
+            return;
+          }
+          if (flipResult.data) {
+            updateQuotationRevision({
+              ...flipResult.data,
+              createdBy: previousRevision.createdBy,
+            });
+          }
+        }
+
+        const revResult = await createQuotationRevisionRemote({
+          quotationId: editingId,
+          revisionNumber: nextRevisionNumber,
+          revisionDate: todayStr(),
+          lineItems: form.lineItems,
+          subtotal: subtotalVal,
+          gstRate: form.gstRate,
+          gstAmount: gstAmtVal,
+          totalAmount: totalVal,
+          validUntil: form.validUntil,
+          terms: form.notes || form.terms,
+          notes: form.notes,
+          status: "Draft",
+          isCurrent: true,
+        });
+        if (revResult.status === "unauthenticated") {
+          toast.error("Not signed in to the server - revision was not saved");
+          return;
+        }
+        if (revResult.status === "denied" || revResult.status === "error") {
+          toast.error(revResult.error ?? "Could not create revision");
+          return;
+        }
+        if (!revResult.data) {
+          toast.error("Could not create revision");
+          return;
+        }
+        addQuotationRevision({
+          ...revResult.data,
+          createdBy: currentUser?.username,
+        });
+
+        // Mirror the new current revision onto the Quotation record itself
+        // so printing, PDF export, and duplicate keep reading unchanged.
+        const qResult = await updateQuotationRemote({
+          id: editingId,
+          customerId: existing.customerId,
+          projectId: existing.projectId,
+          lineItems: form.lineItems,
+          subtotal: subtotalVal,
+          gstRate: form.gstRate,
+          gstAmount: gstAmtVal,
+          totalAmount: totalVal,
+          validUntil: form.validUntil,
+          quotationDate: existing.quotationDate,
+          terms: form.notes || form.terms,
+          notes: form.notes,
+          status: "Draft",
+          history: existing.history,
+          approvedAt: undefined,
+        });
+        if (qResult.status === "success" && qResult.data) {
+          updateQuotation({
+            ...qResult.data,
+            approvedBy: undefined,
+            recordedPO: existing.recordedPO,
+          });
+        }
+        toast.success(`Revision ${nextRevisionNumber} created`);
+      } else if (editMode && editingId) {
+        const existing = (quotations || []).find((q) => q.id === editingId);
+        if (!existing) return;
+        const currentVersion = existing.version || 1;
         const historyEntry: QuotationHistoryEntry = {
           version: currentVersion,
           updatedAt: Date.now(),
           snapshot: { ...existing } as Record<string, unknown>,
         };
-        const updated = {
-          ...existing,
+        const newHistory = [...(existing.history || []), historyEntry].slice(
+          -10,
+        );
+
+        const result = await updateQuotationRemote({
+          id: editingId,
           customerId: form.customerId,
+          projectId: existing.projectId,
           lineItems: form.lineItems,
           subtotal: subtotalVal,
           gstRate: form.gstRate,
@@ -303,19 +479,58 @@ export function Quotations() {
           quotationDate: form.quotationDate,
           terms: form.notes || form.terms,
           notes: form.notes,
-          version: currentVersion + 1,
-          history: [...((existing as any).history || []), historyEntry],
-        };
-        updateQuotation(updated as any);
+          status: existing.status,
+          history: newHistory,
+          approvedAt: existing.approvedAt,
+        });
+        if (result.status === "unauthenticated") {
+          toast.error("Not signed in to the server - quotation was not saved");
+          return;
+        }
+        if (result.status === "denied" || result.status === "error") {
+          toast.error(result.error ?? "Could not save quotation");
+          return;
+        }
+        if (!result.data) {
+          toast.error("Could not save quotation");
+          return;
+        }
+        updateQuotation({
+          ...result.data,
+          approvedBy: existing.approvedBy,
+          recordedPO: existing.recordedPO,
+        });
+
+        // Keep the current revision's snapshot in sync with the same edit
+        // (dates/notes/tax-rate corrections on the current, unaccepted
+        // revision) so the Revisions panel never shows stale data.
+        const current = getCurrentRevision(editingId);
+        if (current) {
+          const revUpdateResult = await updateQuotationRevisionRemote({
+            ...current,
+            lineItems: form.lineItems,
+            subtotal: subtotalVal,
+            gstRate: form.gstRate,
+            gstAmount: gstAmtVal,
+            totalAmount: totalVal,
+            validUntil: form.validUntil,
+            terms: form.notes || form.terms,
+            notes: form.notes,
+          });
+          if (revUpdateResult.status === "success" && revUpdateResult.data) {
+            updateQuotationRevision({
+              ...revUpdateResult.data,
+              createdBy: current.createdBy,
+            });
+          }
+        }
         toast.success("Quotation updated");
       } else {
         const qtNo = generateDocNo("QT");
-        addQuotation({
-          id: crypto.randomUUID(),
+        const createResult = await createQuotationRemote({
           qtNo,
-          enqId: "",
           customerId: form.customerId,
-          projectId: "",
+          projectId: undefined,
           lineItems: form.lineItems,
           subtotal: subtotalVal,
           gstRate: form.gstRate,
@@ -326,31 +541,113 @@ export function Quotations() {
           terms: form.notes || form.terms,
           notes: form.notes,
           status: "Draft",
-          createdAt: Date.now(),
-          version: 1,
           history: [],
-        } as any);
+        });
+        if (createResult.status === "unauthenticated") {
+          toast.error(
+            "Not signed in to the server - quotation was not created",
+          );
+          return;
+        }
+        if (
+          createResult.status === "denied" ||
+          createResult.status === "error"
+        ) {
+          toast.error(createResult.error ?? "Could not create quotation");
+          return;
+        }
+        if (!createResult.data) {
+          toast.error("Could not create quotation");
+          return;
+        }
+        const newQuotation = createResult.data;
+        addQuotation(newQuotation);
+
+        // Every quotation always has Revision 1.
+        const revResult = await createQuotationRevisionRemote({
+          quotationId: newQuotation.id,
+          revisionNumber: 1,
+          revisionDate: form.quotationDate || todayStr(),
+          lineItems: form.lineItems,
+          subtotal: subtotalVal,
+          gstRate: form.gstRate,
+          gstAmount: gstAmtVal,
+          totalAmount: totalVal,
+          validUntil: form.validUntil,
+          terms: form.notes || form.terms,
+          notes: form.notes,
+          status: "Draft",
+          isCurrent: true,
+        });
+        if (revResult.status === "success" && revResult.data) {
+          addQuotationRevision({
+            ...revResult.data,
+            createdBy: currentUser?.username,
+          });
+        } else {
+          toast.error(
+            `Quotation ${qtNo} was created, but its Revision 1 could not be saved: ${revResult.error ?? revResult.status}`,
+          );
+        }
         toast.success(`Quotation ${qtNo} created`);
       }
 
       setOpen(false);
       resetForm();
-      console.log("SAVE COMPLETE");
     } finally {
       setIsSaving(false);
     }
   };
 
-  const updateStatus = (id: string, status: QuotationStatus) => {
+  const updateStatus = async (id: string, status: QuotationStatus) => {
     if (!pEdit) {
       toast.error("Access restricted: edit permission required");
       return;
     }
     const q = (quotations || []).find((x) => x.id === id);
-    if (q) {
-      updateQuotation({ ...q, status });
-      toast.success("Status updated");
+    if (!q) return;
+    const recordApproval = status === "Accepted";
+    const approvedAt = recordApproval ? Date.now() : q.approvedAt;
+    const result = await updateQuotationRemote(
+      {
+        id,
+        customerId: q.customerId,
+        projectId: q.projectId,
+        lineItems: q.lineItems,
+        subtotal: q.subtotal,
+        gstRate: q.gstRate,
+        gstAmount: q.gstAmount,
+        totalAmount: q.totalAmount,
+        validUntil: q.validUntil,
+        quotationDate: q.quotationDate,
+        terms: q.terms,
+        notes: q.notes,
+        status,
+        history: q.history,
+        approvedAt,
+      },
+      recordApproval,
+    );
+    if (result.status === "unauthenticated") {
+      toast.error("Not signed in to the server - status was not updated");
+      return;
     }
+    if (result.status === "denied" || result.status === "error") {
+      toast.error(result.error ?? "Could not update status");
+      return;
+    }
+    if (!result.data) {
+      toast.error("Could not update status");
+      return;
+    }
+    updateQuotation({
+      ...result.data,
+      approvedBy: recordApproval
+        ? currentUser?.username || "unknown"
+        : q.approvedBy,
+      recordedPO: q.recordedPO,
+    });
+    toast.success("Status updated");
   };
 
   const fmt = (n: number) => `\u20b9${n.toLocaleString("en-IN")}`;
@@ -378,122 +675,153 @@ export function Quotations() {
     });
   };
 
-  const handleRecordPO = (e?: React.FormEvent) => {
+  const handleRecordPO = async (e?: React.FormEvent) => {
     e?.preventDefault();
     if (isSavingPO) return;
     setIsSavingPO(true);
-    if (!pEdit) {
-      alert("Access restricted");
-      setIsSavingPO(false);
-      return;
-    }
-    if (!poTargetQuotation || !poForm.poNumber.trim() || !poForm.poDate) {
-      setPoFormError("PO Number and PO Date are required.");
-      setIsSavingPO(false);
-      return;
-    }
-
-    // Find all projects that match line item descriptions
-    const matchedItems = (poTargetQuotation!.lineItems || []).filter((item) =>
-      (projects || []).some(
-        (p) =>
-          p.projectName.trim().toLowerCase() === item.desc.trim().toLowerCase(),
-      ),
-    );
-
-    if (matchedItems.length === 0) {
-      setPoFormError(
-        "No matching projects found for the items in this quotation.",
-      );
-      setIsSavingPO(false);
-      return;
-    }
-
-    // Duplicate check across matched projects
-    for (const item of matchedItems) {
-      const matchedProject = (projects || []).find(
-        (p) =>
-          p.projectName.trim().toLowerCase() === item.desc.trim().toLowerCase(),
-      );
-      if (!matchedProject) continue;
-      const duplicate = (matchedProject.pos || []).some(
-        (po) =>
-          po.poNumber.trim().toLowerCase() ===
-            poForm.poNumber.trim().toLowerCase() &&
-          po.quotationId === poTargetQuotation!.id,
-      );
-      if (duplicate) {
-        setPoFormError(
-          `PO already exists for this quotation in project "${matchedProject.projectName}".`,
-        );
-        setIsSavingPO(false);
+    try {
+      if (!pEdit) {
+        alert("Access restricted");
         return;
       }
-    }
+      if (!poTargetQuotation || !poForm.poNumber.trim() || !poForm.poDate) {
+        setPoFormError("PO Number and PO Date are required.");
+        return;
+      }
 
-    const sharedPoId = `spo-${Date.now()}`;
+      const targetRevisionId =
+        poTargetRevisionId || getCurrentRevision(poTargetQuotation.id)?.id;
+      if (!targetRevisionId) {
+        setPoFormError(
+          "This quotation has no active revision to record a PO against.",
+        );
+        return;
+      }
 
-    // Create master PO
-    const masterPO: MasterPO = {
-      id: crypto.randomUUID(),
-      poNumber: poForm.poNumber.trim(),
-      poDate: poForm.poDate,
-      customerId: poTargetQuotation!.customerId,
-      quotationId: poTargetQuotation!.id,
-      files: poFiles,
-      sharedPoId,
-      status: "Open",
-      createdAt: Date.now(),
-    };
-    console.log({ poNumber: poForm.poNumber, poDate: poForm.poDate });
-    addMasterPO(masterPO);
-
-    // Create derived project PO entries
-    for (const item of matchedItems) {
-      const matchedProject = (projects || []).find(
-        (p) =>
-          p.projectName.trim().toLowerCase() === item.desc.trim().toLowerCase(),
+      // Find all projects that match line item descriptions
+      const matchedItems = (poTargetQuotation.lineItems || []).filter((item) =>
+        (projects || []).some(
+          (p) =>
+            getCustomerVisibleName(p).trim().toLowerCase() ===
+              item.desc.trim().toLowerCase() ||
+            p.projectName.trim().toLowerCase() ===
+              item.desc.trim().toLowerCase(),
+        ),
       );
-      if (!matchedProject) continue;
-      addProjectPO(matchedProject.id, {
-        id: `po-${Date.now()}-${matchedProject.id}`,
-        poNumber: poForm.poNumber.trim(),
-        poDate: poForm.poDate,
-        quantity: item.qty,
-        status: "Open",
-        quotationId: poTargetQuotation!.id,
-        sharedPoId,
-      });
-    }
 
-    // Attach PO info to quotation record
-    updateQuotation({
-      ...poTargetQuotation!,
-      recordedPO: {
+      if (matchedItems.length === 0) {
+        setPoFormError(
+          "No matching projects found for the items in this quotation.",
+        );
+        return;
+      }
+
+      // Duplicate check: this exact PO number already recorded for this
+      // quotation (independent PO records now allow many POs per quotation —
+      // this only blocks re-entering the same PO number twice).
+      const duplicatePoNumber = getPOsForQuotation(poTargetQuotation.id).some(
+        (po) =>
+          po.poNumber.trim().toLowerCase() ===
+          poForm.poNumber.trim().toLowerCase(),
+      );
+      if (duplicatePoNumber) {
+        setPoFormError(
+          `PO number "${poForm.poNumber.trim()}" is already recorded for this quotation.`,
+        );
+        return;
+      }
+
+      // Create master PO first - its real DB id is the FK every child
+      // row below links through (replaces the old fabricated sharedPoId).
+      const masterResult = await createMasterPORemote({
         poNumber: poForm.poNumber.trim(),
         poDate: poForm.poDate,
-        sharedPoId,
+        customerId: poTargetQuotation.customerId,
+        quotationId: poTargetQuotation.id,
         files: poFiles,
-      },
-    } as Quotation & {
-      recordedPO: {
-        poNumber: string;
-        poDate: string;
-        sharedPoId: string;
-        files: PurchaseAttachment[];
-      };
-    });
+        status: "Open",
+      });
+      if (masterResult.status === "unauthenticated") {
+        toast.error("Not signed in to the server - PO was not recorded");
+        return;
+      }
+      if (masterResult.status === "denied" || masterResult.status === "error") {
+        toast.error(masterResult.error ?? "Could not record PO");
+        return;
+      }
+      if (!masterResult.data) {
+        toast.error("Could not record PO");
+        return;
+      }
+      const masterPO = masterResult.data;
+      addMasterPO(masterPO);
 
-    toast.success(`PO recorded for ${matchedItems.length} project(s).`);
-    setShowRecordPO(false);
-    setPoTargetQuotation(null);
-    setTimeout(() => {
+      // Create derived project PO entries
+      let projectPoFailures = 0;
+      for (const item of matchedItems) {
+        const matchedProject = (projects || []).find(
+          (p) =>
+            getCustomerVisibleName(p).trim().toLowerCase() ===
+              item.desc.trim().toLowerCase() ||
+            p.projectName.trim().toLowerCase() ===
+              item.desc.trim().toLowerCase(),
+        );
+        if (!matchedProject) continue;
+        const ppoResult = await createProjectPurchaseOrderRemote({
+          projectId: matchedProject.id,
+          masterPoId: masterPO.id,
+          quotationId: poTargetQuotation.id,
+          poNumber: poForm.poNumber.trim(),
+          poDate: poForm.poDate,
+          quantity: item.qty,
+          status: "Open",
+        });
+        if (ppoResult.status === "success" && ppoResult.data) {
+          addProjectPO(ppoResult.data.projectId, ppoResult.data.po);
+        } else {
+          projectPoFailures++;
+        }
+      }
+
+      // Independent PO record, permanently linked to the revision it was
+      // recorded under — later revisions (different prices) never touch it.
+      const qpoResult = await createQuotationPurchaseOrderRemote({
+        quotationId: poTargetQuotation.id,
+        revisionId: targetRevisionId,
+        masterPoId: masterPO.id,
+        poNumber: poForm.poNumber.trim(),
+        poDate: poForm.poDate,
+        customerId: poTargetQuotation.customerId,
+        files: poFiles,
+        status: "Received",
+      });
+      if (qpoResult.status === "success" && qpoResult.data) {
+        addQuotationPurchaseOrder({
+          ...qpoResult.data,
+          createdBy: currentUser?.username,
+        });
+      } else {
+        toast.error(
+          `PO recorded, but the quotation-side record failed: ${qpoResult.error ?? qpoResult.status}`,
+        );
+      }
+
+      if (projectPoFailures > 0) {
+        toast.error(
+          `PO recorded, but ${projectPoFailures} project link(s) could not be saved.`,
+        );
+      } else {
+        toast.success(`PO recorded for ${matchedItems.length} project(s).`);
+      }
       setShowRecordPO(false);
+      setPoTargetQuotation(null);
+      setPoTargetRevisionId(null);
+      setPoForm({ poNumber: "", poDate: "" });
+      setPoFiles([]);
+      setPoFormError("");
+    } finally {
       setIsSavingPO(false);
-    }, 50);
-    setPoForm({ poNumber: "", poDate: "" });
-    setPoFiles([]);
-    setPoFormError("");
+    }
   };
 
   const openFile = (file: PurchaseAttachment) => {
@@ -523,8 +851,12 @@ export function Quotations() {
   const editingQuotation = editingId
     ? (quotations || []).find((q) => q.id === editingId)
     : null;
-  const hasRecordedPO = !!(editingQuotation as any)?.recordedPO;
-  const isLocked = hasRecordedPO && !forceEdit;
+  const hasRecordedPO =
+    !!(editingQuotation as any)?.recordedPO ||
+    (editingId ? getPOsForQuotation(editingId).length > 0 : false);
+  // Creating a Revision is explicitly how price changes are made after a
+  // PO is recorded, so it's never subject to the post-PO lock.
+  const isLocked = hasRecordedPO && !forceEdit && !revisionMode;
 
   if (!pView) {
     return (
@@ -558,6 +890,7 @@ export function Quotations() {
               setForm(emptyForm(defaultTerms));
               setEditMode(false);
               setEditingId(null);
+              setRevisionMode(false);
               setForceEdit(false);
               setOpen(true);
             }}
@@ -597,6 +930,7 @@ export function Quotations() {
                 const rPO = (
                   q as Quotation & { recordedPO?: { poNumber: string } }
                 ).recordedPO;
+                const qPOCount = getPOsForQuotation(q.id).length;
                 return (
                   <TableRow
                     key={q.id}
@@ -619,7 +953,11 @@ export function Quotations() {
                       {q.validUntil || "\u2014"}
                     </TableCell>
                     <TableCell className="text-xs">
-                      {rPO ? (
+                      {qPOCount > 0 ? (
+                        <span className="font-mono text-green-700 font-semibold">
+                          {qPOCount} PO{qPOCount > 1 ? "s" : ""}
+                        </span>
+                      ) : rPO ? (
                         <span className="font-mono text-green-700 font-semibold">
                           {rPO.poNumber}
                         </span>
@@ -677,6 +1015,20 @@ export function Quotations() {
                         >
                           <Eye className="w-3.5 h-3.5" />
                         </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7"
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setSelectedQuotation(q);
+                          }}
+                          title="Revisions & Purchase Orders"
+                          data-ocid={`quotations.revisions_button.${i + 1}`}
+                        >
+                          <Layers className="w-3.5 h-3.5" />
+                        </Button>
                         {pEdit && (
                           <Button
                             variant="ghost"
@@ -686,6 +1038,30 @@ export function Quotations() {
                             title="Edit"
                           >
                             <Edit2 className="w-3.5 h-3.5" />
+                          </Button>
+                        )}
+                        {pCreate && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7"
+                            onClick={() => openDuplicate(q)}
+                            title="Duplicate"
+                            data-ocid={`quotations.duplicate_button.${i + 1}`}
+                          >
+                            <Copy className="w-3.5 h-3.5" />
+                          </Button>
+                        )}
+                        {pEdit && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7"
+                            onClick={() => openCreateRevision(q)}
+                            title="Create Revision"
+                            data-ocid={`quotations.create_revision.button.${i + 1}`}
+                          >
+                            <GitBranch className="w-3.5 h-3.5" />
                           </Button>
                         )}
                         {pPrint && (
@@ -738,34 +1114,52 @@ export function Quotations() {
                             variant="ghost"
                             size="icon"
                             className="h-7 w-7 text-destructive hover:text-destructive"
-                            onClick={() => {
-                              if (confirm("Delete this quotation?"))
-                                deleteQuotation(q.id);
+                            onClick={async () => {
+                              if (!confirm("Delete this quotation?")) return;
+                              const result = await deleteQuotationRemote(q.id);
+                              if (result.status === "unauthenticated") {
+                                toast.error(
+                                  "Not signed in to the server - quotation was not deleted",
+                                );
+                                return;
+                              }
+                              if (
+                                result.status === "denied" ||
+                                result.status === "error"
+                              ) {
+                                toast.error(
+                                  result.error ?? "Could not delete quotation",
+                                );
+                                return;
+                              }
+                              deleteQuotation(q.id);
+                              toast.success("Quotation deleted");
                             }}
                             title="Delete"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </Button>
                         )}
-                        {pEdit &&
-                          q.status === "Accepted" &&
-                          !(q as any).recordedPO && (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7 text-green-700 hover:text-green-900"
-                              title="Record PO"
-                              onClick={(e) => {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                setPoTargetQuotation(q);
-                                setShowRecordPO(true);
-                              }}
-                              data-ocid={`quotations.record_po.button.${i + 1}`}
-                            >
-                              <Plus className="w-3.5 h-3.5" />
-                            </Button>
-                          )}
+                        {pEdit && q.status === "Accepted" && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 text-green-700 hover:text-green-900"
+                            title="Record Purchase Order"
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              setPoTargetQuotation(q);
+                              setPoTargetRevisionId(
+                                getCurrentRevision(q.id)?.id || null,
+                              );
+                              setShowRecordPO(true);
+                            }}
+                            data-ocid={`quotations.record_po.button.${i + 1}`}
+                          >
+                            <Plus className="w-3.5 h-3.5" />
+                          </Button>
+                        )}
                       </div>
                     </TableCell>
                   </TableRow>
@@ -800,10 +1194,20 @@ export function Quotations() {
         <DialogContent className="max-w-3xl" data-ocid="quotations.dialog">
           <DialogHeader>
             <DialogTitle>
-              {editMode ? "Edit Quotation" : "New Quotation"}
+              {revisionMode
+                ? `Create Revision — ${editingQuotation?.qtNo ?? ""}`
+                : editMode
+                  ? "Edit Quotation"
+                  : "New Quotation"}
               {editMode && editingQuotation && (
                 <span className="ml-2 text-xs font-normal text-muted-foreground">
                   v{(editingQuotation as any).version || 1}
+                </span>
+              )}
+              {revisionMode && editingId && (
+                <span className="ml-2 text-xs font-normal text-muted-foreground">
+                  Revision{" "}
+                  {(getCurrentRevision(editingId)?.revisionNumber ?? 0) + 1}
                 </span>
               )}
             </DialogTitle>
@@ -913,6 +1317,7 @@ export function Quotations() {
                   <Label className="text-xs font-semibold">Line Items</Label>
                   {!isLocked && (
                     <Button
+                      type="button"
                       variant="outline"
                       size="sm"
                       className="h-6 text-xs"
@@ -1126,7 +1531,11 @@ export function Quotations() {
                 disabled={isSaving}
                 data-ocid="quotations.form.submit_button"
               >
-                {editMode ? "Update Quotation" : "Create Quotation"}
+                {revisionMode
+                  ? "Save Revision"
+                  : editMode
+                    ? "Update Quotation"
+                    : "Create Quotation"}
               </Button>
             </div>
           </form>
@@ -1166,6 +1575,14 @@ export function Quotations() {
                   v{(selectedQuotation as any).version}
                 </span>
               )}
+              {selectedQuotation?.approvedBy && (
+                <span className="text-xs text-green-700 bg-green-50 border border-green-200 px-1.5 py-0.5 rounded">
+                  Approved by {selectedQuotation.approvedBy}
+                  {selectedQuotation.approvedAt
+                    ? ` · ${new Date(selectedQuotation.approvedAt).toLocaleDateString("en-IN")}`
+                    : ""}
+                </span>
+              )}
             </div>
           </DialogHeader>
 
@@ -1178,16 +1595,6 @@ export function Quotations() {
                 (s, li) => s + li.amount,
                 0,
               );
-              const rPO = (
-                selectedQuotation as Quotation & {
-                  recordedPO?: {
-                    poNumber: string;
-                    poDate: string;
-                    sharedPoId: string;
-                    files: PurchaseAttachment[];
-                  };
-                }
-              ).recordedPO;
               return (
                 <div className="space-y-4">
                   <div className="grid grid-cols-2 gap-4 text-sm">
@@ -1229,56 +1636,141 @@ export function Quotations() {
                     )}
                   </div>
 
-                  {/* Recorded PO Info */}
-                  {rPO && (
-                    <div className="rounded-md border border-green-200 bg-green-50 dark:bg-green-950/20 dark:border-green-800 p-3">
-                      <p className="text-xs font-semibold text-green-800 dark:text-green-400 mb-2">
-                        Customer PO Recorded
+                  {/* Revisions & Purchase Orders */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                        Revisions &amp; Purchase Orders
                       </p>
-                      <div className="grid grid-cols-2 gap-2 text-xs mb-2">
-                        <div>
-                          <span className="text-muted-foreground">
-                            PO Number
-                          </span>
-                          <p className="font-mono font-semibold">
-                            {rPO.poNumber}
-                          </p>
-                        </div>
-                        <div>
-                          <span className="text-muted-foreground">PO Date</span>
-                          <p className="font-semibold">{rPO.poDate}</p>
-                        </div>
-                      </div>
-                      {(rPO.files || []).length > 0 && (
-                        <div className="flex flex-wrap gap-2">
-                          {(rPO.files || []).map((f, fi) => (
-                            // biome-ignore lint/suspicious/noArrayIndexKey: file list
-                            <div key={fi} className="flex items-center gap-1">
-                              <span className="text-xs text-muted-foreground truncate max-w-[120px]">
-                                {f.name}
-                              </span>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-6 px-1"
-                                onClick={() => openFile(f)}
-                              >
-                                <Eye className="w-3 h-3" />
-                              </Button>
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-6 px-1"
-                                onClick={() => downloadFile(f)}
-                              >
-                                <Download className="w-3 h-3" />
-                              </Button>
-                            </div>
-                          ))}
-                        </div>
+                      {pEdit && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-6 px-2 text-xs gap-1"
+                          onClick={() => {
+                            const q = selectedQuotation;
+                            setSelectedQuotation(null);
+                            openCreateRevision(q);
+                          }}
+                          data-ocid="quotations.detail.create_revision.button"
+                        >
+                          <GitBranch className="w-3 h-3" /> Create Revision
+                        </Button>
                       )}
                     </div>
-                  )}
+                    {getRevisionsForQuotation(selectedQuotation.id).map(
+                      (rev) => {
+                        const revPOs = getPOsForRevision(rev.id);
+                        return (
+                          <div
+                            key={rev.id}
+                            className={`rounded-md border p-3 ${
+                              rev.isCurrent
+                                ? "border-primary/40 bg-primary/5"
+                                : "border-border bg-muted/20"
+                            }`}
+                            data-ocid={`quotations.detail.revision.${rev.revisionNumber}`}
+                          >
+                            <div className="flex items-center justify-between mb-1">
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm font-semibold">
+                                  Revision {rev.revisionNumber}
+                                  {rev.isCurrent ? " (Current)" : ""}
+                                </span>
+                                {!rev.isCurrent && (
+                                  <span className="text-[10px] uppercase tracking-wide text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
+                                    Read Only
+                                  </span>
+                                )}
+                              </div>
+                              <span className="text-sm font-semibold">
+                                {fmt(rev.totalAmount)}
+                              </span>
+                            </div>
+                            <div className="text-xs text-muted-foreground mb-2">
+                              {rev.revisionDate} · {rev.status}
+                            </div>
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="text-xs font-medium text-muted-foreground">
+                                Purchase Orders ({revPOs.length})
+                              </span>
+                              {rev.isCurrent && pEdit && (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-6 px-2 text-xs gap-1"
+                                  onClick={() => {
+                                    setPoTargetQuotation(selectedQuotation);
+                                    setPoTargetRevisionId(rev.id);
+                                    setSelectedQuotation(null);
+                                    setShowRecordPO(true);
+                                  }}
+                                  data-ocid="quotations.detail.record_po.button"
+                                >
+                                  <Plus className="w-3 h-3" /> Record Purchase
+                                  Order
+                                </Button>
+                              )}
+                            </div>
+                            {revPOs.length === 0 ? (
+                              <p className="text-xs text-muted-foreground italic">
+                                No purchase orders recorded yet.
+                              </p>
+                            ) : (
+                              <div className="space-y-1">
+                                {revPOs.map((po) => (
+                                  <div
+                                    key={po.id}
+                                    className="flex items-center justify-between text-xs bg-background border rounded px-2 py-1.5"
+                                  >
+                                    <div>
+                                      <span className="font-mono font-semibold">
+                                        {po.poNumber}
+                                      </span>
+                                      <span className="text-muted-foreground ml-2">
+                                        {po.poDate}
+                                      </span>
+                                    </div>
+                                    <div className="flex items-center gap-1">
+                                      <Badge
+                                        variant="secondary"
+                                        className="text-[10px]"
+                                      >
+                                        {po.status}
+                                      </Badge>
+                                      {(po.files || []).map((f, fi) => (
+                                        <span
+                                          key={`${f.name}-${fi}`}
+                                          className="flex items-center"
+                                        >
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="h-5 px-1"
+                                            onClick={() => openFile(f)}
+                                          >
+                                            <Eye className="w-3 h-3" />
+                                          </Button>
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="h-5 px-1"
+                                            onClick={() => downloadFile(f)}
+                                          >
+                                            <Download className="w-3 h-3" />
+                                          </Button>
+                                        </span>
+                                      ))}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      },
+                    )}
+                  </div>
 
                   {/* Line Items Table */}
                   <div className="rounded-md border">
@@ -1354,13 +1846,46 @@ export function Quotations() {
                     </div>
                   </div>
 
-                  {/* Audit trail — version history count */}
+                  {/* Revision History */}
                   {(selectedQuotation as any).history &&
                     (selectedQuotation as any).history.length > 0 && (
-                      <p className="text-xs text-muted-foreground">
-                        {(selectedQuotation as any).history.length} edit(s)
-                        recorded in history
-                      </p>
+                      <div className="border-t pt-3">
+                        <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                          Revision History
+                        </p>
+                        <div className="space-y-1.5">
+                          {[...(selectedQuotation as any).history]
+                            .reverse()
+                            .map((h: any) => (
+                              <div
+                                key={`${h.version}-${h.updatedAt}`}
+                                className="flex items-center justify-between text-xs text-muted-foreground px-2 py-1 bg-muted/30 rounded"
+                              >
+                                <span className="font-mono">v{h.version}</span>
+                                <span>
+                                  Amount: {fmt(h.snapshot?.totalAmount ?? 0)}
+                                </span>
+                                <span>
+                                  {new Date(h.updatedAt).toLocaleDateString(
+                                    "en-IN",
+                                  )}
+                                </span>
+                              </div>
+                            ))}
+                          <div className="flex items-center justify-between text-xs font-medium px-2 py-1 bg-primary/5 border border-primary/20 rounded">
+                            <span className="font-mono">
+                              v{(selectedQuotation as any).version ?? 1}{" "}
+                              (current)
+                            </span>
+                            <span>
+                              Amount: {fmt(selectedQuotation.totalAmount)}
+                            </span>
+                            <span>
+                              {selectedQuotation.quotationDate || "—"}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
                     )}
                 </div>
               );
@@ -1368,26 +1893,6 @@ export function Quotations() {
 
           <DialogFooter className="flex flex-wrap justify-end items-center gap-2">
             <div className="flex gap-2">
-              {/* Record PO — only for Accepted quotations without PO, requires edit */}
-              {pEdit &&
-                selectedQuotation?.status === "Accepted" &&
-                !(
-                  selectedQuotation as Quotation & {
-                    recordedPO?: { poNumber: string };
-                  }
-                ).recordedPO && (
-                  <Button
-                    size="sm"
-                    onClick={() => {
-                      setPoTargetQuotation(selectedQuotation);
-                      setSelectedQuotation(null);
-                      setShowRecordPO(true);
-                    }}
-                    data-ocid="quotations.detail.record_po.primary_button"
-                  >
-                    Record PO
-                  </Button>
-                )}
               <Button
                 variant="outline"
                 size="sm"

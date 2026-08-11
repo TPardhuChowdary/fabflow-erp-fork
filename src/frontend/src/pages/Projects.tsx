@@ -1,3 +1,4 @@
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -36,6 +37,12 @@ import { ShieldOff } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import {
+  createProjectRemote,
+  deleteProjectRemote,
+  updateProjectRemote,
+} from "../lib/projectsApi";
+import { getCustomerVisibleName, getProjectSearchText } from "../lib/utils";
 import { canCreate, canDelete, canEdit, canView } from "../permissions";
 import { useStore } from "../store";
 import type { Project } from "../types";
@@ -85,81 +92,129 @@ export function Projects({ onViewProject }: Props) {
     const customer = customers.find((c) => c.id === p.customerId);
     const q = search.toLowerCase();
     return (
-      p.projectName.toLowerCase().includes(q) ||
+      getProjectSearchText(p).includes(q) ||
       (customer?.name.toLowerCase().includes(q) ?? false)
     );
   });
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (isSaving) return;
     setIsSaving(true);
-    if (!pCreate) {
-      toast.error("Access restricted: create permission required");
+    try {
+      if (!pCreate) {
+        toast.error("Access restricted: create permission required");
+        return;
+      }
+      if (!form.customerId || !form.projectName.trim()) {
+        toast.error("Customer and Project Name are required");
+        return;
+      }
+      if (
+        !form.totalQty ||
+        Number.isNaN(Number(form.totalQty)) ||
+        Number(form.totalQty) <= 0
+      ) {
+        toast.error("Total Quantity is required");
+        return;
+      }
+      // Phase 22 — remote-first, with bounded retry-on-conflict for the
+      // project number handled inside createProjectRemote(). The number
+      // generated here from the local counter is only the *initial*
+      // attempt - on a collision the API module re-derives it from
+      // actual server state, never calling generateDocNo() again.
+      // productionVersion is forced to "v2" here to match what the local
+      // addProject() action already forces unconditionally, so the DB
+      // row and the resulting local state never disagree on it.
+      const result = await createProjectRemote({
+        projectNo: generateDocNo("PROJ"),
+        customerId: form.customerId,
+        projectName: form.projectName.trim(),
+        workDescription: form.workDescription.trim(),
+        totalQty: Number(form.totalQty),
+        productionVersion: "v2",
+      });
+      if (result.status === "unauthenticated") {
+        toast.error("Not signed in to the server - project was not saved");
+        return;
+      }
+      if (result.status === "denied" || result.status === "error") {
+        toast.error(result.error ?? "Could not save project");
+        return;
+      }
+      if (!result.data) {
+        toast.error("Could not save project");
+        return;
+      }
+      // addProject() also seeds the local-only projectProductions stage
+      // state (DEFAULT_V2_STAGES) exactly as before, keyed off
+      // result.data.id - the real DB UUID. That local stage seeding is
+      // explicitly out of scope this phase and is left untouched.
+      addProject(result.data);
+      toast.success(`Project ${result.data.projectNo} created`);
+      setDialogOpen(false);
+      setForm({
+        customerId: "",
+        projectName: "",
+        workDescription: "",
+        totalQty: "",
+      });
+    } finally {
       setIsSaving(false);
-      return;
     }
-    if (!form.customerId || !form.projectName.trim()) {
-      toast.error("Customer and Project Name are required");
-      setIsSaving(false);
-      return;
-    }
-    if (
-      !form.totalQty ||
-      Number.isNaN(Number(form.totalQty)) ||
-      Number(form.totalQty) <= 0
-    ) {
-      toast.error("Total Quantity is required");
-      setIsSaving(false);
-      return;
-    }
-    const newProject: Project = {
-      id: `proj-${Date.now()}`,
-      projectNo: generateDocNo("PROJ"),
-      customerId: form.customerId,
-      projectName: form.projectName.trim(),
-      workDescription: form.workDescription.trim(),
-      totalQty: Number(form.totalQty),
-      createdAt: Date.now(),
-    };
-    addProject(newProject);
-    toast.success(`Project ${newProject.projectNo} created`);
-    setDialogOpen(false);
-    setForm({
-      customerId: "",
-      projectName: "",
-      workDescription: "",
-      totalQty: "",
-    });
-    setIsSaving(false);
   };
 
-  const handleEditSave = () => {
+  const handleEditSave = async () => {
     if (isSaving) return;
     setIsSaving(true);
-    if (!pEdit) {
-      toast.error("Access restricted: edit permission required");
+    try {
+      if (!pEdit) {
+        toast.error("Access restricted: edit permission required");
+        return;
+      }
+      if (!editForm) return;
+      if (!editForm.customerId || !editForm.projectName.trim()) {
+        toast.error("Customer and Project Name are required");
+        return;
+      }
+      if (!editForm.totalQty || Number(editForm.totalQty) <= 0) {
+        toast.error("Total Quantity is required");
+        return;
+      }
+      const result = await updateProjectRemote({
+        ...editForm,
+        totalQty: Number(editForm.totalQty),
+      });
+      if (result.status === "unauthenticated") {
+        toast.error("Not signed in to the server - project was not updated");
+        return;
+      }
+      if (result.status === "denied" || result.status === "error") {
+        toast.error(result.error ?? "Could not update project");
+        return;
+      }
+      if (!result.data) {
+        toast.error("Could not update project");
+        return;
+      }
+      // updateProjectRemote's returned row never carries the local-only
+      // fields (assignedEmployeeIds/pos/poNumber/poDate/poFiles, per the
+      // explicitly approved decisions) - re-attach them from the
+      // pre-update local object, since this update never touches them
+      // and they must not be silently wiped.
+      updateProject({
+        ...result.data,
+        assignedEmployeeIds: editForm.assignedEmployeeIds,
+        pos: editForm.pos,
+        poNumber: editForm.poNumber,
+        poDate: editForm.poDate,
+        poFiles: editForm.poFiles,
+      });
+      toast.success("Project updated");
+      setEditDialogOpen(false);
+      setEditForm(null);
+    } finally {
       setIsSaving(false);
-      return;
     }
-    if (!editForm) {
-      setIsSaving(false);
-      return;
-    }
-    if (!editForm.customerId || !editForm.projectName.trim()) {
-      toast.error("Customer and Project Name are required");
-      setIsSaving(false);
-      return;
-    }
-    if (!editForm.totalQty || Number(editForm.totalQty) <= 0) {
-      toast.error("Total Quantity is required");
-      setIsSaving(false);
-      return;
-    }
-    updateProject({ ...editForm, totalQty: Number(editForm.totalQty) });
-    toast.success("Project updated");
-    setEditDialogOpen(false);
-    setEditForm(null);
-    setIsSaving(false);
   };
 
   if (!pView) {
@@ -248,7 +303,14 @@ export function Projects({ onViewProject }: Props) {
                       {customer?.name ?? "—"}
                     </TableCell>
                     <TableCell className="text-sm font-medium">
-                      {p.projectName}
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span>{getCustomerVisibleName(p)}</span>
+                        {p.projectType === "REPEAT_ORDER" && p.internalOrderCode && (
+                          <span className="font-mono text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded shrink-0">
+                            Repeat · {p.internalOrderCode}
+                          </span>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground max-w-[220px] truncate">
                       {p.workDescription || "—"}
@@ -288,7 +350,7 @@ export function Projects({ onViewProject }: Props) {
                             variant="ghost"
                             size="sm"
                             className="h-7 px-2 text-destructive hover:text-destructive"
-                            onClick={(e) => {
+                            onClick={async (e) => {
                               e.stopPropagation();
                               if (
                                 !window.confirm(
@@ -296,6 +358,48 @@ export function Projects({ onViewProject }: Props) {
                                 )
                               )
                                 return;
+                              // Local linked-record guard, fail-fast
+                              // BEFORE any remote call - same check
+                              // store.ts's deleteProject runs, duplicated
+                              // here so we never even attempt a remote
+                              // delete for a project with linked local
+                              // records (mirrors Customers.tsx's
+                              // established pattern).
+                              const s = useStore.getState();
+                              const hasInvoices = (s.invoices || []).some(
+                                (inv) => inv.projectId === p.id,
+                              );
+                              const hasDCs = (s.deliveryChallans || []).some(
+                                (dc) =>
+                                  (dc.projectEntries || []).some(
+                                    (entry) => entry.projectId === p.id,
+                                  ),
+                              );
+                              const hasUsages = (s.materialUsages || []).some(
+                                (u) => u.projectId === p.id,
+                              );
+                              if (hasInvoices || hasDCs || hasUsages) {
+                                toast.error(
+                                  "Cannot delete project. Linked records exist (invoices, delivery challans, or material usage).",
+                                );
+                                return;
+                              }
+                              const result = await deleteProjectRemote(p.id);
+                              if (result.status === "unauthenticated") {
+                                toast.error(
+                                  "Not signed in to the server - project was not deleted",
+                                );
+                                return;
+                              }
+                              if (
+                                result.status === "denied" ||
+                                result.status === "error"
+                              ) {
+                                toast.error(
+                                  result.error ?? "Could not delete project",
+                                );
+                                return;
+                              }
                               deleteProject(p.id);
                               toast.success("Project deleted");
                             }}

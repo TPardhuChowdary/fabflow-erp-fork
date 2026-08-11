@@ -34,32 +34,45 @@ import {
   AlertTriangle,
   Building2,
   CheckCircle2,
+  Copy,
   Edit2,
   Eye,
   Info,
+  Loader2,
   Lock,
   Mail,
   MessageSquare,
   Plus,
+  Power,
+  PowerOff,
   Settings as SettingsIcon,
   Shield,
-  Trash2,
   UserCog,
   XCircle,
 } from "lucide-react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
-import { hashPassword } from "../authUtils";
 import { CompanyProfilePrintView } from "../components/CompanyProfilePrintView";
-import { canView } from "../permissions";
 import {
-  MODULE_PERMISSIONS,
-  getDefaultPermissions,
-  getModulesByCategory,
-} from "../permissions";
+  type MigrationItemResult,
+  type MigrationReport,
+  migrateDrawingRepositoryToSupabase,
+} from "../drawingEditor/lib/migrateToSupabase";
+import {
+  type OrgUserRow,
+  createOrgUser,
+  getRoleDefaultPermissions,
+  listOrgUsers,
+  listUserOverrides,
+  saveUserOverrides,
+  setUserActive,
+  setUserRole,
+} from "../lib/settingsUsersApi";
+import { canView, hasPermission } from "../permissions";
+import { getModulesByCategory } from "../permissions";
 import { useStore } from "../store";
-import type { AppSettings, AuthUser, UserRole } from "../types";
+import type { AppSettings } from "../types";
 
 export function Settings() {
   const { currentUser } = useAuth();
@@ -75,6 +88,7 @@ export function Settings() {
     companyStateCode: settings.companyStateCode || "",
     companyPhone: settings.companyPhone || "",
     companyEmail: settings.companyEmail || "",
+    companyWebsite: settings.companyWebsite || "",
     companyLogo: settings.companyLogo || "",
     bankName: settings.bankName || "",
     accountName: settings.accountName || "",
@@ -301,6 +315,21 @@ export function Settings() {
                 }
               />
             </div>
+          </div>
+          <div>
+            <Label className="text-xs">Website</Label>
+            <Input
+              data-ocid="settings.company_website.input"
+              className="mt-1 h-8 text-sm"
+              placeholder="www.example.com"
+              value={companyForm.companyWebsite}
+              onChange={(e) =>
+                setCompanyForm((p) => ({
+                  ...p,
+                  companyWebsite: e.target.value,
+                }))
+              }
+            />
           </div>
           <div>
             <Label className="text-xs">Company Logo (PNG/JPG)</Label>
@@ -656,6 +685,9 @@ export function Settings() {
       {/* Backup & Restore */}
       <BackupRestore />
 
+      {/* Drawing Repository migration (Phase 14, one-time, self-service) */}
+      <DrawingRepositoryMigration />
+
       {/* User Management */}
       <UserManagement />
 
@@ -705,6 +737,7 @@ function BackupRestore() {
       outsourcedWorks: store.outsourcedWorks || [],
       advanceRecords: store.advanceRecords || [],
       salaryPayments: store.salaryPayments || [],
+      expenseFloats: store.expenseFloats || [],
       inventoryPurchases: store.inventoryPurchases || [],
       bomItems: store.bomItems || [],
       bomRequisitions: store.bomRequisitions || [],
@@ -830,6 +863,133 @@ function BackupRestore() {
   );
 }
 
+// ── Drawing Repository Migration Component ──────────────────────────────────
+//
+// One-time, user-triggered IndexedDB (fabflow-drawing-editor) -> Supabase
+// import for the Engineering Drawing Editor module (Phase 14). Safe to run
+// more than once — already-migrated items are skipped, nothing is
+// duplicated, and the local IndexedDB database is never modified or
+// cleared by this action (see drawingEditor/lib/migrateToSupabase.ts).
+// Gated on drawing_editor.create — the same permission the module already
+// requires to create a drawing, not a new permission.
+
+function DrawingRepositoryMigration() {
+  const { currentUser } = useAuth();
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState<string>("");
+  const [report, setReport] = useState<MigrationReport | null>(null);
+
+  if (!hasPermission(currentUser, "drawing_editor.create")) return null;
+
+  const handleMigrate = async () => {
+    setRunning(true);
+    setProgress("Starting…");
+    setReport(null);
+    try {
+      const result = await migrateDrawingRepositoryToSupabase((msg) =>
+        setProgress(msg),
+      );
+      setReport(result);
+      const failed =
+        result.drawings.filter((r) => r.status === "failed").length +
+        result.views.filter((r) => r.status === "failed").length +
+        result.links.filter((r) => r.status === "failed").length +
+        result.preferences.filter((r) => r.status === "failed").length;
+      if (failed > 0) {
+        toast.error(
+          `Migration finished with ${failed} failed item(s) — see details below.`,
+        );
+      } else {
+        toast.success("Drawing Repository migration finished successfully.");
+      }
+    } catch (e) {
+      toast.error(
+        e instanceof Error ? e.message : "Migration failed to start.",
+      );
+    } finally {
+      setRunning(false);
+      setProgress("");
+    }
+  };
+
+  const summarize = (items: MigrationItemResult[]) => ({
+    migrated: items.filter((i) => i.status === "migrated").length,
+    already: items.filter((i) => i.status === "already_migrated").length,
+    failed: items.filter((i) => i.status === "failed").length,
+  });
+
+  return (
+    <Card data-ocid="settings.drawing_migration.card">
+      <CardHeader>
+        <CardTitle className="text-base">
+          Drawing Repository Migration
+        </CardTitle>
+        <p className="text-sm text-muted-foreground">
+          One-time import of locally-stored Engineering Drawings (Repository,
+          Design File Masters, Production Drawings, saved views, links, and your
+          own editor preferences) into Supabase. Safe to run more than once —
+          already-migrated items are skipped. Your local drawing data is never
+          modified or deleted by this action.
+        </p>
+      </CardHeader>
+      <CardContent>
+        <div className="flex items-center gap-3">
+          <Button
+            onClick={handleMigrate}
+            disabled={running}
+            data-ocid="settings.drawing_migration.run_button"
+          >
+            {running ? "Migrating…" : "Migrate Local Drawings to Supabase"}
+          </Button>
+          {running && progress && (
+            <span className="text-xs text-muted-foreground truncate max-w-xs">
+              {progress}
+            </span>
+          )}
+        </div>
+
+        {report && (
+          <div className="mt-4 space-y-3 text-sm">
+            {(
+              [
+                ["Drawings", report.drawings],
+                ["Views", report.views],
+                ["Links", report.links],
+                ["Preferences", report.preferences],
+              ] as [string, MigrationItemResult[]][]
+            ).map(([label, items]) => {
+              const s = summarize(items);
+              return (
+                <div key={label} className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium w-24">{label}:</span>
+                  <Badge variant="secondary">{s.migrated} migrated</Badge>
+                  <Badge variant="outline">{s.already} already migrated</Badge>
+                  {s.failed > 0 && (
+                    <Badge variant="destructive">{s.failed} failed</Badge>
+                  )}
+                </div>
+              );
+            })}
+
+            {[
+              ...report.drawings,
+              ...report.views,
+              ...report.links,
+              ...report.preferences,
+            ]
+              .filter((r) => r.status === "failed")
+              .map((r) => (
+                <p key={r.id} className="text-xs text-destructive">
+                  {r.label}: {r.error}
+                </p>
+              ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 // ── User Management Component ─────────────────────────────────────────────────
 
 const NEW_ROLES = [
@@ -853,17 +1013,26 @@ interface UserFormState {
 function PermissionMatrix({
   permissions,
   onChange,
+  disabled = false,
 }: {
   permissions: Record<string, boolean>;
   onChange: (perms: Record<string, boolean>) => void;
+  /** True for a genuinely read-only preview (e.g. showing a role's
+   * defaults before the user account exists to attach overrides to) -
+   * renders real disabled checkboxes rather than clickable controls that
+   * silently don't affect what's displayed, which is the bug this prop
+   * was added to fix (see Settings -> Users completion report). */
+  disabled?: boolean;
 }) {
   const groups = getModulesByCategory();
 
   const toggle = (key: string) => {
+    if (disabled) return;
     onChange({ ...permissions, [key]: !permissions[key] });
   };
 
   const setRow = (moduleKey: string, actions: string[], value: boolean) => {
+    if (disabled) return;
     const updated = { ...permissions };
     for (const a of actions) {
       updated[`${moduleKey}.${a}`] = value;
@@ -940,6 +1109,7 @@ function PermissionMatrix({
                                 onCheckedChange={() =>
                                   toggle(`${mod.key}.${a}`)
                                 }
+                                disabled={disabled}
                                 className="h-3.5 w-3.5"
                               />
                             ) : (
@@ -955,6 +1125,7 @@ function PermissionMatrix({
                             onCheckedChange={(v) =>
                               setRow(mod.key, mod.actions, !!v)
                             }
+                            disabled={disabled}
                             className="h-3.5 w-3.5"
                           />
                         </td>
@@ -971,89 +1142,200 @@ function PermissionMatrix({
   );
 }
 
+// Priority 1: real Supabase-backed create/edit. Create only captures a
+// temporary password (relayed to the new user out of band - never stored
+// anywhere retrievable after this dialog closes); Edit only changes role
+// + permission overrides, since Admin-driven password resets aren't part
+// of this pass (see Settings -> Users completion report).
 function UserDialog({
   open,
   onClose,
+  onSaved,
   editUser,
   existingUsernames,
 }: {
   open: boolean;
   onClose: () => void;
-  editUser: AuthUser | null;
+  onSaved: () => void;
+  editUser: OrgUserRow | null;
   existingUsernames: string[];
 }) {
-  const { addAuthUser, updateAuthUser } = useStore();
-  const [form, setForm] = useState<UserFormState>(() => ({
-    username: editUser?.username || "",
+  const [form, setForm] = useState<UserFormState>({
+    username: "",
     password: "",
-    role: editUser?.role || "sales",
-    permissions: editUser?.permissions
-      ? { ...editUser.permissions }
-      : getDefaultPermissions(editUser?.role || "sales"),
-  }));
+    role: "sales",
+    permissions: {},
+  });
+  const [defaults, setDefaults] = useState<Record<string, boolean>>({});
+  const [loadingPerms, setLoadingPerms] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [created, setCreated] = useState<{
+    username: string;
+    password: string;
+  } | null>(null);
 
-  // Reset form when dialog opens
+  // (Re)load whenever the dialog opens, for either mode.
+  useEffect(() => {
+    if (!open) return;
+    setCreated(null);
+    if (editUser) {
+      setForm({
+        username: editUser.username,
+        password: "",
+        role: editUser.role,
+        permissions: {},
+      });
+      applyRoleDefaults(editUser.role, editUser.id);
+    } else {
+      setForm({ username: "", password: "", role: "sales", permissions: {} });
+      // Bug fix: this used to leave `defaults` empty until the admin
+      // manually touched the Role dropdown, so the matrix rendered as an
+      // all-unchecked, apparently-broken block on open. Load "sales"'s
+      // real defaults immediately, same as edit mode does.
+      applyRoleDefaults("sales");
+    }
+  }, [open, editUser]);
+
+  const applyRoleDefaults = async (role: string, userId?: string) => {
+    setLoadingPerms(true);
+    try {
+      const defaultsResult = await getRoleDefaultPermissions(role);
+      const roleDefaults =
+        defaultsResult.status === "success" ? defaultsResult.data || {} : {};
+      let effective = { ...roleDefaults };
+      if (userId) {
+        const overridesResult = await listUserOverrides(userId);
+        if (overridesResult.status === "success" && overridesResult.data) {
+          effective = { ...effective, ...overridesResult.data };
+        }
+      }
+      setDefaults(roleDefaults);
+      setForm((f) => ({ ...f, role, permissions: effective }));
+    } finally {
+      setLoadingPerms(false);
+    }
+  };
+
   const handleRoleChange = (role: string) => {
-    setForm((f) => ({
-      ...f,
-      role,
-      permissions: getDefaultPermissions(role),
-    }));
+    applyRoleDefaults(role, editUser?.id);
   };
 
   const handleSave = async () => {
+    if (editUser) {
+      setSaving(true);
+      try {
+        if (editUser.role !== form.role) {
+          const roleResult = await setUserRole(editUser.id, form.role);
+          if (roleResult.status !== "success") {
+            toast.error(roleResult.error || "Could not change role");
+            return;
+          }
+        }
+        const overridesResult = await saveUserOverrides(
+          editUser.id,
+          defaults,
+          form.permissions,
+        );
+        if (overridesResult.status !== "success") {
+          toast.error(
+            overridesResult.error || "Could not save permission overrides",
+          );
+          return;
+        }
+        toast.success("User updated");
+        onSaved();
+        onClose();
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
+
     const username = form.username.trim();
     if (!username) {
       toast.error("Username is required");
       return;
     }
-    // Unique username check (exclude self when editing)
     const conflict = existingUsernames.find(
-      (n) =>
-        n.toLowerCase() === username.toLowerCase() && n !== editUser?.username,
+      (n) => n.toLowerCase() === username.toLowerCase(),
     );
     if (conflict) {
       toast.error("Username already taken");
       return;
     }
-    if (!editUser && !form.password) {
-      toast.error("Password is required for new users");
+    if (form.password.length < 8) {
+      toast.error("Password must be at least 8 characters");
       return;
     }
 
     setSaving(true);
     try {
-      let passwordHash = editUser?.passwordHash || "";
-      if (form.password) {
-        passwordHash = await hashPassword(form.password);
+      const result = await createOrgUser(username, form.password, form.role);
+      if (result.status !== "success" || !result.data) {
+        toast.error(result.error || "Could not create user");
+        return;
       }
-
-      if (editUser) {
-        updateAuthUser({
-          ...editUser,
-          username,
-          passwordHash,
-          role: form.role as UserRole,
-          permissions: form.permissions,
-        });
-        toast.success("User updated");
-      } else {
-        const newId = `user-${Date.now()}`;
-        addAuthUser({
-          id: newId,
-          username,
-          passwordHash,
-          role: form.role as UserRole,
-          permissions: form.permissions,
-        });
-        toast.success("User created");
-      }
-      onClose();
+      toast.success("User created");
+      setCreated({ username: result.data.username, password: form.password });
+      onSaved();
     } finally {
       setSaving(false);
     }
   };
+
+  const copyCredentials = () => {
+    if (!created) return;
+    navigator.clipboard.writeText(
+      `Username: ${created.username}\nTemporary password: ${created.password}`,
+    );
+    toast.success("Copied to clipboard");
+  };
+
+  if (created) {
+    return (
+      <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+        <DialogContent
+          className="max-w-sm"
+          data-ocid="settings.user.created_dialog"
+        >
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-emerald-600">
+              <CheckCircle2 className="w-4 h-4" /> User Created
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-2 text-sm">
+            <p className="text-muted-foreground">
+              Share these credentials with the new user. This is the only time
+              the password is shown - it isn't stored anywhere retrievable after
+              this. They'll be required to set their own password on first
+              sign-in.
+            </p>
+            <div className="rounded-md border border-border bg-muted/40 p-3 font-mono text-xs space-y-1">
+              <div>Username: {created.username}</div>
+              <div>Temporary password: {created.password}</div>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={copyCredentials}
+              data-ocid="settings.user.copy_credentials_button"
+            >
+              <Copy className="w-3.5 h-3.5 mr-1" /> Copy
+            </Button>
+            <Button
+              size="sm"
+              onClick={onClose}
+              data-ocid="settings.user.created_done_button"
+            >
+              Done
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    );
+  }
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
@@ -1077,27 +1359,28 @@ function UserDialog({
                 data-ocid="settings.user_username.input"
                 className="mt-1 h-8 text-sm"
                 placeholder="johndoe"
+                disabled={!!editUser}
                 value={form.username}
                 onChange={(e) =>
                   setForm((f) => ({ ...f, username: e.target.value }))
                 }
               />
             </div>
-            <div>
-              <Label className="text-xs">
-                Password {editUser ? "(leave blank to keep)" : "*"}
-              </Label>
-              <Input
-                data-ocid="settings.user_password.input"
-                className="mt-1 h-8 text-sm"
-                type="password"
-                placeholder={editUser ? "••••••••" : "Enter password"}
-                value={form.password}
-                onChange={(e) =>
-                  setForm((f) => ({ ...f, password: e.target.value }))
-                }
-              />
-            </div>
+            {!editUser && (
+              <div>
+                <Label className="text-xs">Temporary Password *</Label>
+                <Input
+                  data-ocid="settings.user_password.input"
+                  className="mt-1 h-8 text-sm"
+                  type="password"
+                  placeholder="At least 8 characters"
+                  value={form.password}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, password: e.target.value }))
+                  }
+                />
+              </div>
+            )}
             <div>
               <Label className="text-xs">Role *</Label>
               <Select value={form.role} onValueChange={handleRoleChange}>
@@ -1118,32 +1401,40 @@ function UserDialog({
             </div>
           </div>
 
-          {/* Permission matrix */}
+          {/* Permission matrix - Create mode shows what the chosen role
+              grants by default; Edit mode is the live override editor. */}
           <div>
             <div className="flex items-center justify-between mb-2">
               <Label className="text-xs font-semibold flex items-center gap-1">
-                <Shield className="w-3.5 h-3.5" /> Permission Matrix
+                <Shield className="w-3.5 h-3.5" />
+                {editUser ? "Permission Overrides" : "Role Default Permissions"}
+                {loadingPerms && <Loader2 className="w-3 h-3 animate-spin" />}
               </Label>
-              <Button
-                variant="outline"
-                size="sm"
-                className="h-6 text-xs"
-                onClick={() =>
-                  setForm((f) => ({
-                    ...f,
-                    permissions: getDefaultPermissions(f.role),
-                  }))
-                }
-                data-ocid="settings.user.reset_permissions_button"
-              >
-                Reset to Role Defaults
-              </Button>
+              {editUser && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 text-xs"
+                  onClick={() => applyRoleDefaults(form.role)}
+                  data-ocid="settings.user.reset_permissions_button"
+                >
+                  Reset to Role Defaults
+                </Button>
+              )}
             </div>
+            {!editUser && (
+              <p className="text-xs text-muted-foreground mb-2">
+                Preview only — shows what the selected role grants by default.
+                Per-user overrides can be configured after the account is
+                created, by editing it from this list.
+              </p>
+            )}
             <PermissionMatrix
-              permissions={form.permissions}
+              permissions={editUser ? form.permissions : defaults}
               onChange={(perms) =>
                 setForm((f) => ({ ...f, permissions: perms }))
               }
+              disabled={!editUser}
             />
           </div>
         </div>
@@ -1173,48 +1464,69 @@ function UserDialog({
 
 function UserManagement() {
   const { currentUser } = useAuth();
-  const { authUsers, deleteAuthUser } = useStore();
+  const [users, setUsers] = useState<OrgUserRow[]>([]);
+  const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [editUser, setEditUser] = useState<AuthUser | null>(null);
+  const [editUser, setEditUser] = useState<OrgUserRow | null>(null);
 
-  const isAdmin =
-    currentUser?.role === "Admin" || currentUser?.role === "admin";
-  if (!isAdmin) return null;
+  const refetch = () => {
+    setLoading(true);
+    listOrgUsers()
+      .then((result) => {
+        if (result.status === "success" && result.data) setUsers(result.data);
+        else if (result.status !== "unauthenticated") {
+          toast.error(result.error || "Could not load users");
+        }
+      })
+      .finally(() => setLoading(false));
+  };
 
-  const existingUsernames = authUsers.map((u) => u.username);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: run once on mount
+  useEffect(() => {
+    refetch();
+  }, []);
+
+  const canViewUsers = hasPermission(currentUser, "users.view");
+  const canEditUsers = hasPermission(currentUser, "users.edit");
+  if (!canViewUsers) return null;
+
+  const existingUsernames = users.map((u) => u.username);
 
   const openCreate = () => {
     setEditUser(null);
     setDialogOpen(true);
   };
 
-  const openEdit = (user: AuthUser) => {
+  const openEdit = (user: OrgUserRow) => {
     setEditUser(user);
     setDialogOpen(true);
   };
 
-  const handleDelete = (user: AuthUser) => {
+  const handleToggleActive = async (user: OrgUserRow) => {
     if (user.id === currentUser?.id) {
-      toast.error("Cannot delete your own account");
+      toast.error("Cannot deactivate your own account");
       return;
     }
-    deleteAuthUser(user.id);
-    toast.success(`User "${user.username}" deleted`);
+    const result = await setUserActive(user.id, !user.isActive);
+    if (result.status !== "success") {
+      toast.error(result.error || "Could not update account status");
+      return;
+    }
+    toast.success(
+      `User "${user.username}" ${user.isActive ? "deactivated" : "reactivated"}`,
+    );
+    refetch();
   };
 
   const ROLE_COLORS: Record<string, string> = {
-    Admin: "bg-red-100 text-red-700",
     admin: "bg-red-100 text-red-700",
-    Accountant: "bg-blue-100 text-blue-700",
-    accounts: "bg-blue-100 text-blue-700",
     sales: "bg-emerald-100 text-emerald-700",
     procurement: "bg-orange-100 text-orange-700",
     production: "bg-yellow-100 text-yellow-700",
     quality: "bg-cyan-100 text-cyan-700",
     dispatch: "bg-indigo-100 text-indigo-700",
+    accounts: "bg-blue-100 text-blue-700",
     employee: "bg-gray-100 text-gray-700",
-    Designer: "bg-purple-100 text-purple-700",
-    Worker: "bg-green-100 text-green-700",
   };
 
   return (
@@ -1226,14 +1538,16 @@ function UserManagement() {
               <UserCog className="w-4 h-4 text-violet-600" />
               User Management
             </CardTitle>
-            <Button
-              size="sm"
-              className="h-7 text-xs gap-1"
-              onClick={openCreate}
-              data-ocid="settings.users.open_modal_button"
-            >
-              <Plus className="w-3.5 h-3.5" /> New User
-            </Button>
+            {canEditUsers && (
+              <Button
+                size="sm"
+                className="h-7 text-xs gap-1"
+                onClick={openCreate}
+                data-ocid="settings.users.open_modal_button"
+              >
+                <Plus className="w-3.5 h-3.5" /> New User
+              </Button>
+            )}
           </div>
         </CardHeader>
         <CardContent className="p-0">
@@ -1248,7 +1562,7 @@ function UserManagement() {
                     Role
                   </th>
                   <th className="text-left px-4 py-2 text-xs font-semibold text-muted-foreground">
-                    Permissions
+                    Status
                   </th>
                   <th className="text-right px-4 py-2 text-xs font-semibold text-muted-foreground">
                     Actions
@@ -1256,7 +1570,18 @@ function UserManagement() {
                 </tr>
               </thead>
               <tbody>
-                {authUsers.length === 0 && (
+                {loading && (
+                  <tr>
+                    <td
+                      colSpan={4}
+                      className="px-4 py-6 text-center text-sm text-muted-foreground"
+                    >
+                      <Loader2 className="w-4 h-4 animate-spin inline mr-1" />{" "}
+                      Loading users...
+                    </td>
+                  </tr>
+                )}
+                {!loading && users.length === 0 && (
                   <tr>
                     <td
                       colSpan={4}
@@ -1267,15 +1592,8 @@ function UserManagement() {
                     </td>
                   </tr>
                 )}
-                {authUsers.map((user, idx) => {
-                  const permCount = Object.values(
-                    user.permissions || {},
-                  ).filter(Boolean).length;
-                  const totalPerms = Object.values(MODULE_PERMISSIONS).reduce(
-                    (s, m) => s + m.actions.length,
-                    0,
-                  );
-                  return (
+                {!loading &&
+                  users.map((user, idx) => (
                     <tr
                       key={user.id}
                       className="border-b border-border last:border-0 hover:bg-muted/30 transition-colors"
@@ -1288,45 +1606,67 @@ function UserManagement() {
                             (you)
                           </span>
                         )}
+                        {user.mustChangePassword && (
+                          <span className="ml-1.5 text-[10px] text-amber-600">
+                            (pending first login)
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-2.5">
                         <span
-                          className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${ROLE_COLORS[user.role] || "bg-gray-100 text-gray-700"}`}
+                          className={`text-[10px] font-semibold px-2 py-0.5 rounded-full capitalize ${ROLE_COLORS[user.role] || "bg-gray-100 text-gray-700"}`}
                         >
                           {user.role}
                         </span>
                       </td>
-                      <td className="px-4 py-2.5 text-xs text-muted-foreground">
-                        {user.role === "Admin" || user.role === "admin"
-                          ? "Full Access"
-                          : `${permCount} / ${totalPerms} allowed`}
+                      <td className="px-4 py-2.5">
+                        {user.isActive ? (
+                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">
+                            Active
+                          </span>
+                        ) : (
+                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-gray-200 text-gray-600">
+                            Deactivated
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-2.5">
                         <div className="flex items-center justify-end gap-2">
-                          <button
-                            type="button"
-                            onClick={() => openEdit(user)}
-                            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-                            data-ocid={`settings.users.edit_button.${idx + 1}`}
-                            title="Edit user"
-                          >
-                            <Edit2 className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleDelete(user)}
-                            disabled={user.id === currentUser?.id}
-                            className="p-1 rounded hover:bg-destructive/10 text-muted-foreground hover:text-destructive transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
-                            data-ocid={`settings.users.delete_button.${idx + 1}`}
-                            title="Delete user"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                          {canEditUsers && (
+                            <button
+                              type="button"
+                              onClick={() => openEdit(user)}
+                              className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
+                              data-ocid={`settings.users.edit_button.${idx + 1}`}
+                              title="Edit role & permissions"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                          {canEditUsers && (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleActive(user)}
+                              disabled={user.id === currentUser?.id}
+                              className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+                              data-ocid={`settings.users.toggle_active_button.${idx + 1}`}
+                              title={
+                                user.isActive
+                                  ? "Deactivate user"
+                                  : "Reactivate user"
+                              }
+                            >
+                              {user.isActive ? (
+                                <PowerOff className="w-3.5 h-3.5" />
+                              ) : (
+                                <Power className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
-                  );
-                })}
+                  ))}
               </tbody>
             </table>
           </div>
@@ -1336,6 +1676,7 @@ function UserManagement() {
       <UserDialog
         open={dialogOpen}
         onClose={() => setDialogOpen(false)}
+        onSaved={refetch}
         editUser={editUser}
         existingUsernames={existingUsernames}
       />

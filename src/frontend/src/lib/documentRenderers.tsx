@@ -319,7 +319,7 @@ export function InvoiceDocContent({
                 <strong>Destination:</strong> {invoice.deliveryDestination}
               </div>
             ) : (
-              <span style={{ color: "#aaa" }}>\u2014</span>
+              <span style={{ color: "#aaa" }}>—</span>
             )}
           </div>
         </div>
@@ -1299,7 +1299,7 @@ export function CompanyPODocContent({ id, po, settings }: CompanyPODocProps) {
               {po.deliveryAddress}
             </div>
           ) : (
-            <span style={{ fontSize: "11px", color: "#aaa" }}>\u2014</span>
+            <span style={{ fontSize: "11px", color: "#aaa" }}>—</span>
           )}
         </div>
       </div>
@@ -1723,7 +1723,7 @@ export function ChallanDocContent({
               {deliveryAddress}
             </div>
           ) : (
-            <div style={{ fontSize: "11px", color: "#aaa" }}>\u2014</div>
+            <div style={{ fontSize: "11px", color: "#aaa" }}>—</div>
           )}
         </div>
         <div style={{ padding: "10px 14px" }}>

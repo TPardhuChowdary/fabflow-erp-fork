@@ -1,51 +1,46 @@
-import type {
-  InspectionDocument,
-  InspectionHistoryEvent,
-  InspectionMethod,
-  InspectionSheet,
-  InspectionStageCompletion,
-  InspectionStageDefinition,
-  InspectionStageEntry,
-  ManufacturingProcess,
-  Operation,
-  QmsFavorite,
-  QmsTemplate,
-  QualityCharacteristic,
-} from "../types";
-import { QMS_STORES } from "./database";
-import { Repository } from "./repository";
+// Phase 48 — the 7 Characteristic Library IndexedDB repo exports this file
+// used to hold (processRepo, operationRepo, inspectionMethodRepo,
+// characteristicRepo, templateRepo, favoriteRepo, inspectionStageRepo)
+// were removed here. Discovery (Phase 48 audit) confirmed they were
+// already 100% dead: qms/api/index.ts has been Supabase-backed for these
+// 6 domains since Phase 15 (manufacturing_processes, operations,
+// inspection_methods, quality_characteristics, qms_templates,
+// qms_favorites), and inspection_stage_definitions has been Supabase-
+// backed since the same phase via qms/api/inspections.ts's
+// getInspectionStages(). qms/store/useQmsStore.ts — the only store any
+// Characteristic Library page reads from — has only ever imported
+// `qms/api` (Supabase), never this file, for those 7 entities. A repo-
+// wide grep for every one of the 7 export names, and a live check of
+// this browser's actual IndexedDB store row counts (all 0), confirmed
+// zero live consumers and zero at-risk local data before removal. The
+// sibling file that only existed to seed these dead repos
+// (qms/db/seed.ts) was deleted for the same reason — it was never
+// imported by anything either.
+//
+// qms/db/database.ts's store definitions for these 7 entities are left
+// untouched (structural IndexedDB schema, not business-data code) —
+// removing them isn't necessary now that nothing writes to or reads from
+// them, and leaving the schema in place costs nothing.
 
-export const processRepo = new Repository<ManufacturingProcess>(
-  QMS_STORES.processes,
-);
-export const operationRepo = new Repository<Operation>(QMS_STORES.operations);
-export const inspectionMethodRepo = new Repository<InspectionMethod>(
-  QMS_STORES.inspectionMethods,
-);
-export const characteristicRepo = new Repository<QualityCharacteristic>(
-  QMS_STORES.characteristics,
-);
-export const templateRepo = new Repository<QmsTemplate>(QMS_STORES.templates);
-export const favoriteRepo = new Repository<QmsFavorite>(QMS_STORES.favorites);
+import {
+  inspectionDocumentRepoSupabase,
+  inspectionHistoryRepoSupabase,
+  inspectionSheetRepoSupabase,
+  inspectionStageCompletionRepoSupabase,
+  inspectionStageEntryRepoSupabase,
+} from "@/lib/qmsInspectionWorkflowApi";
 
 // ── Phase 2 — Inspection Sheets ──────────────────────────────────
+// The five per-sheet workflow entities (Sheet, StageEntry,
+// StageCompletion, Document, History) are Phase 46 — Supabase-backed via
+// lib/qmsInspectionWorkflowApi.ts, exported here under their original
+// names so qms/api/inspections.ts (the sole consumer) needed zero
+// changes: it only ever calls the shared Repository method shape, never
+// IndexedDB directly.
 
-export const inspectionStageRepo = new Repository<InspectionStageDefinition>(
-  QMS_STORES.inspectionStages,
-);
-export const inspectionSheetRepo = new Repository<InspectionSheet>(
-  QMS_STORES.inspectionSheets,
-);
-export const inspectionStageEntryRepo = new Repository<InspectionStageEntry>(
-  QMS_STORES.inspectionStageEntries,
-);
+export const inspectionSheetRepo = inspectionSheetRepoSupabase;
+export const inspectionStageEntryRepo = inspectionStageEntryRepoSupabase;
 export const inspectionStageCompletionRepo =
-  new Repository<InspectionStageCompletion>(
-    QMS_STORES.inspectionStageCompletions,
-  );
-export const inspectionDocumentRepo = new Repository<InspectionDocument>(
-  QMS_STORES.inspectionDocuments,
-);
-export const inspectionHistoryRepo = new Repository<InspectionHistoryEvent>(
-  QMS_STORES.inspectionHistory,
-);
+  inspectionStageCompletionRepoSupabase;
+export const inspectionDocumentRepo = inspectionDocumentRepoSupabase;
+export const inspectionHistoryRepo = inspectionHistoryRepoSupabase;

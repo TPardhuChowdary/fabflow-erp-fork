@@ -36,6 +36,7 @@ import { ShieldOff } from "lucide-react";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import {
   createEmployeeRemote,
   deleteEmployeeRemote,
@@ -50,7 +51,7 @@ import {
   hasPermission,
 } from "../permissions";
 import { useStore } from "../store";
-import type { Employee, UserRole } from "../types";
+import type { Employee, EmploymentType, UserRole } from "../types";
 import { uploadPhoto } from "../utils/photoStorage";
 
 const ROLE_COLORS: Record<string, string> = {
@@ -59,6 +60,16 @@ const ROLE_COLORS: Record<string, string> = {
   Designer: "bg-purple-100 text-purple-700",
   Worker: "bg-green-100 text-green-700",
 };
+
+// A joining date has no business being more than a year out — catches a
+// mistyped year (e.g. "2345") at the source rather than letting it save
+// silently. Not a hard historical floor: a real re-hire could legitimately
+// have a joining date from years ago.
+const MAX_JOINING_DATE = (() => {
+  const d = new Date();
+  d.setFullYear(d.getFullYear() + 1);
+  return d.toISOString().slice(0, 10);
+})();
 
 interface Props {
   onViewEmployee: (id: string) => void;
@@ -90,6 +101,13 @@ export function Employees({ onViewEmployee }: Props) {
     emergencyContactName: "",
     emergencyContactRelation: "",
     emergencyContactPhone: "",
+    // Phase 43 — Employment Type. Permanent is the default and needs no
+    // extra fields; Temporary/Daily Wage reveal their own conditional
+    // inputs below (see the form JSX).
+    employmentType: "Permanent" as EmploymentType,
+    tempStartDate: "",
+    tempEndDate: "",
+    dailyWageRate: "",
   });
   const [editForm, setEditForm] = useState({
     name: "",
@@ -103,8 +121,17 @@ export function Employees({ onViewEmployee }: Props) {
     emergencyContactName: "",
     emergencyContactRelation: "",
     emergencyContactPhone: "",
+    employmentType: "Permanent" as EmploymentType,
+    tempStartDate: "",
+    tempEndDate: "",
+    dailyWageRate: "",
   });
   const [newPhotoFile, setNewPhotoFile] = useState<File | null>(null);
+  const [formErrors, setFormErrors] = useState<Record<string, string>>({});
+  const [editFormErrors, setEditFormErrors] = useState<Record<string, string>>(
+    {},
+  );
+  const [deleteTarget, setDeleteTarget] = useState<Employee | null>(null);
 
   const canSeeSalary = hasPermission(currentUser, "employees.view");
   const pCreate = canCreate(currentUser, "employees");
@@ -123,6 +150,28 @@ export function Employees({ onViewEmployee }: Props) {
     setPhotoPreview(previewUrl);
   };
 
+  const handleConfirmDeleteEmployee = async () => {
+    if (!deleteTarget) return;
+    const emp = deleteTarget;
+    // Phase 18B: remote-first, same discipline as create/update.
+    const result = await deleteEmployeeRemote(emp.id);
+    if (result.status === "unauthenticated") {
+      toast.error("Not signed in to Supabase - employee was not deleted.");
+      setDeleteTarget(null);
+      return;
+    }
+    if (result.status === "error" || result.status === "denied") {
+      toast.error(
+        `Could not delete employee: ${result.error ?? "unknown error"}`,
+      );
+      setDeleteTarget(null);
+      return;
+    }
+    deleteEmployee(emp.id);
+    toast.success("Employee deleted");
+    setDeleteTarget(null);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     console.log("FORM SUBMITTED");
@@ -136,13 +185,39 @@ export function Employees({ onViewEmployee }: Props) {
   };
 
   const handleSave = async () => {
-    if (!form.name.trim() || !form.username.trim() || !form.password.trim()) {
-      toast.error("Name, Username, and Password are required");
+    const errors: Record<string, string> = {};
+    if (!form.name.trim()) errors.name = "Name is required";
+    if (!form.username.trim()) errors.username = "Username is required";
+    if (!form.password.trim()) {
+      errors.password = "Temporary password is required";
+    } else if (form.password.trim().length < 8) {
+      errors.password = "Temporary password must be at least 8 characters";
+    }
+    if (form.joiningDate && form.joiningDate > MAX_JOINING_DATE) {
+      errors.joiningDate = "Joining date can't be more than a year out";
+    }
+    if (Object.keys(errors).length > 0) {
+      setFormErrors(errors);
+      toast.error(Object.values(errors)[0]);
       return;
     }
-    if (form.password.trim().length < 8) {
-      toast.error("Temporary password must be at least 8 characters");
-      return;
+    setFormErrors({});
+
+    // Not a hard block — a genuine re-hire can legitimately share a name
+    // and phone with an existing record — but the app previously had no
+    // way to even notice, which is how duplicate records accumulated
+    // unnoticed. Surfacing it here means a typo/double-submit gets caught
+    // before it becomes a second, silently-duplicate row.
+    const dup = employees.find(
+      (e) =>
+        e.name.trim().toLowerCase() === form.name.trim().toLowerCase() &&
+        e.phone.trim() === form.phone.trim() &&
+        form.phone.trim().length > 0,
+    );
+    if (dup) {
+      toast.warning(
+        `An employee named "${dup.name}" with this phone number already exists. Saving anyway as a new record.`,
+      );
     }
 
     let photoRef: string | undefined;
@@ -184,6 +259,19 @@ export function Employees({ onViewEmployee }: Props) {
       emergencyContactRelation:
         form.emergencyContactRelation.trim() || undefined,
       emergencyContactPhone: form.emergencyContactPhone.trim() || undefined,
+      employmentType: form.employmentType,
+      tempStartDate:
+        form.employmentType === "Temporary" && form.tempStartDate
+          ? form.tempStartDate
+          : undefined,
+      tempEndDate:
+        form.employmentType === "Temporary" && form.tempEndDate
+          ? form.tempEndDate
+          : undefined,
+      dailyWageRate:
+        form.employmentType === "Daily Wage" && form.dailyWageRate
+          ? Number.parseFloat(form.dailyWageRate)
+          : undefined,
     });
 
     if (result.status === "unauthenticated") {
@@ -244,6 +332,10 @@ export function Employees({ onViewEmployee }: Props) {
       emergencyContactName: "",
       emergencyContactRelation: "",
       emergencyContactPhone: "",
+      employmentType: "Permanent",
+      tempStartDate: "",
+      tempEndDate: "",
+      dailyWageRate: "",
     });
   };
 
@@ -261,6 +353,11 @@ export function Employees({ onViewEmployee }: Props) {
       emergencyContactName: emp.emergencyContactName || "",
       emergencyContactRelation: emp.emergencyContactRelation || "",
       emergencyContactPhone: emp.emergencyContactPhone || "",
+      employmentType: emp.employmentType || "Permanent",
+      tempStartDate: emp.tempStartDate || "",
+      tempEndDate: emp.tempEndDate || "",
+      dailyWageRate:
+        emp.dailyWageRate !== undefined ? String(emp.dailyWageRate) : "",
     });
     setNewPhotoFile(null);
     setEditDialogOpen(true);
@@ -294,10 +391,17 @@ export function Employees({ onViewEmployee }: Props) {
       return;
     }
     if (!editingEmployee) return;
-    if (!editForm.name.trim()) {
-      toast.error("Name is required");
+    const errors: Record<string, string> = {};
+    if (!editForm.name.trim()) errors.name = "Name is required";
+    if (editForm.joiningDate && editForm.joiningDate > MAX_JOINING_DATE) {
+      errors.joiningDate = "Joining date can't be more than a year out";
+    }
+    if (Object.keys(errors).length > 0) {
+      setEditFormErrors(errors);
+      toast.error(Object.values(errors)[0]);
       return;
     }
+    setEditFormErrors({});
     let photoUrl = editForm.photo;
     try {
       if (newPhotoFile) {
@@ -330,6 +434,19 @@ export function Employees({ onViewEmployee }: Props) {
       emergencyContactRelation:
         editForm.emergencyContactRelation.trim() || undefined,
       emergencyContactPhone: editForm.emergencyContactPhone.trim() || undefined,
+      employmentType: editForm.employmentType,
+      tempStartDate:
+        editForm.employmentType === "Temporary" && editForm.tempStartDate
+          ? editForm.tempStartDate
+          : undefined,
+      tempEndDate:
+        editForm.employmentType === "Temporary" && editForm.tempEndDate
+          ? editForm.tempEndDate
+          : undefined,
+      dailyWageRate:
+        editForm.employmentType === "Daily Wage" && editForm.dailyWageRate
+          ? Number.parseFloat(editForm.dailyWageRate)
+          : undefined,
     });
 
     if (result.status === "unauthenticated") {
@@ -383,7 +500,10 @@ export function Employees({ onViewEmployee }: Props) {
         </div>
         {pCreate && (
           <Button
-            onClick={() => setDialogOpen(true)}
+            onClick={() => {
+              setFormErrors({});
+              setDialogOpen(true);
+            }}
             data-ocid="employees.open_modal_button"
           >
             <Plus className="w-4 h-4 mr-1.5" /> New Employee
@@ -483,17 +603,11 @@ export function Employees({ onViewEmployee }: Props) {
                           variant="ghost"
                           size="sm"
                           className="h-7 px-2"
-                          onClick={async () => {
-                            if (
-                              !window.confirm(
-                                `Are you sure you want to delete employee "${emp.name}"? This cannot be undone.`,
-                              )
-                            )
-                              return;
+                          onClick={() => {
                             // Same local-only guard the store's own
                             // deleteEmployee() already enforces, checked
-                            // first so a blocked delete never attempts a
-                            // remote call at all.
+                            // first so a blocked delete never even offers
+                            // the confirm dialog.
                             const s = useStore.getState();
                             const hasSalary = (s.salaryPayments || []).some(
                               (sp) => sp.employeeId === emp.id,
@@ -507,26 +621,7 @@ export function Employees({ onViewEmployee }: Props) {
                               );
                               return;
                             }
-                            // Phase 18B: remote-first, same discipline as
-                            // create/update.
-                            const result = await deleteEmployeeRemote(emp.id);
-                            if (result.status === "unauthenticated") {
-                              toast.error(
-                                "Not signed in to Supabase - employee was not deleted.",
-                              );
-                              return;
-                            }
-                            if (
-                              result.status === "error" ||
-                              result.status === "denied"
-                            ) {
-                              toast.error(
-                                `Could not delete employee: ${result.error ?? "unknown error"}`,
-                              );
-                              return;
-                            }
-                            deleteEmployee(emp.id);
-                            toast.success("Employee deleted");
+                            setDeleteTarget(emp);
                           }}
                           data-ocid={`employees.delete_button.${i + 1}`}
                           title="Delete employee"
@@ -601,11 +696,19 @@ export function Employees({ onViewEmployee }: Props) {
                   <Input
                     placeholder="e.g. Ravi Sharma"
                     value={form.name}
-                    onChange={(e) =>
-                      setForm((f) => ({ ...f, name: e.target.value }))
-                    }
+                    onChange={(e) => {
+                      setForm((f) => ({ ...f, name: e.target.value }));
+                      setFormErrors((p) => ({ ...p, name: "" }));
+                    }}
+                    className={formErrors.name ? "border-destructive" : ""}
+                    aria-invalid={!!formErrors.name}
                     data-ocid="employees.input"
                   />
+                  {formErrors.name && (
+                    <p className="text-xs text-destructive">
+                      {formErrors.name}
+                    </p>
+                  )}
                 </div>
                 <div className="space-y-1.5">
                   <Label>Phone</Label>
@@ -653,23 +756,42 @@ export function Employees({ onViewEmployee }: Props) {
                   <Label>Joining Date</Label>
                   <Input
                     type="date"
+                    max={MAX_JOINING_DATE}
                     value={form.joiningDate}
-                    onChange={(e) =>
-                      setForm((f) => ({ ...f, joiningDate: e.target.value }))
+                    onChange={(e) => {
+                      setForm((f) => ({ ...f, joiningDate: e.target.value }));
+                      setFormErrors((p) => ({ ...p, joiningDate: "" }));
+                    }}
+                    className={
+                      formErrors.joiningDate ? "border-destructive" : ""
                     }
+                    aria-invalid={!!formErrors.joiningDate}
                     data-ocid="employees.input"
                   />
+                  {formErrors.joiningDate && (
+                    <p className="text-xs text-destructive">
+                      {formErrors.joiningDate}
+                    </p>
+                  )}
                 </div>
                 <div className="space-y-1.5">
                   <Label>Username *</Label>
                   <Input
                     placeholder="login username"
                     value={form.username}
-                    onChange={(e) =>
-                      setForm((f) => ({ ...f, username: e.target.value }))
-                    }
+                    onChange={(e) => {
+                      setForm((f) => ({ ...f, username: e.target.value }));
+                      setFormErrors((p) => ({ ...p, username: "" }));
+                    }}
+                    className={formErrors.username ? "border-destructive" : ""}
+                    aria-invalid={!!formErrors.username}
                     data-ocid="employees.input"
                   />
+                  {formErrors.username && (
+                    <p className="text-xs text-destructive">
+                      {formErrors.username}
+                    </p>
+                  )}
                 </div>
                 <div className="space-y-1.5">
                   <Label>Temporary Password *</Label>
@@ -677,11 +799,19 @@ export function Employees({ onViewEmployee }: Props) {
                     type="password"
                     placeholder="At least 8 characters"
                     value={form.password}
-                    onChange={(e) =>
-                      setForm((f) => ({ ...f, password: e.target.value }))
-                    }
+                    onChange={(e) => {
+                      setForm((f) => ({ ...f, password: e.target.value }));
+                      setFormErrors((p) => ({ ...p, password: "" }));
+                    }}
+                    className={formErrors.password ? "border-destructive" : ""}
+                    aria-invalid={!!formErrors.password}
                     data-ocid="employees.input"
                   />
+                  {formErrors.password && (
+                    <p className="text-xs text-destructive">
+                      {formErrors.password}
+                    </p>
+                  )}
                 </div>
                 <div className="space-y-1.5">
                   <Label>Designation</Label>
@@ -716,6 +846,75 @@ export function Employees({ onViewEmployee }: Props) {
                     </SelectContent>
                   </Select>
                 </div>
+                <div className="space-y-1.5">
+                  <Label>Employment Type</Label>
+                  <Select
+                    value={form.employmentType}
+                    onValueChange={(v) =>
+                      setForm((f) => ({
+                        ...f,
+                        employmentType: v as EmploymentType,
+                      }))
+                    }
+                  >
+                    <SelectTrigger data-ocid="employees.form.employment_type.select">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="Permanent">Permanent</SelectItem>
+                      <SelectItem value="Temporary">Temporary</SelectItem>
+                      <SelectItem value="Daily Wage">Daily Wage</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {form.employmentType === "Temporary" && (
+                  <>
+                    <div className="space-y-1.5">
+                      <Label>Temp. Start Date</Label>
+                      <Input
+                        type="date"
+                        value={form.tempStartDate}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            tempStartDate: e.target.value,
+                          }))
+                        }
+                        data-ocid="employees.form.temp_start_date.input"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Temp. End Date</Label>
+                      <Input
+                        type="date"
+                        value={form.tempEndDate}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            tempEndDate: e.target.value,
+                          }))
+                        }
+                        data-ocid="employees.form.temp_end_date.input"
+                      />
+                    </div>
+                  </>
+                )}
+                {form.employmentType === "Daily Wage" && (
+                  <div className="space-y-1.5">
+                    <Label>Daily Wage Rate (₹)</Label>
+                    <Input
+                      type="number"
+                      value={form.dailyWageRate}
+                      onChange={(e) =>
+                        setForm((f) => ({
+                          ...f,
+                          dailyWageRate: e.target.value,
+                        }))
+                      }
+                      data-ocid="employees.form.daily_wage_rate.input"
+                    />
+                  </div>
+                )}
                 <div className="space-y-1.5 col-span-2 pt-1">
                   <Label className="text-xs text-muted-foreground uppercase tracking-wide">
                     Emergency Contact
@@ -902,6 +1101,7 @@ export function Employees({ onViewEmployee }: Props) {
                   <Label>Joining Date</Label>
                   <Input
                     type="date"
+                    max={MAX_JOINING_DATE}
                     value={editForm.joiningDate}
                     onChange={(e) =>
                       setEditForm((f) => ({
@@ -910,7 +1110,15 @@ export function Employees({ onViewEmployee }: Props) {
                       }))
                     }
                     data-ocid="employees.edit.joiningdate.input"
+                    className={
+                      editFormErrors.joiningDate ? "border-destructive" : ""
+                    }
                   />
+                  {editFormErrors.joiningDate && (
+                    <p className="text-xs text-destructive">
+                      {editFormErrors.joiningDate}
+                    </p>
+                  )}
                 </div>
                 <div className="space-y-1.5">
                   <Label>Designation</Label>
@@ -948,6 +1156,75 @@ export function Employees({ onViewEmployee }: Props) {
                     </SelectContent>
                   </Select>
                 </div>
+                <div className="space-y-1.5">
+                  <Label>Employment Type</Label>
+                  <Select
+                    value={editForm.employmentType}
+                    onValueChange={(v) =>
+                      setEditForm((f) => ({
+                        ...f,
+                        employmentType: v as EmploymentType,
+                      }))
+                    }
+                  >
+                    <SelectTrigger data-ocid="employees.edit.employment_type.select">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="Permanent">Permanent</SelectItem>
+                      <SelectItem value="Temporary">Temporary</SelectItem>
+                      <SelectItem value="Daily Wage">Daily Wage</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                {editForm.employmentType === "Temporary" && (
+                  <>
+                    <div className="space-y-1.5">
+                      <Label>Temp. Start Date</Label>
+                      <Input
+                        type="date"
+                        value={editForm.tempStartDate}
+                        onChange={(e) =>
+                          setEditForm((f) => ({
+                            ...f,
+                            tempStartDate: e.target.value,
+                          }))
+                        }
+                        data-ocid="employees.edit.temp_start_date.input"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Temp. End Date</Label>
+                      <Input
+                        type="date"
+                        value={editForm.tempEndDate}
+                        onChange={(e) =>
+                          setEditForm((f) => ({
+                            ...f,
+                            tempEndDate: e.target.value,
+                          }))
+                        }
+                        data-ocid="employees.edit.temp_end_date.input"
+                      />
+                    </div>
+                  </>
+                )}
+                {editForm.employmentType === "Daily Wage" && (
+                  <div className="space-y-1.5">
+                    <Label>Daily Wage Rate (₹)</Label>
+                    <Input
+                      type="number"
+                      value={editForm.dailyWageRate}
+                      onChange={(e) =>
+                        setEditForm((f) => ({
+                          ...f,
+                          dailyWageRate: e.target.value,
+                        }))
+                      }
+                      data-ocid="employees.edit.daily_wage_rate.input"
+                    />
+                  </div>
+                )}
                 <div className="space-y-1.5 col-span-2 pt-1">
                   <Label className="text-xs text-muted-foreground uppercase tracking-wide">
                     Emergency Contact
@@ -1024,6 +1301,14 @@ export function Employees({ onViewEmployee }: Props) {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={!!deleteTarget}
+        onOpenChange={(o) => !o && setDeleteTarget(null)}
+        title="Delete employee?"
+        description={`Employee "${deleteTarget?.name}" will be permanently deleted.`}
+        onConfirm={handleConfirmDeleteEmployee}
+      />
     </div>
   );
 }

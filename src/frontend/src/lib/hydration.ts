@@ -18,7 +18,28 @@
 //     with a "loading"/"error"/"unauthenticated" result; only a "success"
 //     result carries data meant to replace local state.
 
+import { rowToDie } from "@/lib/diesApi";
+import type {
+  BillableServiceRow,
+  RateHistoryRow,
+  UsageRow,
+} from "@/lib/machineRevenueApi";
+import {
+  rowToBillableService,
+  rowToRate,
+  rowToUsage,
+} from "@/lib/machineRevenueApi";
+import { rowToMachine } from "@/lib/machinesApi";
+import {
+  rowToProjectProductionStage,
+  rowToStageTransaction,
+} from "@/lib/productionStagesApi";
+import type {
+  ProductionStageTransactionRow,
+  ProjectProductionStageRow,
+} from "@/lib/productionStagesApi";
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
+import { rowToTool, rowToToolAssignmentHistory } from "@/lib/toolsApi";
 import type {
   InspectionMode,
   ProjectQmsInspection,
@@ -32,6 +53,7 @@ import type {
 import type {
   AdvanceRecord,
   AttendanceRecord,
+  BillableService,
   BomItem,
   BomRequisition,
   BomRequisitionStatus,
@@ -44,11 +66,13 @@ import type {
   DCProjectEntry,
   DCStatus,
   DeliveryChallan,
+  Die,
   DispatchMethod,
   Employee,
   EmployeeDocument,
   EmployeeDocumentType,
   EmployeeType,
+  EmploymentType,
   ExpenseFloat,
   ExpenseFloatStatus,
   InvLineItem,
@@ -57,6 +81,11 @@ import type {
   Invoice,
   InvoiceStatus,
   LineItem,
+  Machine,
+  MachineDie,
+  MachineServiceRate,
+  MachineServiceUsage,
+  MachineSparePart,
   MasterPO,
   MaterialUsage,
   OutsourcedWork,
@@ -70,6 +99,7 @@ import type {
   ProjectActivity,
   ProjectPO,
   ProjectPOStatus,
+  ProjectProduction,
   PurchaseAttachment,
   PurchasedItemAttachment,
   Quotation,
@@ -79,6 +109,8 @@ import type {
   QuotationStatus,
   SalaryPayment,
   ServiceType,
+  Tool,
+  ToolAssignmentHistory,
   UserRole,
   VehicleExpenseType,
   Vendor,
@@ -106,7 +138,8 @@ export interface HydrationResult<T> {
 const EMPLOYEE_COLUMNS =
   "id, name, phone, role, monthly_salary, joining_date, photo_ref, " +
   "employee_code, designation, blood_group, emergency_contact_name, " +
-  "emergency_contact_relation, emergency_contact_phone, employee_type";
+  "emergency_contact_relation, emergency_contact_phone, employee_type, " +
+  "employment_type, temp_start_date, temp_end_date, daily_wage_rate";
 
 interface EmployeeRow {
   id: string;
@@ -123,6 +156,10 @@ interface EmployeeRow {
   emergency_contact_relation: string | null;
   emergency_contact_phone: string | null;
   employee_type: string | null;
+  employment_type: string | null;
+  temp_start_date: string | null;
+  temp_end_date: string | null;
+  daily_wage_rate: number | null;
 }
 
 function transformEmployeeRow(row: EmployeeRow): Employee {
@@ -152,6 +189,13 @@ function transformEmployeeRow(row: EmployeeRow): Employee {
     // Same reasoning as role above - not DB-enforced, so this is an
     // assumption, not a guarantee.
     employeeType: (row.employee_type as EmployeeType | null) ?? undefined,
+    // Phase 43 — Employment Type, DB-defaulted to 'Permanent' (see
+    // database/phase-43); undefined here only for a row somehow still
+    // null, which the UI also treats as "Permanent".
+    employmentType: (row.employment_type as EmploymentType | null) ?? undefined,
+    tempStartDate: row.temp_start_date ?? undefined,
+    tempEndDate: row.temp_end_date ?? undefined,
+    dailyWageRate: row.daily_wage_rate ?? undefined,
   };
 }
 
@@ -182,6 +226,225 @@ export async function hydrateEmployees(): Promise<HydrationResult<Employee[]>> {
   return {
     status: "success",
     data: (data as unknown as EmployeeRow[]).map(transformEmployeeRow),
+  };
+}
+
+// Phase 35 — Machines. Reuses machinesApi.ts's rowToMachine (the write
+// layer's own read-mapping, kept in one place rather than duplicated here)
+// since this hydration function's column list and row shape are identical
+// to every other read that module already needs to do after a write.
+const MACHINE_COLUMNS =
+  "id, machine_code, name, type, brand, model, serial_number, asset_id, " +
+  "purchase_date, purchase_cost, purchase_vendor_id, purchase_vendor_name, " +
+  "current_status, location, department, warranty_expiry, warranty_vendor, " +
+  "warranty_notes, amc_vendor_id, amc_vendor_name, amc_start_date, " +
+  "amc_end_date, amc_cost, amc_coverage, service_interval_days, " +
+  "last_service_date, next_service_due, total_running_hours, hourly_rate, " +
+  "primary_image_data, notes, source_company_po_item_id, is_active, " +
+  "created_at, updated_at";
+
+export async function hydrateMachines(): Promise<HydrationResult<Machine[]>> {
+  if (!isSupabaseConfigured) {
+    return { status: "error", error: "Supabase is not configured" };
+  }
+  const client = getSupabase();
+
+  const { data: sessionData, error: sessionError } =
+    await client.auth.getSession();
+  if (sessionError) {
+    return { status: "error", error: sessionError.message };
+  }
+  if (!sessionData.session) {
+    return { status: "unauthenticated" };
+  }
+
+  const { data, error } = await client
+    .from("machines")
+    .select(MACHINE_COLUMNS)
+    .order("machine_code");
+
+  if (error) {
+    return { status: "error", error: error.message };
+  }
+
+  return {
+    status: "success",
+    data: (data as unknown as Parameters<typeof rowToMachine>[0][]).map(
+      rowToMachine,
+    ),
+  };
+}
+
+// Phase 37 — Tools. Reuses toolsApi.ts's rowToTool, same reasoning as
+// hydrateMachines above. Phase 43 added photo_data/purchase_vendor_id/
+// purchase_vendor_name.
+const TOOL_COLUMNS =
+  "id, tool_code, name, category, quantity, location, assigned_employee_id, " +
+  "condition, status, purchase_date, replacement_value, notes, photo_data, " +
+  "purchase_vendor_id, purchase_vendor_name, " +
+  "source_company_po_item_id, is_active, created_at, updated_at";
+
+export async function hydrateTools(): Promise<HydrationResult<Tool[]>> {
+  if (!isSupabaseConfigured) {
+    return { status: "error", error: "Supabase is not configured" };
+  }
+  const client = getSupabase();
+
+  const { data: sessionData, error: sessionError } =
+    await client.auth.getSession();
+  if (sessionError) {
+    return { status: "error", error: sessionError.message };
+  }
+  if (!sessionData.session) {
+    return { status: "unauthenticated" };
+  }
+
+  const { data, error } = await client
+    .from("tools")
+    .select(TOOL_COLUMNS)
+    .order("tool_code");
+
+  if (error) {
+    return { status: "error", error: error.message };
+  }
+
+  return {
+    status: "success",
+    data: (data as unknown as Parameters<typeof rowToTool>[0][]).map(rowToTool),
+  };
+}
+
+// Phase 43 — tool_assignment_history (insert-only). Reuses toolsApi.ts's
+// rowToToolAssignmentHistory, same reasoning as hydrateTools above.
+const TOOL_ASSIGNMENT_HISTORY_COLUMNS =
+  "id, tool_id, employee_id, action, notes, recorded_by, recorded_at, created_at";
+
+export async function hydrateToolAssignmentHistory(): Promise<
+  HydrationResult<ToolAssignmentHistory[]>
+> {
+  if (!isSupabaseConfigured) {
+    return { status: "error", error: "Supabase is not configured" };
+  }
+  const client = getSupabase();
+
+  const { data: sessionData, error: sessionError } =
+    await client.auth.getSession();
+  if (sessionError) {
+    return { status: "error", error: sessionError.message };
+  }
+  if (!sessionData.session) {
+    return { status: "unauthenticated" };
+  }
+
+  const { data, error } = await client
+    .from("tool_assignment_history")
+    .select(TOOL_ASSIGNMENT_HISTORY_COLUMNS)
+    .order("recorded_at", { ascending: false });
+
+  if (error) {
+    return { status: "error", error: error.message };
+  }
+
+  return {
+    status: "success",
+    data: (
+      data as unknown as Parameters<typeof rowToToolAssignmentHistory>[0][]
+    ).map(rowToToolAssignmentHistory),
+  };
+}
+
+// Phase 38 — Dies. Reuses diesApi.ts's rowToDie, same reasoning as
+// hydrateTools above. Phase 43 added photo_data/purchase_date/
+// purchase_cost/purchase_vendor_id/purchase_vendor_name.
+const DIE_COLUMNS =
+  "id, die_code, name, type, purpose, compatible_machine_id, " +
+  "original_project_id, location, status, date_created, condition, " +
+  "notes, photo_data, purchase_date, purchase_cost, purchase_vendor_id, " +
+  "purchase_vendor_name, source_company_po_item_id, is_active, created_at, updated_at";
+
+export async function hydrateDies(): Promise<HydrationResult<Die[]>> {
+  if (!isSupabaseConfigured) {
+    return { status: "error", error: "Supabase is not configured" };
+  }
+  const client = getSupabase();
+
+  const { data: sessionData, error: sessionError } =
+    await client.auth.getSession();
+  if (sessionError) {
+    return { status: "error", error: sessionError.message };
+  }
+  if (!sessionData.session) {
+    return { status: "unauthenticated" };
+  }
+
+  const { data, error } = await client
+    .from("dies")
+    .select(DIE_COLUMNS)
+    .order("die_code");
+
+  if (error) {
+    return { status: "error", error: error.message };
+  }
+
+  return {
+    status: "success",
+    data: (data as unknown as Parameters<typeof rowToDie>[0][]).map(rowToDie),
+  };
+}
+
+// Phase 38 — machine_spare_parts / machine_dies compatibility junctions.
+// Composite PK, no surrogate id, same shape as hydrateProjectEmployees
+// above - mapped to the frontend's camelCase shape here (not left raw),
+// since MachineSparePart/MachineDie (types.ts) are real frontend types
+// with their own consumers, unlike ProjectEmployeePair's ad-hoc raw pair.
+// Wholesale-replaced on hydration; no local-only predecessor to merge.
+interface MachineSparePartRow {
+  machine_id: string;
+  inventory_item_id: string;
+  created_at: string;
+}
+
+export async function hydrateMachineSpareParts(): Promise<
+  HydrationResult<MachineSparePart[]>
+> {
+  const gate = await requireSessionForHydration();
+  if (!gate.ok) return gate.result;
+  const { data, error } = await gate.client
+    .from("machine_spare_parts")
+    .select("machine_id, inventory_item_id, created_at");
+  if (error) return { status: "error", error: error.message };
+  return {
+    status: "success",
+    data: (data as unknown as MachineSparePartRow[]).map((row) => ({
+      machineId: row.machine_id,
+      inventoryItemId: row.inventory_item_id,
+      createdAt: new Date(row.created_at).getTime(),
+    })),
+  };
+}
+
+interface MachineDieRow {
+  machine_id: string;
+  die_id: string;
+  created_at: string;
+}
+
+export async function hydrateMachineDies(): Promise<
+  HydrationResult<MachineDie[]>
+> {
+  const gate = await requireSessionForHydration();
+  if (!gate.ok) return gate.result;
+  const { data, error } = await gate.client
+    .from("machine_dies")
+    .select("machine_id, die_id, created_at");
+  if (error) return { status: "error", error: error.message };
+  return {
+    status: "success",
+    data: (data as unknown as MachineDieRow[]).map((row) => ({
+      machineId: row.machine_id,
+      dieId: row.die_id,
+      createdAt: new Date(row.created_at).getTime(),
+    })),
   };
 }
 
@@ -272,7 +535,8 @@ export async function hydrateCustomers(): Promise<HydrationResult<Customer[]>> {
 // disclosed boundary, not an oversight.
 const INVENTORY_ITEM_COLUMNS =
   "id, name, unit, current_stock, cost_per_unit, quantity_reserved, " +
-  "reorder_level, last_purchase_price, estimated_price, updated_at";
+  "reorder_level, last_purchase_price, estimated_price, updated_at, " +
+  "category, brand, shade, ral_code, finish, powder_type, pretreatment_tank";
 
 interface InventoryItemRow {
   id: string;
@@ -285,6 +549,13 @@ interface InventoryItemRow {
   last_purchase_price: number | null;
   estimated_price: number | null;
   updated_at: string;
+  category: string | null;
+  brand: string | null;
+  shade: string | null;
+  ral_code: string | null;
+  finish: string | null;
+  powder_type: string | null;
+  pretreatment_tank: string | null;
 }
 
 function transformInventoryItemRow(row: InventoryItemRow): InventoryItem {
@@ -299,6 +570,14 @@ function transformInventoryItemRow(row: InventoryItemRow): InventoryItem {
     lastPurchasePrice: row.last_purchase_price ?? undefined,
     estimatedPrice: row.estimated_price ?? undefined,
     lastUpdated: new Date(row.updated_at).getTime(),
+    category:
+      (row.category as InventoryItem["category"] | null) ?? "raw_material",
+    brand: row.brand ?? undefined,
+    shade: row.shade ?? undefined,
+    ralCode: row.ral_code ?? undefined,
+    finish: row.finish ?? undefined,
+    powderType: row.powder_type ?? undefined,
+    pretreatmentTank: row.pretreatment_tank ?? undefined,
   };
 }
 
@@ -1159,6 +1438,128 @@ export async function hydrateProjectEmployees(): Promise<
   };
 }
 
+// project_machinery / project_dies (Phase 39) — same raw-pairs shape as
+// hydrateProjectEmployees above. Feed Project.assignedMachineIds /
+// assignedDieIds only.
+export interface ProjectMachineryRow {
+  project_id: string;
+  machine_id: string;
+}
+
+export interface ProjectMachinePair {
+  projectId: string;
+  machineId: string;
+}
+
+export async function hydrateProjectMachinery(): Promise<
+  HydrationResult<ProjectMachinePair[]>
+> {
+  const gate = await requireSessionForHydration();
+  if (!gate.ok) return gate.result;
+  const { data, error } = await gate.client
+    .from("project_machinery")
+    .select("project_id, machine_id");
+  if (error) return { status: "error", error: error.message };
+  return {
+    status: "success",
+    data: (data as unknown as ProjectMachineryRow[]).map((row) => ({
+      projectId: row.project_id,
+      machineId: row.machine_id,
+    })),
+  };
+}
+
+export interface ProjectDieRow {
+  project_id: string;
+  die_id: string;
+}
+
+export interface ProjectDiePair {
+  projectId: string;
+  dieId: string;
+}
+
+export async function hydrateProjectDies(): Promise<
+  HydrationResult<ProjectDiePair[]>
+> {
+  const gate = await requireSessionForHydration();
+  if (!gate.ok) return gate.result;
+  const { data, error } = await gate.client
+    .from("project_dies")
+    .select("project_id, die_id");
+  if (error) return { status: "error", error: error.message };
+  return {
+    status: "success",
+    data: (data as unknown as ProjectDieRow[]).map((row) => ({
+      projectId: row.project_id,
+      dieId: row.die_id,
+    })),
+  };
+}
+
+// ── Phase 40 — Machine/Service Revenue (§17-28) ──────────────────
+// Full frontend-shaped rows, mirroring hydrateDies/hydrateTools above -
+// these are real domain types with their own consumers (dashboard,
+// drill-down, Project Overview readonly block), not raw pairs.
+
+const BILLABLE_SERVICE_COLUMNS =
+  "id, name, machine_id, charging_method, unit_label, is_active, created_at, updated_at";
+
+export async function hydrateBillableServices(): Promise<
+  HydrationResult<BillableService[]>
+> {
+  const gate = await requireSessionForHydration();
+  if (!gate.ok) return gate.result;
+  const { data, error } = await gate.client
+    .from("billable_services")
+    .select(BILLABLE_SERVICE_COLUMNS)
+    .order("name");
+  if (error) return { status: "error", error: error.message };
+  return {
+    status: "success",
+    data: (data as unknown as BillableServiceRow[]).map(rowToBillableService),
+  };
+}
+
+const RATE_HISTORY_COLUMNS =
+  "id, billable_service_id, rate, effective_from, created_by, created_at";
+
+export async function hydrateMachineServiceRates(): Promise<
+  HydrationResult<MachineServiceRate[]>
+> {
+  const gate = await requireSessionForHydration();
+  if (!gate.ok) return gate.result;
+  const { data, error } = await gate.client
+    .from("machine_service_rate_history")
+    .select(RATE_HISTORY_COLUMNS)
+    .order("effective_from");
+  if (error) return { status: "error", error: error.message };
+  return {
+    status: "success",
+    data: (data as unknown as RateHistoryRow[]).map(rowToRate),
+  };
+}
+
+const USAGE_COLUMNS =
+  "id, project_id, billable_service_id, usage_date, quantity, unit, " +
+  "rate_applied, revenue_amount, recorded_by, notes, created_at, updated_at";
+
+export async function hydrateMachineServiceUsage(): Promise<
+  HydrationResult<MachineServiceUsage[]>
+> {
+  const gate = await requireSessionForHydration();
+  if (!gate.ok) return gate.result;
+  const { data, error } = await gate.client
+    .from("machine_service_usage")
+    .select(USAGE_COLUMNS)
+    .order("usage_date", { ascending: false });
+  if (error) return { status: "error", error: error.message };
+  return {
+    status: "success",
+    data: (data as unknown as UsageRow[]).map(rowToUsage),
+  };
+}
+
 // ── Phase 27 Batch 2 — quotations, quotation_revisions, master_pos,
 // quotation_purchase_orders, project_purchase_orders ──────────────────
 //
@@ -1191,8 +1592,9 @@ export async function hydrateProjectEmployees(): Promise<
 //     undefined), matching today's actual behavior exactly.
 
 export const QUOTATION_COLUMNS =
-  "id, qt_no, customer_id, project_id, line_items, subtotal, gst_rate, " +
-  "gst_amount, total_amount, valid_until, terms, status, quotation_date, " +
+  "id, qt_no, customer_id, project_id, line_items, subtotal, apply_gst, " +
+  "apply_igst, cgst_rate, sgst_rate, igst_rate, cgst_amt, sgst_amt, " +
+  "igst_amt, total_amount, valid_until, terms, status, quotation_date, " +
   "notes, history, approved_at, created_at";
 
 export interface QuotationRow {
@@ -1202,8 +1604,14 @@ export interface QuotationRow {
   project_id: string | null;
   line_items: LineItem[];
   subtotal: number;
-  gst_rate: number;
-  gst_amount: number;
+  apply_gst: boolean;
+  apply_igst: boolean;
+  cgst_rate: number;
+  sgst_rate: number;
+  igst_rate: number;
+  cgst_amt: number;
+  sgst_amt: number;
+  igst_amt: number;
   total_amount: number;
   valid_until: string;
   terms: string | null;
@@ -1224,8 +1632,14 @@ export function transformQuotationRow(row: QuotationRow): Quotation {
     projectId: row.project_id ?? undefined,
     lineItems: row.line_items ?? [],
     subtotal: row.subtotal,
-    gstRate: row.gst_rate,
-    gstAmount: row.gst_amount,
+    applyGST: row.apply_gst,
+    applyIGST: row.apply_igst,
+    cgstRate: row.cgst_rate,
+    sgstRate: row.sgst_rate,
+    igstRate: row.igst_rate,
+    cgstAmt: row.cgst_amt,
+    sgstAmt: row.sgst_amt,
+    igstAmt: row.igst_amt,
     totalAmount: row.total_amount,
     validUntil: row.valid_until,
     terms: row.terms ?? "",
@@ -1259,7 +1673,8 @@ export async function hydrateQuotations(): Promise<
 
 export const QUOTATION_REVISION_COLUMNS =
   "id, quotation_id, revision_number, revision_date, revision_notes, " +
-  "line_items, subtotal, gst_rate, gst_amount, total_amount, " +
+  "line_items, subtotal, apply_gst, apply_igst, cgst_rate, sgst_rate, " +
+  "igst_rate, cgst_amt, sgst_amt, igst_amt, total_amount, " +
   "valid_until, terms, notes, status, is_current, created_at";
 
 export interface QuotationRevisionRow {
@@ -1270,8 +1685,14 @@ export interface QuotationRevisionRow {
   revision_notes: string | null;
   line_items: LineItem[];
   subtotal: number;
-  gst_rate: number;
-  gst_amount: number;
+  apply_gst: boolean;
+  apply_igst: boolean;
+  cgst_rate: number;
+  sgst_rate: number;
+  igst_rate: number;
+  cgst_amt: number;
+  sgst_amt: number;
+  igst_amt: number;
   total_amount: number;
   valid_until: string;
   terms: string | null;
@@ -1292,8 +1713,14 @@ export function transformQuotationRevisionRow(
     revisionNotes: row.revision_notes ?? undefined,
     lineItems: row.line_items ?? [],
     subtotal: row.subtotal,
-    gstRate: row.gst_rate,
-    gstAmount: row.gst_amount,
+    applyGST: row.apply_gst,
+    applyIGST: row.apply_igst,
+    cgstRate: row.cgst_rate,
+    sgstRate: row.sgst_rate,
+    igstRate: row.igst_rate,
+    cgstAmt: row.cgst_amt,
+    sgstAmt: row.sgst_amt,
+    igstAmt: row.igst_amt,
     totalAmount: row.total_amount,
     validUntil: row.valid_until,
     terms: row.terms ?? "",
@@ -1779,7 +2206,7 @@ export const INVOICE_COLUMNS =
   "reminder_count, next_reminder_custom_date, selected_email, created_at";
 
 export const INVOICE_ITEM_COLUMNS =
-  "id, invoice_id, description, hsn, quantity, price, created_at";
+  "id, invoice_id, description, hsn, quantity, price, project_id, created_at";
 
 export interface InvoiceItemRow {
   id: string;
@@ -1788,6 +2215,7 @@ export interface InvoiceItemRow {
   hsn: string | null;
   quantity: number;
   price: number;
+  project_id: string | null;
   created_at: string;
 }
 
@@ -1838,6 +2266,7 @@ export function transformInvoiceItemRow(row: InvoiceItemRow): InvLineItem {
     qty: row.quantity ?? 0,
     rate: row.price ?? 0,
     amount: (row.quantity ?? 0) * (row.price ?? 0),
+    projectId: row.project_id ?? undefined,
   };
 }
 
@@ -2226,4 +2655,73 @@ export async function hydrateProjectQmsInspectionOverrides(): Promise<
       transformProjectQmsInspectionOverrideRow,
     ),
   };
+}
+
+// ============================================================================
+// Phase 45 — Production Stages (closes the "Production Stage Completions"
+// local-only exception). Fetches both project_production_stages and the
+// independent production_stage_transactions ledger, joins transactions
+// onto their stage in memory, and groups stages by project_id into
+// ProjectProduction[] — the exact shape store.ts's projectProductions
+// field already expects, so setProjectProductionsFromServer can replace
+// it directly with no further transformation at the call site.
+// ============================================================================
+
+const PROJECT_PRODUCTION_STAGE_COLUMNS =
+  "id, project_id, stage_name, position, status, notes, " +
+  "requires_material_tracking, sent_qty, received_qty, ok_qty, rejected_qty, " +
+  "is_rework, reference_stage_id, rework_stage_name, sent_to_vendor_id, " +
+  "sent_to_vendor_name, sent_date_time, received_date_time, rework_qty, " +
+  "created_at, updated_at";
+
+const PRODUCTION_STAGE_TRANSACTION_COLUMNS =
+  "id, stage_id, type, quantity, event_time, vendor_id, vendor_name, created_at";
+
+export async function hydrateProjectProductionStages(): Promise<
+  HydrationResult<ProjectProduction[]>
+> {
+  const gate = await requireSessionForHydration();
+  if (!gate.ok) return gate.result;
+
+  const { data: stageRows, error: stageError } = await gate.client
+    .from("project_production_stages")
+    .select(PROJECT_PRODUCTION_STAGE_COLUMNS)
+    .order("project_id")
+    .order("position");
+  if (stageError) return { status: "error", error: stageError.message };
+
+  const { data: txRows, error: txError } = await gate.client
+    .from("production_stage_transactions")
+    .select(PRODUCTION_STAGE_TRANSACTION_COLUMNS)
+    .order("event_time");
+  if (txError) return { status: "error", error: txError.message };
+
+  const txByStage = new Map<string, ProductionStageTransactionRow[]>();
+  for (const row of txRows as unknown as ProductionStageTransactionRow[]) {
+    const list = txByStage.get(row.stage_id) ?? [];
+    list.push(row);
+    txByStage.set(row.stage_id, list);
+  }
+
+  const productionsByProject = new Map<string, ProjectProduction>();
+  for (const row of stageRows as unknown as ProjectProductionStageRow[]) {
+    const stage = rowToProjectProductionStage(row);
+    stage.transactions = (txByStage.get(row.id) ?? []).map(
+      rowToStageTransaction,
+    );
+
+    const existing = productionsByProject.get(row.project_id);
+    if (existing) {
+      existing.stages.push(stage);
+    } else {
+      productionsByProject.set(row.project_id, {
+        id: row.project_id, // ProjectProduction.id has no independent DB identity — one row per project, keyed by project_id, matching store.ts's existing local convention (upsertProjectProduction keys off projectId, not id).
+        projectId: row.project_id,
+        stages: [stage],
+        version: "v2",
+      });
+    }
+  }
+
+  return { status: "success", data: Array.from(productionsByProject.values()) };
 }

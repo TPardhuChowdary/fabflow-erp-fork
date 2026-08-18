@@ -17,9 +17,9 @@ import {
 import { useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import { getCustomerVisibleName } from "../lib/utils";
 import { hasPermission } from "../permissions";
 import { useStore } from "../store";
-import { getCustomerVisibleName } from "../lib/utils";
 import type { ExportContext, ExportSectionId } from "../types";
 
 // ── Section Manifest ─────────────────────────────────────────────
@@ -237,9 +237,9 @@ export function ExportEngine({ context, onBack }: Props) {
   const { currentUser } = useAuth();
   const store = useStore();
 
-  const [selectedSections, setSelectedSections] = useState<Set<ExportSectionId>>(
-    new Set(DEFAULT_SECTIONS),
-  );
+  const [selectedSections, setSelectedSections] = useState<
+    Set<ExportSectionId>
+  >(new Set(DEFAULT_SECTIONS));
   const [generating, setGenerating] = useState(false);
   const printFrameRef = useRef<HTMLIFrameElement>(null);
 
@@ -249,11 +249,16 @@ export function ExportEngine({ context, onBack }: Props) {
 
   // Filter sections applicable to this context and permitted to this user
   const availableSections = useMemo(
-    () => SECTION_MANIFEST.filter((s) => {
-      if (!s.applicableTo.includes(ctxType)) return false;
-      if (s.requiresPermission && !hasPermission(currentUser, s.requiresPermission)) return false;
-      return true;
-    }),
+    () =>
+      SECTION_MANIFEST.filter((s) => {
+        if (!s.applicableTo.includes(ctxType)) return false;
+        if (
+          s.requiresPermission &&
+          !hasPermission(currentUser, s.requiresPermission)
+        )
+          return false;
+        return true;
+      }),
     [ctxType, currentUser],
   );
 
@@ -287,62 +292,124 @@ export function ExportEngine({ context, onBack }: Props) {
 
   function gatherData() {
     const {
-      projects, customers, quotations, masterPOs, designFiles,
-      bomItems, inventoryItems, materialPurchases, materialUsages,
-      projectProductions, outsourcedWorks, qualityInspections,
-      deliveryChallans, invoices, payments, internalCostings,
-      machineUsageLogs, machines, settings,
+      projects,
+      customers,
+      quotations,
+      masterPOs,
+      designFiles,
+      bomItems,
+      inventoryItems,
+      materialPurchases,
+      materialUsages,
+      projectProductions,
+      outsourcedWorks,
+      qualityInspections,
+      deliveryChallans,
+      invoices,
+      payments,
+      internalCostings,
+      machineUsageLogs,
+      machines,
+      settings,
     } = store;
 
     if (ctxType === "project") {
       const project = projects.find((p) => p.id === ctxId);
-      const customer = project ? customers.find((c) => c.id === project.customerId) : null;
-      const projectQuotations = quotations.filter((q) => q.projectId === ctxId || (project && q.customerId === project.customerId));
-      const projectPOs = masterPOs.filter((po) => (project?.pos || []).some((pp) => pp.sharedPoId === po.sharedPoId));
-      const projectDesignFiles = designFiles.filter((f) => f.projectId === ctxId);
+      const customer = project
+        ? customers.find((c) => c.id === project.customerId)
+        : null;
+      const projectQuotations = quotations.filter(
+        (q) =>
+          q.projectId === ctxId ||
+          (project && q.customerId === project.customerId),
+      );
+      const projectPOs = masterPOs.filter((po) =>
+        (project?.pos || []).some((pp) => pp.sharedPoId === po.sharedPoId),
+      );
+      const projectDesignFiles = designFiles.filter(
+        (f) => f.projectId === ctxId,
+      );
       const projectBOM = bomItems.filter((b) => b.projectId === ctxId);
-      const projectMatPurchases = materialPurchases.filter((m) => m.projectId === ctxId);
-      const projectMatUsages = materialUsages.filter((m) => m.projectId === ctxId);
-      const projectProduction = projectProductions.find((pp) => pp.projectId === ctxId);
-      const projectOutsourced = outsourcedWorks.filter((o) => o.projectId === ctxId);
+      const projectMatPurchases = materialPurchases.filter(
+        (m) => m.projectId === ctxId,
+      );
+      const projectMatUsages = materialUsages.filter(
+        (m) => m.projectId === ctxId,
+      );
+      const projectProduction = projectProductions.find(
+        (pp) => pp.projectId === ctxId,
+      );
+      const projectOutsourced = outsourcedWorks.filter(
+        (o) => o.projectId === ctxId,
+      );
       const projectQC = qualityInspections.filter((q) => q.projectId === ctxId);
-      const projectChallans = deliveryChallans.filter((dc) =>
-        dc.projectId === ctxId || (dc.projectEntries || []).some((pe) => pe.projectId === ctxId)
+      const projectChallans = deliveryChallans.filter(
+        (dc) =>
+          dc.projectId === ctxId ||
+          (dc.projectEntries || []).some((pe) => pe.projectId === ctxId),
       );
       const projectInvoices = invoices.filter((i) => i.projectId === ctxId);
-      const projectPayments = payments.filter((p) => projectInvoices.some((i) => i.id === p.invoiceId));
-      const projectCosting = internalCostings.find((ic) => ic.projectId === ctxId);
-      const projectMachineUsage = machineUsageLogs.filter((l) => l.projectId === ctxId);
+      const projectPayments = payments.filter((p) =>
+        projectInvoices.some((i) => i.id === p.invoiceId),
+      );
+      const projectCosting = internalCostings.find(
+        (ic) => ic.projectId === ctxId,
+      );
+      const projectMachineUsage = machineUsageLogs.filter(
+        (l) => l.projectId === ctxId,
+      );
 
       return {
-        project, customer, quotations: projectQuotations, masterPOs: projectPOs,
-        designFiles: projectDesignFiles, bomItems: projectBOM, inventoryItems,
-        materialPurchases: projectMatPurchases, materialUsages: projectMatUsages,
-        production: projectProduction, outsourcedWorks: projectOutsourced,
-        qualityInspections: projectQC, deliveryChallans: projectChallans,
-        invoices: projectInvoices, payments: projectPayments,
-        internalCosting: projectCosting, machineUsageLogs: projectMachineUsage,
-        machines, settings,
+        project,
+        customer,
+        quotations: projectQuotations,
+        masterPOs: projectPOs,
+        designFiles: projectDesignFiles,
+        bomItems: projectBOM,
+        inventoryItems,
+        materialPurchases: projectMatPurchases,
+        materialUsages: projectMatUsages,
+        production: projectProduction,
+        outsourcedWorks: projectOutsourced,
+        qualityInspections: projectQC,
+        deliveryChallans: projectChallans,
+        invoices: projectInvoices,
+        payments: projectPayments,
+        internalCosting: projectCosting,
+        machineUsageLogs: projectMachineUsage,
+        machines,
+        settings,
       };
     } else {
       // Customer context
       const customer = customers.find((c) => c.id === ctxId);
       const customerProjects = projects.filter((p) => p.customerId === ctxId);
       const projectIds = customerProjects.map((p) => p.id);
-      const customerQuotations = quotations.filter((q) => q.customerId === ctxId);
-      const customerChallans = deliveryChallans.filter((dc) =>
-        dc.customerId === ctxId || projectIds.some((id) =>
-          dc.projectId === id || (dc.projectEntries || []).some((pe) => pe.projectId === id)
-        )
+      const customerQuotations = quotations.filter(
+        (q) => q.customerId === ctxId,
+      );
+      const customerChallans = deliveryChallans.filter(
+        (dc) =>
+          dc.customerId === ctxId ||
+          projectIds.some(
+            (id) =>
+              dc.projectId === id ||
+              (dc.projectEntries || []).some((pe) => pe.projectId === id),
+          ),
       );
       const customerInvoices = invoices.filter((i) => i.customerId === ctxId);
-      const customerPayments = payments.filter((p) => customerInvoices.some((i) => i.id === p.invoiceId));
+      const customerPayments = payments.filter((p) =>
+        customerInvoices.some((i) => i.id === p.invoiceId),
+      );
 
       return {
-        customer, projects: customerProjects,
-        quotations: customerQuotations, masterPOs: [],
+        customer,
+        projects: customerProjects,
+        quotations: customerQuotations,
+        masterPOs: [],
         deliveryChallans: customerChallans,
-        invoices: customerInvoices, payments: customerPayments,
+        invoices: customerInvoices,
+        payments: customerPayments,
         settings,
       };
     }
@@ -363,12 +430,14 @@ export function ExportEngine({ context, onBack }: Props) {
   function buildCoverSection(data: ReturnType<typeof gatherData>): string {
     const { settings } = data;
     const proj = (data as any).project;
-    const title = ctxType === "project"
-      ? `Project Dossier — ${proj ? getCustomerVisibleName(proj) : ctxName}`
-      : `Customer History Pack — ${ctxName}`;
-    const subtitle = ctxType === "project"
-      ? `${(data as any).project?.projectNo || ""} · ${(data as any).customer?.name || ""}`
-      : `Customer: ${(data as any).customer?.name || ctxName}`;
+    const title =
+      ctxType === "project"
+        ? `Project Dossier — ${proj ? getCustomerVisibleName(proj) : ctxName}`
+        : `Customer History Pack — ${ctxName}`;
+    const subtitle =
+      ctxType === "project"
+        ? `${(data as any).project?.projectNo || ""} · ${(data as any).customer?.name || ""}`
+        : `Customer: ${(data as any).customer?.name || ctxName}`;
 
     return `
       <div class="section cover">
@@ -382,7 +451,9 @@ export function ExportEngine({ context, onBack }: Props) {
           <p>Generated: ${new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric" })}</p>
           <p>Sections: ${selectedSections.size}</p>
         </div>
-        ${ctxType === "project" ? `
+        ${
+          ctxType === "project"
+            ? `
           <div style="margin-top:24px" class="grid-2">
             <div>
               <h3>Project</h3>
@@ -399,7 +470,8 @@ export function ExportEngine({ context, onBack }: Props) {
               <div class="kv-row"><span class="kv-label">GSTIN</span><span class="kv-value">${(data as any).customer?.gstin || "—"}</span></div>
             </div>
           </div>
-        ` : `
+        `
+            : `
           <div style="margin-top:24px">
             <h3>Customer Details</h3>
             <div class="kv-row"><span class="kv-label">Company</span><span class="kv-value">${(data as any).customer?.name || "—"}</span></div>
@@ -408,13 +480,16 @@ export function ExportEngine({ context, onBack }: Props) {
             <div class="kv-row"><span class="kv-label">GSTIN</span><span class="kv-value">${(data as any).customer?.gstin || "—"}</span></div>
             <div class="kv-row"><span class="kv-label">Projects</span><span class="kv-value">${(data as any).projects?.length || 0}</span></div>
           </div>
-        `}
+        `
+        }
       </div>`;
   }
 
   function buildQuotationsSection(data: ReturnType<typeof gatherData>): string {
     const quots = (data as any).quotations || [];
-    const rows = quots.map((q: any) => `
+    const rows = quots
+      .map(
+        (q: any) => `
       <tr>
         <td>${q.qtNo}</td>
         <td>${fmtDate(q.quotationDate || q.createdAt)}</td>
@@ -422,29 +497,40 @@ export function ExportEngine({ context, onBack }: Props) {
         <td>${q.lineItems?.length || 0} items</td>
         <td>${fmtCurrency(q.totalAmount)}</td>
         <td><span class="badge ${q.status === "Accepted" ? "badge-green" : q.status === "Draft" ? "badge-blue" : "badge-orange"}">${q.status}</span></td>
-      </tr>`).join("");
+      </tr>`,
+      )
+      .join("");
     return `
       <div class="section">
         <div class="section-header"><h2>Quotations</h2></div>
-        ${quots.length === 0 ? '<p class="no-data">No quotations found.</p>' : `
+        ${
+          quots.length === 0
+            ? '<p class="no-data">No quotations found.</p>'
+            : `
           <table><thead><tr><th>QT No.</th><th>Date</th><th>Valid Until</th><th>Items</th><th>Total</th><th>Status</th></tr></thead>
           <tbody>${rows}</tbody></table>
-        `}
+        `
+        }
       </div>`;
   }
 
   function buildProductionSection(data: ReturnType<typeof gatherData>): string {
     const production = (data as any).production;
-    if (!production) return `<div class="section"><div class="section-header"><h2>Production History</h2></div><p class="no-data">No production data.</p></div>`;
+    if (!production)
+      return `<div class="section"><div class="section-header"><h2>Production History</h2></div><p class="no-data">No production data.</p></div>`;
     const stages = production.stages || [];
-    const rows = stages.map((s: any) => `
+    const rows = stages
+      .map(
+        (s: any) => `
       <tr>
         <td>${s.stageName}</td>
         <td><span class="badge ${s.status === "Completed" ? "badge-green" : s.status === "InProgress" ? "badge-blue" : "badge-orange"}">${s.status}</span></td>
         <td>${s.quantitySent || 0}</td>
         <td>${s.receivedQuantity || s.receivedQty || 0}</td>
         <td>${s.notes || "—"}</td>
-      </tr>`).join("");
+      </tr>`,
+      )
+      .join("");
     return `
       <div class="section">
         <div class="section-header"><h2>Production History</h2></div>
@@ -455,47 +541,65 @@ export function ExportEngine({ context, onBack }: Props) {
 
   function buildQCSection(data: ReturnType<typeof gatherData>): string {
     const qcs = (data as any).qualityInspections || [];
-    const rows = qcs.map((q: any) => `
+    const rows = qcs
+      .map(
+        (q: any) => `
       <tr>
         <td>${q.stage}</td>
         <td><span class="badge ${q.qcStatus === "Pass" ? "badge-green" : q.qcStatus === "Fail" ? "badge-red" : "badge-orange"}">${q.qcStatus}</span></td>
         <td>${q.approvedQty ?? "—"}</td>
         <td>${q.rejectedQty ?? "—"}</td>
         <td>${q.remarks || q.qcNotes || "—"}</td>
-      </tr>`).join("");
+      </tr>`,
+      )
+      .join("");
     return `
       <div class="section">
         <div class="section-header"><h2>Quality Inspection</h2></div>
-        ${qcs.length === 0 ? '<p class="no-data">No QC records found.</p>' : `
+        ${
+          qcs.length === 0
+            ? '<p class="no-data">No QC records found.</p>'
+            : `
           <table><thead><tr><th>Stage</th><th>Status</th><th>Approved Qty</th><th>Rejected Qty</th><th>Remarks</th></tr></thead>
           <tbody>${rows}</tbody></table>
-        `}
+        `
+        }
       </div>`;
   }
 
   function buildChallansSection(data: ReturnType<typeof gatherData>): string {
     const challans = (data as any).deliveryChallans || [];
-    const rows = challans.map((dc: any) => `
+    const rows = challans
+      .map(
+        (dc: any) => `
       <tr>
         <td>${dc.dcNo}</td>
         <td>${fmtDate(dc.dispatchDate)}</td>
         <td>${dc.vehicleNo || "—"}</td>
         <td>${dc.receiverName || "—"}</td>
         <td><span class="badge ${dc.status === "Delivered" ? "badge-green" : "badge-blue"}">${dc.status}</span></td>
-      </tr>`).join("");
+      </tr>`,
+      )
+      .join("");
     return `
       <div class="section">
         <div class="section-header"><h2>Delivery Challans</h2></div>
-        ${challans.length === 0 ? '<p class="no-data">No delivery challans found.</p>' : `
+        ${
+          challans.length === 0
+            ? '<p class="no-data">No delivery challans found.</p>'
+            : `
           <table><thead><tr><th>DC No.</th><th>Dispatch Date</th><th>Vehicle</th><th>Receiver</th><th>Status</th></tr></thead>
           <tbody>${rows}</tbody></table>
-        `}
+        `
+        }
       </div>`;
   }
 
   function buildInvoicesSection(data: ReturnType<typeof gatherData>): string {
     const invs = (data as any).invoices || [];
-    const rows = invs.map((inv: any) => `
+    const rows = invs
+      .map(
+        (inv: any) => `
       <tr>
         <td>${inv.invNo}</td>
         <td>${fmtDate(inv.invoiceDate)}</td>
@@ -504,25 +608,41 @@ export function ExportEngine({ context, onBack }: Props) {
         <td>${fmtCurrency(inv.paidAmount)}</td>
         <td>${fmtCurrency(inv.totalAmount - (inv.paidAmount || 0))}</td>
         <td><span class="badge ${inv.status === "Paid" ? "badge-green" : inv.status === "PartiallyPaid" ? "badge-orange" : "badge-red"}">${inv.status}</span></td>
-      </tr>`).join("");
-    const totalAmt = invs.reduce((s: number, i: any) => s + (i.totalAmount || 0), 0);
-    const totalPaid = invs.reduce((s: number, i: any) => s + (i.paidAmount || 0), 0);
+      </tr>`,
+      )
+      .join("");
+    const totalAmt = invs.reduce(
+      (s: number, i: any) => s + (i.totalAmount || 0),
+      0,
+    );
+    const totalPaid = invs.reduce(
+      (s: number, i: any) => s + (i.paidAmount || 0),
+      0,
+    );
     return `
       <div class="section">
         <div class="section-header"><h2>Tax Invoices</h2></div>
-        ${invs.length === 0 ? '<p class="no-data">No invoices found.</p>' : `
+        ${
+          invs.length === 0
+            ? '<p class="no-data">No invoices found.</p>'
+            : `
           <table><thead><tr><th>Invoice No.</th><th>Invoice Date</th><th>Due Date</th><th>Total</th><th>Paid</th><th>Balance</th><th>Status</th></tr></thead>
           <tbody>${rows}
             <tr class="total-row"><td colspan="3">TOTAL</td><td>${fmtCurrency(totalAmt)}</td><td>${fmtCurrency(totalPaid)}</td><td>${fmtCurrency(totalAmt - totalPaid)}</td><td></td></tr>
           </tbody></table>
-        `}
+        `
+        }
       </div>`;
   }
 
   function buildPaymentsSection(data: ReturnType<typeof gatherData>): string {
     const pmts = (data as any).payments || [];
-    const invMap = Object.fromEntries(((data as any).invoices || []).map((i: any) => [i.id, i.invNo]));
-    const rows = pmts.map((p: any) => `
+    const invMap = Object.fromEntries(
+      ((data as any).invoices || []).map((i: any) => [i.id, i.invNo]),
+    );
+    const rows = pmts
+      .map(
+        (p: any) => `
       <tr>
         <td>${fmtDate(p.paymentDate)}</td>
         <td>${invMap[p.invoiceId] || "—"}</td>
@@ -530,108 +650,152 @@ export function ExportEngine({ context, onBack }: Props) {
         <td>${p.mode}</td>
         <td>${p.referenceNo || "—"}</td>
         <td>${p.notes || "—"}</td>
-      </tr>`).join("");
+      </tr>`,
+      )
+      .join("");
     const total = pmts.reduce((s: number, p: any) => s + (p.amount || 0), 0);
     return `
       <div class="section">
         <div class="section-header"><h2>Payment History</h2></div>
-        ${pmts.length === 0 ? '<p class="no-data">No payments found.</p>' : `
+        ${
+          pmts.length === 0
+            ? '<p class="no-data">No payments found.</p>'
+            : `
           <table><thead><tr><th>Date</th><th>Invoice</th><th>Amount</th><th>Mode</th><th>Reference</th><th>Notes</th></tr></thead>
           <tbody>${rows}
             <tr class="total-row"><td colspan="2">TOTAL RECEIVED</td><td>${fmtCurrency(total)}</td><td colspan="3"></td></tr>
           </tbody></table>
-        `}
+        `
+        }
       </div>`;
   }
 
   function buildBOMSection(data: ReturnType<typeof gatherData>): string {
     const bom = (data as any).bomItems || [];
     const inv = (data as any).inventoryItems || [];
-    const rows = bom.map((b: any) => {
-      const item = inv.find((i: any) => i.id === b.inventoryItemId);
-      const avail = item?.quantityAvailable || 0;
-      const short = Math.max(0, b.requiredQuantity - avail);
-      return `<tr>
+    const rows = bom
+      .map((b: any) => {
+        const item = inv.find((i: any) => i.id === b.inventoryItemId);
+        const avail = item?.quantityAvailable || 0;
+        const short = Math.max(0, b.requiredQuantity - avail);
+        return `<tr>
         <td>${b.materialName}</td>
         <td>${b.requiredQuantity}</td>
         <td>${avail}</td>
         <td>${short > 0 ? `<span class="badge badge-red">Short ${short}</span>` : '<span class="badge badge-green">OK</span>'}</td>
         <td>${b.estimatedPrice ? fmtCurrency(b.estimatedPrice) : "—"}</td>
       </tr>`;
-    }).join("");
+      })
+      .join("");
     return `
       <div class="section">
         <div class="section-header"><h2>Bill of Materials</h2></div>
-        ${bom.length === 0 ? '<p class="no-data">No BOM items defined.</p>' : `
+        ${
+          bom.length === 0
+            ? '<p class="no-data">No BOM items defined.</p>'
+            : `
           <table><thead><tr><th>Material</th><th>Required Qty</th><th>Available</th><th>Status</th><th>Est. Price</th></tr></thead>
           <tbody>${rows}</tbody></table>
-        `}
+        `
+        }
       </div>`;
   }
 
-  function buildDesignFilesSection(data: ReturnType<typeof gatherData>): string {
+  function buildDesignFilesSection(
+    data: ReturnType<typeof gatherData>,
+  ): string {
     const files = (data as any).designFiles || [];
-    const rows = files.map((f: any, i: number) => `
+    const rows = files
+      .map(
+        (f: any, i: number) => `
       <tr>
         <td>${i + 1}</td>
         <td>${f.fileName}</td>
         <td>${f.fileType}</td>
         <td>${fmtDate(f.uploadedAt)}</td>
         <td>${f.fileName.match(/\.(dwg|dxf|step|igs|sldprt|sldasm)$/i) ? '<span class="badge badge-orange">CAD — Not Printable</span>' : '<span class="badge badge-green">Embedded</span>'}</td>
-      </tr>`).join("");
+      </tr>`,
+      )
+      .join("");
     return `
       <div class="section">
         <div class="section-header"><h2>Design Files Index</h2></div>
         <p style="color:#6b7280;font-size:10px;margin-bottom:8px">Note: CAD files (.dwg, .dxf, .step) are listed here but cannot be embedded in the PDF. Download the project archive for original files.</p>
-        ${files.length === 0 ? '<p class="no-data">No design files uploaded.</p>' : `
+        ${
+          files.length === 0
+            ? '<p class="no-data">No design files uploaded.</p>'
+            : `
           <table><thead><tr><th>#</th><th>File Name</th><th>Type</th><th>Uploaded</th><th>Status</th></tr></thead>
           <tbody>${rows}</tbody></table>
-        `}
+        `
+        }
       </div>`;
   }
 
-  function buildMaterialPurchasesSection(data: ReturnType<typeof gatherData>): string {
+  function buildMaterialPurchasesSection(
+    data: ReturnType<typeof gatherData>,
+  ): string {
     const purchases = (data as any).materialPurchases || [];
-    const rows = purchases.map((m: any) => `
+    const rows = purchases
+      .map(
+        (m: any) => `
       <tr>
         <td>${m.materialType}</td>
         <td>${m.thickness || "—"}</td>
         <td>${m.quantity} ${m.unit || ""}</td>
         <td>${m.supplierName}</td>
         <td>${fmtDate(m.purchaseDate)}</td>
-      </tr>`).join("");
+      </tr>`,
+      )
+      .join("");
     return `
       <div class="section">
         <div class="section-header"><h2>Material Purchases</h2></div>
-        ${purchases.length === 0 ? '<p class="no-data">No material purchases recorded.</p>' : `
+        ${
+          purchases.length === 0
+            ? '<p class="no-data">No material purchases recorded.</p>'
+            : `
           <table><thead><tr><th>Material</th><th>Thickness</th><th>Qty</th><th>Supplier</th><th>Date</th></tr></thead>
           <tbody>${rows}</tbody></table>
-        `}
+        `
+        }
       </div>`;
   }
 
-  function buildMaterialUsageSection(data: ReturnType<typeof gatherData>): string {
+  function buildMaterialUsageSection(
+    data: ReturnType<typeof gatherData>,
+  ): string {
     const usages = (data as any).materialUsages || [];
-    const rows = usages.map((u: any) => `
+    const rows = usages
+      .map(
+        (u: any) => `
       <tr>
         <td>${u.materialName}</td>
         <td>${u.quantityUsed}</td>
         <td>${fmtDate(u.usedDate)}</td>
         <td>${u.notes || "—"}</td>
-      </tr>`).join("");
+      </tr>`,
+      )
+      .join("");
     return `
       <div class="section">
         <div class="section-header"><h2>Material Usage</h2></div>
-        ${usages.length === 0 ? '<p class="no-data">No material usage recorded.</p>' : `
+        ${
+          usages.length === 0
+            ? '<p class="no-data">No material usage recorded.</p>'
+            : `
           <table><thead><tr><th>Material</th><th>Qty Used</th><th>Date</th><th>Notes</th></tr></thead>
           <tbody>${rows}</tbody></table>
-        `}
+        `
+        }
       </div>`;
   }
 
   function buildOutsourcedSection(data: ReturnType<typeof gatherData>): string {
     const works = (data as any).outsourcedWorks || [];
-    const rows = works.map((o: any) => `
+    const rows = works
+      .map(
+        (o: any) => `
       <tr>
         <td>${o.vendorName}</td>
         <td>${o.materialSent}</td>
@@ -639,20 +803,27 @@ export function ExportEngine({ context, onBack }: Props) {
         <td>${fmtDate(o.dateSent)}</td>
         <td>${fmtDate(o.dateReceived)}</td>
         <td>${fmtCurrency(o.processCost)}</td>
-      </tr>`).join("");
+      </tr>`,
+      )
+      .join("");
     return `
       <div class="section">
         <div class="section-header"><h2>Outsourced Work</h2></div>
-        ${works.length === 0 ? '<p class="no-data">No outsourced work recorded.</p>' : `
+        ${
+          works.length === 0
+            ? '<p class="no-data">No outsourced work recorded.</p>'
+            : `
           <table><thead><tr><th>Vendor</th><th>Material</th><th>Qty Sent</th><th>Date Sent</th><th>Date Received</th><th>Cost</th></tr></thead>
           <tbody>${rows}</tbody></table>
-        `}
+        `
+        }
       </div>`;
   }
 
   function buildCostingSection(data: ReturnType<typeof gatherData>): string {
     const ic = (data as any).internalCosting;
-    if (!ic) return `<div class="section"><div class="section-header"><h2>Internal Costing</h2></div><p class="no-data">No costing data.</p></div>`;
+    if (!ic)
+      return `<div class="section"><div class="section-header"><h2>Internal Costing</h2></div><p class="no-data">No costing data.</p></div>`;
     const fixedRows = [
       ["Raw Material", ic.rawMaterialCost],
       ["CNC / Processing", ic.cncCost],
@@ -667,12 +838,51 @@ export function ExportEngine({ context, onBack }: Props) {
       ["Electricity", ic.electricityCost],
       ["Scrap / Material Loss", ic.scrapLossCost],
       ["Transport", ic.transportCost],
-    ].filter(([, v]) => v).map(([l, v]) => `<tr><td>${l}</td><td style="text-align:right">${fmtCurrency(v as number)}</td></tr>`).join("");
-    const extraRows = (ic.extraCosts || []).map((e: any) => `<tr><td>${e.name} <span style="color:#6b7280;font-size:10px">(${e.category})</span></td><td style="text-align:right">${fmtCurrency(e.amount)}</td></tr>`).join("");
-    const adjustmentRows = (ic.manualAdjustments || []).map((a: any) => `<tr><td>${a.name} <span style="color:${a.type === "Reduce Cost" ? "#dc2626" : "#16a34a"};font-size:10px">(${a.type})</span></td><td style="text-align:right;color:${a.type === "Reduce Cost" ? "#dc2626" : "#16a34a"}">${a.type === "Reduce Cost" ? "−" : "+"}${fmtCurrency(a.amount)}</td></tr>`).join("");
-    const baseTotal = [ic.rawMaterialCost, ic.cncCost, ic.hardwareCost, ic.powderCoatingCost, ic.assemblyCost, ic.packingCost, ic.labourCost, ic.machineCost, ic.outsourceCost, ic.consumablesCost, ic.electricityCost, ic.scrapLossCost, ic.transportCost].filter(Boolean).reduce((s: number, v: any) => s + v, 0);
-    const extraTotal = (ic.extraCosts || []).reduce((s: number, e: any) => s + (e.amount || 0), 0);
-    const adjTotal = (ic.manualAdjustments || []).reduce((s: number, a: any) => s + (a.type === "Reduce Cost" ? -(a.amount || 0) : (a.amount || 0)), 0);
+    ]
+      .filter(([, v]) => v)
+      .map(
+        ([l, v]) =>
+          `<tr><td>${l}</td><td style="text-align:right">${fmtCurrency(v as number)}</td></tr>`,
+      )
+      .join("");
+    const extraRows = (ic.extraCosts || [])
+      .map(
+        (e: any) =>
+          `<tr><td>${e.name} <span style="color:#6b7280;font-size:10px">(${e.category})</span></td><td style="text-align:right">${fmtCurrency(e.amount)}</td></tr>`,
+      )
+      .join("");
+    const adjustmentRows = (ic.manualAdjustments || [])
+      .map(
+        (a: any) =>
+          `<tr><td>${a.name} <span style="color:${a.type === "Reduce Cost" ? "#dc2626" : "#16a34a"};font-size:10px">(${a.type})</span></td><td style="text-align:right;color:${a.type === "Reduce Cost" ? "#dc2626" : "#16a34a"}">${a.type === "Reduce Cost" ? "−" : "+"}${fmtCurrency(a.amount)}</td></tr>`,
+      )
+      .join("");
+    const baseTotal = [
+      ic.rawMaterialCost,
+      ic.cncCost,
+      ic.hardwareCost,
+      ic.powderCoatingCost,
+      ic.assemblyCost,
+      ic.packingCost,
+      ic.labourCost,
+      ic.machineCost,
+      ic.outsourceCost,
+      ic.consumablesCost,
+      ic.electricityCost,
+      ic.scrapLossCost,
+      ic.transportCost,
+    ]
+      .filter(Boolean)
+      .reduce((s: number, v: any) => s + v, 0);
+    const extraTotal = (ic.extraCosts || []).reduce(
+      (s: number, e: any) => s + (e.amount || 0),
+      0,
+    );
+    const adjTotal = (ic.manualAdjustments || []).reduce(
+      (s: number, a: any) =>
+        s + (a.type === "Reduce Cost" ? -(a.amount || 0) : a.amount || 0),
+      0,
+    );
     const total = baseTotal + extraTotal + adjTotal;
     return `
       <div class="section">
@@ -686,15 +896,45 @@ export function ExportEngine({ context, onBack }: Props) {
     const ic = (data as any).internalCosting;
     const invs = (data as any).invoices || [];
     const pmts = (data as any).payments || [];
-    const totalInvoiced = invs.reduce((s: number, i: any) => s + (i.totalAmount || 0), 0);
-    const totalReceived = pmts.reduce((s: number, p: any) => s + (p.amount || 0), 0);
-    const totalCost = ic ? (
-      [ic.rawMaterialCost, ic.cncCost, ic.hardwareCost, ic.powderCoatingCost, ic.assemblyCost, ic.packingCost, ic.labourCost, ic.machineCost, ic.outsourceCost, ic.consumablesCost, ic.electricityCost, ic.scrapLossCost, ic.transportCost].filter(Boolean).reduce((s: number, v: any) => s + v, 0) +
-      (ic.extraCosts || []).reduce((s: number, e: any) => s + (e.amount || 0), 0) +
-      (ic.manualAdjustments || []).reduce((s: number, a: any) => s + (a.type === "Reduce Cost" ? -(a.amount || 0) : (a.amount || 0)), 0)
-    ) : 0;
+    const totalInvoiced = invs.reduce(
+      (s: number, i: any) => s + (i.totalAmount || 0),
+      0,
+    );
+    const totalReceived = pmts.reduce(
+      (s: number, p: any) => s + (p.amount || 0),
+      0,
+    );
+    const totalCost = ic
+      ? [
+          ic.rawMaterialCost,
+          ic.cncCost,
+          ic.hardwareCost,
+          ic.powderCoatingCost,
+          ic.assemblyCost,
+          ic.packingCost,
+          ic.labourCost,
+          ic.machineCost,
+          ic.outsourceCost,
+          ic.consumablesCost,
+          ic.electricityCost,
+          ic.scrapLossCost,
+          ic.transportCost,
+        ]
+          .filter(Boolean)
+          .reduce((s: number, v: any) => s + v, 0) +
+        (ic.extraCosts || []).reduce(
+          (s: number, e: any) => s + (e.amount || 0),
+          0,
+        ) +
+        (ic.manualAdjustments || []).reduce(
+          (s: number, a: any) =>
+            s + (a.type === "Reduce Cost" ? -(a.amount || 0) : a.amount || 0),
+          0,
+        )
+      : 0;
     const profit = totalInvoiced - totalCost;
-    const margin = totalInvoiced > 0 ? ((profit / totalInvoiced) * 100).toFixed(1) : "0";
+    const margin =
+      totalInvoiced > 0 ? ((profit / totalInvoiced) * 100).toFixed(1) : "0";
     return `
       <div class="section">
         <div class="section-header"><h2>Profit & Costing Summary</h2></div>
@@ -711,13 +951,20 @@ export function ExportEngine({ context, onBack }: Props) {
       </div>`;
   }
 
-  function buildMachineUsageSection(data: ReturnType<typeof gatherData>): string {
+  function buildMachineUsageSection(
+    data: ReturnType<typeof gatherData>,
+  ): string {
     const logs = (data as any).machineUsageLogs || [];
-    const machineMap = Object.fromEntries(((data as any).machines || []).map((m: any) => [m.id, m]));
-    const rows = logs.map((l: any) => {
-      const machine = machineMap[l.machineId];
-      const cost = machine?.hourlyRate ? l.hoursUsed * machine.hourlyRate : undefined;
-      return `<tr>
+    const machineMap = Object.fromEntries(
+      ((data as any).machines || []).map((m: any) => [m.id, m]),
+    );
+    const rows = logs
+      .map((l: any) => {
+        const machine = machineMap[l.machineId];
+        const cost = machine?.hourlyRate
+          ? l.hoursUsed * machine.hourlyRate
+          : undefined;
+        return `<tr>
         <td>${l.logDate}</td>
         <td>${machine?.name || l.machineId}</td>
         <td>${machine?.type || "—"}</td>
@@ -725,44 +972,79 @@ export function ExportEngine({ context, onBack }: Props) {
         <td>${l.operatorName || "—"}</td>
         <td>${cost !== undefined ? fmtCurrency(cost) : "—"}</td>
       </tr>`;
-    }).join("");
+      })
+      .join("");
     const totalHours = logs.reduce((s: number, l: any) => s + l.hoursUsed, 0);
     return `
       <div class="section">
         <div class="section-header"><h2>Machine Usage Log</h2></div>
-        ${logs.length === 0 ? '<p class="no-data">No machine usage logged for this project.</p>' : `
+        ${
+          logs.length === 0
+            ? '<p class="no-data">No machine usage logged for this project.</p>'
+            : `
           <table><thead><tr><th>Date</th><th>Machine</th><th>Type</th><th>Hours</th><th>Operator</th><th>Allocated Cost</th></tr></thead>
           <tbody>${rows}
             <tr class="total-row"><td colspan="3">TOTAL HOURS</td><td>${totalHours} hrs</td><td colspan="2"></td></tr>
           </tbody></table>
-        `}
+        `
+        }
       </div>`;
   }
 
   function buildAttachmentsIndex(data: ReturnType<typeof gatherData>): string {
     const files: { name: string; section: string; type: string }[] = [];
     if (ctxType === "project") {
-      ((data as any).designFiles || []).forEach((f: any) => files.push({ name: f.fileName, section: "Design Files", type: f.fileType }));
-      ((data as any).materialPurchases || []).forEach((m: any) => (m.attachments || []).forEach((a: any) => files.push({ name: a.name, section: "Material Purchases", type: a.type })));
+      ((data as any).designFiles || []).forEach((f: any) =>
+        files.push({
+          name: f.fileName,
+          section: "Design Files",
+          type: f.fileType,
+        }),
+      );
+      ((data as any).materialPurchases || []).forEach((m: any) =>
+        (m.attachments || []).forEach((a: any) =>
+          files.push({
+            name: a.name,
+            section: "Material Purchases",
+            type: a.type,
+          }),
+        ),
+      );
     }
-    ((data as any).masterPOs || []).forEach((po: any) => (po.files || []).forEach((f: any) => files.push({ name: f.name, section: "Purchase Orders", type: f.type })));
-    ((data as any).payments || []).forEach((p: any) => (p.files || []).forEach((f: any) => files.push({ name: f.name, section: "Payments", type: f.type })));
+    ((data as any).masterPOs || []).forEach((po: any) =>
+      (po.files || []).forEach((f: any) =>
+        files.push({ name: f.name, section: "Purchase Orders", type: f.type }),
+      ),
+    );
+    ((data as any).payments || []).forEach((p: any) =>
+      (p.files || []).forEach((f: any) =>
+        files.push({ name: f.name, section: "Payments", type: f.type }),
+      ),
+    );
 
-    const rows = files.map((f, i) => `
+    const rows = files
+      .map(
+        (f, i) => `
       <tr>
         <td>${i + 1}</td>
         <td>${f.name}</td>
         <td>${f.section}</td>
         <td>${f.type}</td>
-      </tr>`).join("");
+      </tr>`,
+      )
+      .join("");
     return `
       <div class="section">
         <div class="section-header"><h2>Appendix: Attachments Index</h2></div>
         <p style="color:#6b7280;font-size:10px;margin-bottom:8px">This index lists all uploaded files. Use the ZIP export to download original files.</p>
-        ${files.length === 0 ? '<p class="no-data">No attachments found.</p>' : `
+        ${
+          files.length === 0
+            ? '<p class="no-data">No attachments found.</p>'
+            : `
           <table><thead><tr><th>#</th><th>File Name</th><th>Section</th><th>Type</th></tr></thead>
           <tbody>${rows}</tbody></table>
-        `}
+        `
+        }
       </div>`;
   }
 
@@ -773,32 +1055,78 @@ export function ExportEngine({ context, onBack }: Props) {
     const sections: string[] = [];
 
     const ordered: ExportSectionId[] = [
-      "cover_page", "quotations", "purchase_orders", "bom", "design_files",
-      "material_purchases", "material_usage", "production_history", "outsourced_work",
-      "qc_reports", "delivery_challans", "invoices", "payment_history",
-      "internal_costing", "profit_summary", "machine_usage", "attachments_index",
+      "cover_page",
+      "quotations",
+      "purchase_orders",
+      "bom",
+      "design_files",
+      "material_purchases",
+      "material_usage",
+      "production_history",
+      "outsourced_work",
+      "qc_reports",
+      "delivery_challans",
+      "invoices",
+      "payment_history",
+      "internal_costing",
+      "profit_summary",
+      "machine_usage",
+      "attachments_index",
     ];
 
     for (const id of ordered) {
       if (!selectedSections.has(id)) continue;
       switch (id) {
-        case "cover_page": sections.push(buildCoverSection(data)); break;
-        case "quotations": sections.push(buildQuotationsSection(data)); break;
-        case "bom": sections.push(buildBOMSection(data)); break;
-        case "design_files": sections.push(buildDesignFilesSection(data)); break;
-        case "material_purchases": sections.push(buildMaterialPurchasesSection(data)); break;
-        case "material_usage": sections.push(buildMaterialUsageSection(data)); break;
-        case "production_history": sections.push(buildProductionSection(data)); break;
-        case "outsourced_work": sections.push(buildOutsourcedSection(data)); break;
-        case "qc_reports": sections.push(buildQCSection(data)); break;
-        case "delivery_challans": sections.push(buildChallansSection(data)); break;
-        case "invoices": sections.push(buildInvoicesSection(data)); break;
-        case "payment_history": sections.push(buildPaymentsSection(data)); break;
-        case "internal_costing": sections.push(buildCostingSection(data)); break;
-        case "profit_summary": sections.push(buildProfitSection(data)); break;
-        case "machine_usage": sections.push(buildMachineUsageSection(data)); break;
-        case "attachments_index": sections.push(buildAttachmentsIndex(data)); break;
-        default: break;
+        case "cover_page":
+          sections.push(buildCoverSection(data));
+          break;
+        case "quotations":
+          sections.push(buildQuotationsSection(data));
+          break;
+        case "bom":
+          sections.push(buildBOMSection(data));
+          break;
+        case "design_files":
+          sections.push(buildDesignFilesSection(data));
+          break;
+        case "material_purchases":
+          sections.push(buildMaterialPurchasesSection(data));
+          break;
+        case "material_usage":
+          sections.push(buildMaterialUsageSection(data));
+          break;
+        case "production_history":
+          sections.push(buildProductionSection(data));
+          break;
+        case "outsourced_work":
+          sections.push(buildOutsourcedSection(data));
+          break;
+        case "qc_reports":
+          sections.push(buildQCSection(data));
+          break;
+        case "delivery_challans":
+          sections.push(buildChallansSection(data));
+          break;
+        case "invoices":
+          sections.push(buildInvoicesSection(data));
+          break;
+        case "payment_history":
+          sections.push(buildPaymentsSection(data));
+          break;
+        case "internal_costing":
+          sections.push(buildCostingSection(data));
+          break;
+        case "profit_summary":
+          sections.push(buildProfitSection(data));
+          break;
+        case "machine_usage":
+          sections.push(buildMachineUsageSection(data));
+          break;
+        case "attachments_index":
+          sections.push(buildAttachmentsIndex(data));
+          break;
+        default:
+          break;
       }
     }
 
@@ -808,16 +1136,26 @@ export function ExportEngine({ context, onBack }: Props) {
   // ── Actions ──────────────────────────────────────────────────
 
   function handlePrint() {
-    if (selectedSections.size === 0) { toast.error("Select at least one section"); return; }
+    if (selectedSections.size === 0) {
+      toast.error("Select at least one section");
+      return;
+    }
     setGenerating(true);
     setTimeout(() => {
       try {
         const html = buildFullHTML();
         const win = window.open("", "_blank", "width=900,height=700");
-        if (!win) { toast.error("Popup blocked — allow popups for this site"); setGenerating(false); return; }
+        if (!win) {
+          toast.error("Popup blocked — allow popups for this site");
+          setGenerating(false);
+          return;
+        }
         win.document.write(html);
         win.document.close();
-        win.onload = () => { win.focus(); win.print(); };
+        win.onload = () => {
+          win.focus();
+          win.print();
+        };
         toast.success("Report opened in print preview");
       } catch (e) {
         toast.error("Error generating report");
@@ -828,7 +1166,10 @@ export function ExportEngine({ context, onBack }: Props) {
   }
 
   function handleDownloadHTML() {
-    if (selectedSections.size === 0) { toast.error("Select at least one section"); return; }
+    if (selectedSections.size === 0) {
+      toast.error("Select at least one section");
+      return;
+    }
     setGenerating(true);
     setTimeout(() => {
       try {
@@ -840,7 +1181,9 @@ export function ExportEngine({ context, onBack }: Props) {
         a.download = `${ctxName.replace(/[^a-z0-9]/gi, "_")}_Report_${new Date().toISOString().split("T")[0]}.html`;
         a.click();
         URL.revokeObjectURL(url);
-        toast.success("Report downloaded as HTML — open in browser and print to PDF");
+        toast.success(
+          "Report downloaded as HTML — open in browser and print to PDF",
+        );
       } catch (e) {
         toast.error("Error generating report");
       }
@@ -854,7 +1197,12 @@ export function ExportEngine({ context, onBack }: Props) {
     <div className="space-y-6 max-w-3xl">
       {/* Header */}
       <div className="flex items-start gap-4">
-        <Button variant="ghost" size="sm" onClick={onBack} className="shrink-0 mt-0.5">
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onBack}
+          className="shrink-0 mt-0.5"
+        >
           <ArrowLeft className="w-4 h-4 mr-1" /> Back
         </Button>
         <div>
@@ -864,9 +1212,15 @@ export function ExportEngine({ context, onBack }: Props) {
           </div>
           <p className="text-sm text-muted-foreground mt-0.5">
             {ctxType === "project" ? (
-              <span className="flex items-center gap-1.5"><Building2 className="w-3.5 h-3.5" />{ctxName}</span>
+              <span className="flex items-center gap-1.5">
+                <Building2 className="w-3.5 h-3.5" />
+                {ctxName}
+              </span>
             ) : (
-              <span className="flex items-center gap-1.5"><User className="w-3.5 h-3.5" />{ctxName}</span>
+              <span className="flex items-center gap-1.5">
+                <User className="w-3.5 h-3.5" />
+                {ctxName}
+              </span>
             )}
           </p>
         </div>
@@ -877,13 +1231,25 @@ export function ExportEngine({ context, onBack }: Props) {
         <div className="flex items-center justify-between px-4 py-3 border-b">
           <div>
             <h2 className="font-semibold text-sm">Select Sections</h2>
-            <p className="text-xs text-muted-foreground">{selectedSections.size} of {availableSections.length} selected</p>
+            <p className="text-xs text-muted-foreground">
+              {selectedSections.size} of {availableSections.length} selected
+            </p>
           </div>
           <div className="flex gap-2">
-            <Button variant="ghost" size="sm" className="gap-1.5 text-xs" onClick={selectAll}>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="gap-1.5 text-xs"
+              onClick={selectAll}
+            >
               <CheckSquare className="w-3.5 h-3.5" /> All
             </Button>
-            <Button variant="ghost" size="sm" className="gap-1.5 text-xs" onClick={deselectAll}>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="gap-1.5 text-xs"
+              onClick={deselectAll}
+            >
               <Square className="w-3.5 h-3.5" /> None
             </Button>
           </div>
@@ -892,7 +1258,9 @@ export function ExportEngine({ context, onBack }: Props) {
         <div className="p-4 space-y-5">
           {Object.entries(groupedSections).map(([group, sections]) => (
             <div key={group}>
-              <p className="text-[10px] uppercase tracking-widest font-semibold text-muted-foreground mb-2">{group}</p>
+              <p className="text-[10px] uppercase tracking-widest font-semibold text-muted-foreground mb-2">
+                {group}
+              </p>
               <div className="space-y-2">
                 {sections.map((section) => {
                   const checked = selectedSections.has(section.id);
@@ -901,27 +1269,43 @@ export function ExportEngine({ context, onBack }: Props) {
                       key={section.id}
                       className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${checked ? "bg-primary/5 border-primary/30" : "hover:bg-muted/30"}`}
                       onClick={() => toggleSection(section.id)}
-                      onKeyDown={(e) => e.key === " " && toggleSection(section.id)}
+                      onKeyDown={(e) =>
+                        e.key === " " && toggleSection(section.id)
+                      }
                       role="checkbox"
                       aria-checked={checked}
                       tabIndex={0}
                     >
-                      <Checkbox checked={checked} className="mt-0.5 shrink-0" onCheckedChange={() => toggleSection(section.id)} />
+                      <Checkbox
+                        checked={checked}
+                        className="mt-0.5 shrink-0"
+                        onCheckedChange={() => toggleSection(section.id)}
+                      />
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-sm font-medium">{section.label}</span>
+                          <span className="text-sm font-medium">
+                            {section.label}
+                          </span>
                           {section.hasFiles && (
-                            <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+                            <Badge
+                              variant="outline"
+                              className="text-[10px] px-1.5 py-0"
+                            >
                               includes files
                             </Badge>
                           )}
                           {section.requiresPermission && (
-                            <Badge variant="secondary" className="text-[10px] px-1.5 py-0">
+                            <Badge
+                              variant="secondary"
+                              className="text-[10px] px-1.5 py-0"
+                            >
                               finance
                             </Badge>
                           )}
                         </div>
-                        <p className="text-xs text-muted-foreground mt-0.5">{section.description}</p>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          {section.description}
+                        </p>
                       </div>
                     </div>
                   );
@@ -946,7 +1330,9 @@ export function ExportEngine({ context, onBack }: Props) {
             <Printer className="w-6 h-6 text-primary shrink-0" />
             <div>
               <p className="font-semibold text-sm">Print / Save as PDF</p>
-              <p className="text-xs text-muted-foreground">Opens print dialog — use "Save as PDF" in your browser</p>
+              <p className="text-xs text-muted-foreground">
+                Opens print dialog — use "Save as PDF" in your browser
+              </p>
             </div>
           </button>
 
@@ -959,7 +1345,9 @@ export function ExportEngine({ context, onBack }: Props) {
             <Download className="w-6 h-6 text-muted-foreground shrink-0" />
             <div>
               <p className="font-semibold text-sm">Download HTML Report</p>
-              <p className="text-xs text-muted-foreground">Download as .html file — open in browser and print to PDF</p>
+              <p className="text-xs text-muted-foreground">
+                Download as .html file — open in browser and print to PDF
+              </p>
             </div>
           </button>
         </div>
@@ -972,13 +1360,16 @@ export function ExportEngine({ context, onBack }: Props) {
         )}
 
         {selectedSections.size === 0 && (
-          <p className="text-xs text-destructive">Select at least one section to generate a report.</p>
+          <p className="text-xs text-destructive">
+            Select at least one section to generate a report.
+          </p>
         )}
 
         <div className="border-t pt-3">
           <p className="text-xs text-muted-foreground">
-            <strong>How to save as PDF:</strong> Click "Print / Save as PDF" → In the print dialog, change Destination to "Save as PDF" → Click Save.
-            This works in Chrome, Edge, Firefox, and Safari.
+            <strong>How to save as PDF:</strong> Click "Print / Save as PDF" →
+            In the print dialog, change Destination to "Save as PDF" → Click
+            Save. This works in Chrome, Edge, Firefox, and Safari.
           </p>
         </div>
       </div>

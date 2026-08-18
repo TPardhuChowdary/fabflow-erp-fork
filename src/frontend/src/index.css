@@ -35,6 +35,8 @@
     --success-foreground: 1 0 0;
     --warning: 0.78 0.15 70;
     --warning-foreground: 0.15 0 0;
+    --info: 0.55 0.15 250;
+    --info-foreground: 1 0 0;
     --chart-1: 0.62 0.17 46;
     --chart-2: 0.55 0.15 250;
     --chart-3: 0.62 0.16 145;
@@ -48,6 +50,8 @@
     --sidebar-accent-foreground: 0.92 0 0;
     --sidebar-border: 0.22 0.01 260;
     --sidebar-ring: 0.62 0.17 46;
+    --table-header: 1 0 0;
+    --table-header-foreground: 0.14 0.01 260;
   }
 
   .dark {
@@ -67,6 +71,8 @@
     --accent-foreground: 0.92 0 0;
     --destructive: 0.58 0.24 27;
     --destructive-foreground: 1 0 0;
+    --info: 0.55 0.15 250;
+    --info-foreground: 1 0 0;
     --border: 1 0 0 / 10%;
     --input: 1 0 0 / 12%;
     --ring: 0.62 0.17 46;
@@ -78,6 +84,8 @@
     --sidebar-accent-foreground: 0.92 0 0;
     --sidebar-border: 1 0 0 / 8%;
     --sidebar-ring: 0.62 0.17 46;
+    --table-header: 0.2 0.01 260;
+    --table-header-foreground: 0.92 0 0;
   }
 
   * {
@@ -164,6 +172,33 @@ textarea {
 .table-wrapper th,
 .table-wrapper td {
   white-space: nowrap;
+}
+
+/* Horizontal-scroll affordance (responsive audit Fix 3): a subtle edge
+   shadow that appears only while a table actually has more columns to
+   scroll to in that direction, and disappears once fully scrolled there.
+   Pure CSS, no JS and no extra DOM/UI element -- two gradients scroll
+   WITH the table content (background-attachment: local) and mask two
+   gradients pinned to the viewport edge (background-attachment: scroll)
+   underneath, so a shadow only survives where real overflow remains.
+   Targets the shared Table primitive's own scroll container
+   ([data-slot="table-container"], see components/ui/table.tsx), so it
+   applies to every table app-wide -- not just the four pages named in
+   Fix 3 -- with one definition. Recalculates automatically on resize
+   since it's driven by native scroll geometry, not a measured value. */
+[data-slot="table-container"] {
+  background-image: linear-gradient(
+      to right,
+      oklch(var(--card)),
+      oklch(var(--card) / 0)
+    ), linear-gradient(to left, oklch(var(--card)), oklch(var(--card) / 0)),
+    linear-gradient(to right, oklch(var(--foreground) / 0.14), transparent),
+    linear-gradient(to left, oklch(var(--foreground) / 0.14), transparent);
+  background-position: left center, right center, left center, right center;
+  background-repeat: no-repeat;
+  background-size: 24px 100%, 24px 100%, 8px 100%, 8px 100%;
+  background-attachment: local, local, scroll, scroll;
+  background-color: oklch(var(--card));
 }
 
 /* ─── ACTION BARS ─────────────────────────── */

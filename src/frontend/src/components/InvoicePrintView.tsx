@@ -388,7 +388,7 @@ export function InvoicePrintView({ invoice, customer, open, onClose }: Props) {
                   </div>
                 )}
                 {!invoice.deliveryDestination && (
-                  <span style={{ color: "#aaa" }}>\u2014</span>
+                  <span style={{ color: "#aaa" }}>—</span>
                 )}
               </div>
             </div>

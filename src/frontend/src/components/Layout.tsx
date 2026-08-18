@@ -3,6 +3,7 @@ import { Sheet, SheetContent } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 import {
   Archive,
+  Banknote,
   BookOpen,
   Building2,
   ChevronDown,
@@ -10,12 +11,14 @@ import {
   ChevronRight,
   ClipboardCheck,
   ClipboardList,
+  Cog,
   CreditCard,
   DollarSign,
   Factory,
   FileDown,
   FileText,
   FolderKanban,
+  Hammer,
   LayoutDashboard,
   LibraryBig,
   LogOut,
@@ -120,6 +123,9 @@ const navGroups: NavGroup[] = [
       "material_requisitions",
       "inventory",
       "machinery",
+      "tools",
+      "tooling_dies",
+      "machine_revenue",
       "scrap",
       "drawing_editor",
     ],
@@ -147,6 +153,24 @@ const navGroups: NavGroup[] = [
         page: "machinery",
         icon: Wrench,
         moduleKey: "machinery",
+      },
+      {
+        label: "Tools",
+        page: "tools",
+        icon: Hammer,
+        moduleKey: "tools",
+      },
+      {
+        label: "Tooling / Dies",
+        page: "dies",
+        icon: Cog,
+        moduleKey: "tooling_dies",
+      },
+      {
+        label: "Machine Revenue",
+        page: "machine-revenue",
+        icon: Banknote,
+        moduleKey: "machine_revenue",
       },
       {
         label: "Scrap",
@@ -286,9 +310,10 @@ export function Layout({ currentPage, onNavigate, children }: Props) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   // Desktop: sidebar open/close toggle
   const [desktopOpen, setDesktopOpen] = useState(true);
-  // Tablet: icon-rail expanded state
-  const [tabletExpanded, setTabletExpanded] = useState(false);
-  // Mobile: sheet drawer open state
+  // Mobile + tablet (< 1024px): sheet drawer open state — same drawer
+  // serves both; see the responsive audit's Fix 2 (tablet previously had
+  // its own permanent icon-rail tier here, removed in favor of reusing
+  // this existing pattern rather than inventing a second one).
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const toggleGroup = (label: string) =>
@@ -407,11 +432,6 @@ export function Layout({ currentPage, onNavigate, children }: Props) {
     </div>
   );
 
-  // All visible nav items flattened — for tablet icon rail
-  const allVisibleItems = navGroups
-    .filter(isGroupVisible)
-    .flatMap((g) => g.items.filter(isItemVisible));
-
   return (
     <div className="flex h-screen overflow-hidden bg-background">
       {/* ═══════════════════════════════════════════════
@@ -428,109 +448,14 @@ export function Layout({ currentPage, onNavigate, children }: Props) {
         <FullNavContent />
       </aside>
 
-      {/* ═══════════════════════════════════════════════
-          TABLET ICON RAIL (768px – 1024px)
-      ═══════════════════════════════════════════════ */}
-      <aside
-        className={cn(
-          "hidden md:flex lg:hidden flex-col bg-[oklch(var(--sidebar))] text-[oklch(var(--sidebar-foreground))] transition-all duration-200 shrink-0 relative z-20",
-          tabletExpanded ? "w-56" : "w-16",
-        )}
-      >
-        {tabletExpanded ? (
-          // Expanded full sidebar on tablet
-          <>
-            <div className="flex items-center justify-between px-3 py-3 border-b border-[oklch(var(--sidebar-border))] shrink-0">
-              <div className="flex items-center gap-2">
-                <div className="flex items-center justify-center w-7 h-7 rounded bg-[oklch(var(--sidebar-primary))] text-[oklch(var(--sidebar-primary-foreground))]">
-                  <Factory className="w-4 h-4" />
-                </div>
-                <div>
-                  <div className="text-sm font-bold leading-none text-[oklch(var(--sidebar-foreground))]">
-                    FabFlow
-                  </div>
-                  <div className="text-[10px] text-[oklch(var(--sidebar-foreground)/0.5)] uppercase tracking-widest">
-                    ERP
-                  </div>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setTabletExpanded(false)}
-                className="p-1 rounded hover:bg-[oklch(var(--sidebar-accent))] transition-colors shrink-0"
-                title="Collapse sidebar"
-              >
-                <ChevronLeft className="w-4 h-4 text-[oklch(var(--sidebar-foreground)/0.6)]" />
-              </button>
-            </div>
-            <FullNavContent onItemClick={() => setTabletExpanded(false)} />
-          </>
-        ) : (
-          // Icon-only rail
-          <>
-            <div className="flex items-center justify-center h-14 border-b border-[oklch(var(--sidebar-border))] shrink-0">
-              <button
-                type="button"
-                onClick={() => setTabletExpanded(true)}
-                className="flex items-center justify-center w-8 h-8 rounded bg-[oklch(var(--sidebar-primary))] text-[oklch(var(--sidebar-primary-foreground))] hover:opacity-90 transition-opacity"
-                title="Expand sidebar"
-                data-ocid="sidebar.tablet.toggle"
-              >
-                <Factory className="w-4 h-4" />
-              </button>
-            </div>
-            <nav className="flex-1 overflow-y-auto py-2 flex flex-col items-center gap-0.5">
-              {allVisibleItems.map((item) => (
-                <button
-                  type="button"
-                  key={item.page}
-                  data-ocid={`nav.${item.page}.link`}
-                  onClick={() => onNavigate(item.page)}
-                  title={item.label}
-                  className={cn(
-                    "flex items-center justify-center w-10 h-10 rounded transition-colors",
-                    isActive(item.page)
-                      ? "bg-[oklch(var(--sidebar-accent))] text-[oklch(var(--sidebar-primary))]"
-                      : "text-[oklch(var(--sidebar-foreground)/0.65)] hover:bg-[oklch(var(--sidebar-accent))] hover:text-[oklch(var(--sidebar-foreground))]",
-                  )}
-                >
-                  <item.icon className="w-[18px] h-[18px]" />
-                </button>
-              ))}
-              {settingsVisible && (
-                <button
-                  type="button"
-                  data-ocid="nav.settings.link"
-                  onClick={() => onNavigate("settings")}
-                  title="Settings"
-                  className={cn(
-                    "flex items-center justify-center w-10 h-10 rounded transition-colors mt-auto mb-1",
-                    currentPage === "settings"
-                      ? "bg-[oklch(var(--sidebar-accent))] text-[oklch(var(--sidebar-primary))]"
-                      : "text-[oklch(var(--sidebar-foreground)/0.65)] hover:bg-[oklch(var(--sidebar-accent))] hover:text-[oklch(var(--sidebar-foreground))]",
-                  )}
-                >
-                  <Settings className="w-[18px] h-[18px]" />
-                </button>
-              )}
-            </nav>
-          </>
-        )}
-      </aside>
-
-      {/* Tablet overlay backdrop — closes expanded sidebar on outside click */}
-      {tabletExpanded && (
-        <div
-          className="hidden md:block lg:hidden fixed inset-0 z-10"
-          onClick={() => setTabletExpanded(false)}
-          onKeyDown={() => setTabletExpanded(false)}
-          aria-hidden="true"
-          role="presentation"
-        />
-      )}
+      {/* Tablet (768-1023px) previously had its own permanent icon-rail
+          tier here. Removed per the responsive audit's Fix 2: it wasted
+          tablet width and was less discoverable than the drawer. Tablet
+          now falls into the "< 1024px" mobile-drawer range below instead
+          of getting a third navigation pattern. */}
 
       {/* ═══════════════════════════════════════════════
-          MOBILE SHEET DRAWER (< 768px)
+          MOBILE + TABLET SHEET DRAWER (< 1024px)
       ═══════════════════════════════════════════════ */}
       <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
         <SheetContent
@@ -547,8 +472,9 @@ export function Layout({ currentPage, onNavigate, children }: Props) {
           MAIN CONTENT AREA
       ═══════════════════════════════════════════════ */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-        {/* Mobile top header bar (< 768px) */}
-        <div className="flex md:hidden items-center gap-3 px-4 py-2.5 border-b border-border bg-card shrink-0">
+        {/* Mobile + tablet top header bar (< 1024px) — same hamburger
+            header now serves both, per Fix 2 */}
+        <div className="flex lg:hidden items-center gap-3 px-4 py-2.5 border-b border-border bg-card shrink-0">
           <button
             type="button"
             onClick={() => setMobileOpen(true)}
@@ -577,29 +503,15 @@ export function Layout({ currentPage, onNavigate, children }: Props) {
           )}
         </div>
 
-        {/* Desktop / Tablet top header bar (>= 768px) */}
-        <header className="hidden md:flex items-center gap-3 px-4 py-2.5 border-b border-border bg-card shrink-0">
+        {/* Desktop top header bar (>= 1024px) */}
+        <header className="hidden lg:flex items-center gap-3 px-4 py-2.5 border-b border-border bg-card shrink-0">
           {/* Desktop: collapse/expand toggle */}
           <button
             type="button"
             onClick={() => setDesktopOpen((v) => !v)}
-            className="hidden lg:flex p-1 rounded hover:bg-muted transition-colors"
+            className="flex p-1 rounded hover:bg-muted transition-colors"
           >
             {desktopOpen ? (
-              <ChevronLeft className="w-4 h-4" />
-            ) : (
-              <ChevronRight className="w-4 h-4" />
-            )}
-          </button>
-
-          {/* Tablet: expand icon-rail toggle */}
-          <button
-            type="button"
-            onClick={() => setTabletExpanded((v) => !v)}
-            className="flex md:flex lg:hidden p-1 rounded hover:bg-muted transition-colors"
-            data-ocid="sidebar.tablet.expand"
-          >
-            {tabletExpanded ? (
               <ChevronLeft className="w-4 h-4" />
             ) : (
               <ChevronRight className="w-4 h-4" />
@@ -638,16 +550,7 @@ export function Layout({ currentPage, onNavigate, children }: Props) {
 
         <footer className="px-6 py-2 border-t border-border bg-card text-xs text-muted-foreground flex items-center justify-center">
           <span>
-            &copy; {new Date().getFullYear()}. Built with{" "}
-            <span className="text-red-500">&hearts;</span> using{" "}
-            <a
-              href={`https://caffeine.ai?utm_source=caffeine-footer&utm_medium=referral&utm_content=${encodeURIComponent(window.location.hostname)}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="underline hover:text-foreground transition-colors"
-            >
-              caffeine.ai
-            </a>
+            &copy; {new Date().getFullYear()} FabFlow ERP. All rights reserved.
           </span>
         </footer>
       </div>

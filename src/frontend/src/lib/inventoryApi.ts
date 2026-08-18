@@ -33,7 +33,7 @@
 // "Edit Material" dialog already restricted itself to before this phase.
 
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
-import type { InventoryItem } from "@/types";
+import type { InventoryItem, InventoryItemCategory } from "@/types";
 
 export type WriteStatus = "success" | "denied" | "error" | "unauthenticated";
 
@@ -54,6 +54,13 @@ interface InventoryItemRow {
   last_purchase_price: number | null;
   estimated_price: number | null;
   updated_at: string;
+  category: string | null;
+  brand: string | null;
+  shade: string | null;
+  ral_code: string | null;
+  finish: string | null;
+  powder_type: string | null;
+  pretreatment_tank: string | null;
 }
 
 function rowToInventoryItem(row: InventoryItemRow): InventoryItem {
@@ -68,17 +75,37 @@ function rowToInventoryItem(row: InventoryItemRow): InventoryItem {
     lastPurchasePrice: row.last_purchase_price ?? undefined,
     estimatedPrice: row.estimated_price ?? undefined,
     lastUpdated: new Date(row.updated_at).getTime(),
+    category: (row.category as InventoryItemCategory | null) ?? "raw_material",
+    brand: row.brand ?? undefined,
+    shade: row.shade ?? undefined,
+    ralCode: row.ral_code ?? undefined,
+    finish: row.finish ?? undefined,
+    powderType: row.powder_type ?? undefined,
+    pretreatmentTank: row.pretreatment_tank ?? undefined,
   };
 }
 
 // Master-data write whitelist. Deliberately excludes id (DB-generated on
 // insert, path param on update/delete), current_stock, quantity_reserved,
 // last_purchase_price, updated_at, and organization_id - see the module
-// header for why.
+// header for why. Phase 36 adds category + the 5 Powder Coating Powder
+// fields + the 1 Pretreatment Chemical field to the whitelist - all
+// plain master-data, same write discipline as name/unit.
 function toInventoryItemFields(
   item: Pick<
     InventoryItem,
-    "name" | "unit" | "reorderLevel" | "unitCost" | "estimatedPrice"
+    | "name"
+    | "unit"
+    | "reorderLevel"
+    | "unitCost"
+    | "estimatedPrice"
+    | "category"
+    | "brand"
+    | "shade"
+    | "ralCode"
+    | "finish"
+    | "powderType"
+    | "pretreatmentTank"
   >,
 ) {
   return {
@@ -87,12 +114,20 @@ function toInventoryItemFields(
     reorder_level: item.reorderLevel ?? null,
     cost_per_unit: item.unitCost ?? null,
     estimated_price: item.estimatedPrice ?? null,
+    category: item.category ?? "raw_material",
+    brand: item.brand ?? null,
+    shade: item.shade ?? null,
+    ral_code: item.ralCode ?? null,
+    finish: item.finish ?? null,
+    powder_type: item.powderType ?? null,
+    pretreatment_tank: item.pretreatmentTank ?? null,
   };
 }
 
 const SELECT_COLUMNS =
   "id, name, unit, current_stock, cost_per_unit, quantity_reserved, " +
-  "reorder_level, last_purchase_price, estimated_price, updated_at";
+  "reorder_level, last_purchase_price, estimated_price, updated_at, " +
+  "category, brand, shade, ral_code, finish, powder_type, pretreatment_tank";
 
 async function requireSession() {
   if (!isSupabaseConfigured) {
@@ -121,7 +156,18 @@ async function requireSession() {
 export async function createInventoryItemRemote(
   item: Pick<
     InventoryItem,
-    "name" | "unit" | "reorderLevel" | "unitCost" | "estimatedPrice"
+    | "name"
+    | "unit"
+    | "reorderLevel"
+    | "unitCost"
+    | "estimatedPrice"
+    | "category"
+    | "brand"
+    | "shade"
+    | "ralCode"
+    | "finish"
+    | "powderType"
+    | "pretreatmentTank"
   >,
 ): Promise<WriteResult<InventoryItem>> {
   const gate = await requireSession();
@@ -144,7 +190,18 @@ export async function updateInventoryItemRemote(
   id: string,
   item: Pick<
     InventoryItem,
-    "name" | "unit" | "reorderLevel" | "unitCost" | "estimatedPrice"
+    | "name"
+    | "unit"
+    | "reorderLevel"
+    | "unitCost"
+    | "estimatedPrice"
+    | "category"
+    | "brand"
+    | "shade"
+    | "ralCode"
+    | "finish"
+    | "powderType"
+    | "pretreatmentTank"
   >,
 ): Promise<WriteResult<InventoryItem>> {
   const gate = await requireSession();

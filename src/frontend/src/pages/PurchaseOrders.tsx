@@ -16,8 +16,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Download, Eye, ShieldOff, Trash2 } from "lucide-react";
+import { useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import {
   deleteMasterPORemote,
   updateMasterPORemote,
@@ -45,6 +47,27 @@ export function PurchaseOrders() {
   const sorted = [...(masterPOs || [])].sort(
     (a, b) => b.createdAt - a.createdAt,
   );
+
+  const [deletePOTarget, setDeletePOTarget] = useState<MasterPO | null>(null);
+
+  const handleConfirmDeletePO = async () => {
+    const po = deletePOTarget;
+    if (!po) return;
+    const result = await deleteMasterPORemote(po.id);
+    if (result.status === "unauthenticated") {
+      toast.error("Not signed in to the server - PO was not deleted");
+      setDeletePOTarget(null);
+      return;
+    }
+    if (result.status === "denied" || result.status === "error") {
+      toast.error(result.error ?? "Could not delete PO");
+      setDeletePOTarget(null);
+      return;
+    }
+    deleteMasterPO(po.id);
+    toast.success("Purchase order deleted");
+    setDeletePOTarget(null);
+  };
 
   // Derive linked projects for a masterPO via sharedPoId
   const getLinkedProjects = (sharedPoId: string) =>
@@ -306,32 +329,7 @@ export function PurchaseOrders() {
                           variant="ghost"
                           size="sm"
                           className="h-6 px-2"
-                          onClick={async () => {
-                            if (
-                              !window.confirm(
-                                `Are you sure you want to delete PO "${po.poNumber}"? This cannot be undone.`,
-                              )
-                            )
-                              return;
-                            const result = await deleteMasterPORemote(po.id);
-                            if (result.status === "unauthenticated") {
-                              toast.error(
-                                "Not signed in to the server - PO was not deleted",
-                              );
-                              return;
-                            }
-                            if (
-                              result.status === "denied" ||
-                              result.status === "error"
-                            ) {
-                              toast.error(
-                                result.error ?? "Could not delete PO",
-                              );
-                              return;
-                            }
-                            deleteMasterPO(po.id);
-                            toast.success("Purchase order deleted");
-                          }}
+                          onClick={() => setDeletePOTarget(po)}
                           data-ocid={`purchase_orders.delete_button.${i + 1}`}
                           title="Delete"
                         >
@@ -363,6 +361,14 @@ export function PurchaseOrders() {
           </Table>
         </div>
       </div>
+
+      <ConfirmDeleteDialog
+        open={!!deletePOTarget}
+        onOpenChange={(o) => !o && setDeletePOTarget(null)}
+        title="Delete purchase order?"
+        description={`Purchase order "${deletePOTarget?.poNumber}" will be permanently deleted.`}
+        onConfirm={handleConfirmDeletePO}
+      />
     </div>
   );
 }

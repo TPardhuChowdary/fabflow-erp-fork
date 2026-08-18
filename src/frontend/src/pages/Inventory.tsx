@@ -43,6 +43,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import { MaterialDetailDrawer } from "../components/MaterialDetailDrawer";
 import { VendorSelect } from "../components/VendorSelect";
 import {
@@ -65,11 +66,28 @@ import {
 import { useStore } from "../store";
 import type {
   InventoryItem,
+  InventoryItemCategory,
   InventoryPurchase,
   PurchaseAttachment,
 } from "../types";
 
 const UNITS = ["pcs", "kg", "sheets", "meters", "liters", "boxes", "rolls"];
+
+// Phase 36 — Inventory classification (§3-5). Consumables and Spare
+// Parts need no extra fields; Powder Coating Powder / Pretreatment
+// Chemical each get their own conditional fields below.
+const CATEGORIES: { value: InventoryItemCategory; label: string }[] = [
+  { value: "raw_material", label: "Raw Material" },
+  { value: "consumable", label: "Consumable" },
+  { value: "spare_part", label: "Spare Part" },
+  { value: "powder_coating_powder", label: "Powder Coating Powder" },
+  { value: "pretreatment_chemical", label: "Pretreatment Chemical" },
+];
+const CATEGORY_LABEL: Record<InventoryItemCategory, string> =
+  Object.fromEntries(CATEGORIES.map((c) => [c.value, c.label])) as Record<
+    InventoryItemCategory,
+    string
+  >;
 
 interface InventoryProps {
   /** Which tab to land on — defaults to "stock" (today's behavior) when
@@ -107,9 +125,34 @@ export function Inventory({
 
   // Add material dialog
   const [addDialog, setAddDialog] = useState(false);
-  const [newItem, setNewItem] = useState({ name: "", unit: "pcs" });
+  const [newItem, setNewItem] = useState<{
+    name: string;
+    unit: string;
+    category: InventoryItemCategory;
+    brand: string;
+    shade: string;
+    ralCode: string;
+    finish: string;
+    powderType: string;
+    pretreatmentTank: string;
+  }>({
+    name: "",
+    unit: "pcs",
+    category: "raw_material",
+    brand: "",
+    shade: "",
+    ralCode: "",
+    finish: "",
+    powderType: "",
+    pretreatmentTank: "",
+  });
+  const [categoryFilter, setCategoryFilter] = useState<
+    InventoryItemCategory | "all"
+  >("all");
 
   // Purchase dialog
+  const [deletePurchaseRecordTarget, setDeletePurchaseRecordTarget] =
+    useState<InventoryPurchase | null>(null);
   const [purchaseDialog, setPurchaseDialog] = useState(false);
   const [purchaseTarget, setPurchaseTarget] = useState<InventoryItem | null>(
     null,
@@ -134,6 +177,13 @@ export function Inventory({
     reorderLevel: string;
     unitCost: string;
     estimatedPrice: string;
+    category: InventoryItemCategory;
+    brand: string;
+    shade: string;
+    ralCode: string;
+    finish: string;
+    powderType: string;
+    pretreatmentTank: string;
   } | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<
     PurchaseAttachment[]
@@ -192,6 +242,13 @@ export function Inventory({
         reorderLevel: undefined,
         unitCost: undefined,
         estimatedPrice: undefined,
+        category: newItem.category,
+        brand: newItem.brand.trim() || undefined,
+        shade: newItem.shade.trim() || undefined,
+        ralCode: newItem.ralCode.trim() || undefined,
+        finish: newItem.finish.trim() || undefined,
+        powderType: newItem.powderType.trim() || undefined,
+        pretreatmentTank: newItem.pretreatmentTank.trim() || undefined,
       });
       if (result.status === "unauthenticated") {
         toast.error("Sign in required to add inventory items");
@@ -203,7 +260,17 @@ export function Inventory({
       }
       addInventoryItem(result.data);
       toast.success(`${result.data.name} added to inventory`);
-      setNewItem({ name: "", unit: "pcs" });
+      setNewItem({
+        name: "",
+        unit: "pcs",
+        category: "raw_material",
+        brand: "",
+        shade: "",
+        ralCode: "",
+        finish: "",
+        powderType: "",
+        pretreatmentTank: "",
+      });
       setAddDialog(false);
     } finally {
       setIsAddSaving(false);
@@ -455,6 +522,32 @@ export function Inventory({
 
         {/* Stock Table */}
         <TabsContent value="stock" className="mt-4">
+          <div className="flex items-center gap-2 mb-3">
+            <Label className="text-xs text-muted-foreground">
+              Filter by category
+            </Label>
+            <Select
+              value={categoryFilter}
+              onValueChange={(v) =>
+                setCategoryFilter(v as InventoryItemCategory | "all")
+              }
+            >
+              <SelectTrigger
+                className="h-8 w-56 text-xs"
+                data-ocid="inventory.category_filter.select"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Categories</SelectItem>
+                {CATEGORIES.map((c) => (
+                  <SelectItem key={c.value} value={c.value}>
+                    {c.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
           <div className="table-wrapper">
             <div className="rounded-md border" data-ocid="inventory.table">
               <Table>
@@ -462,6 +555,9 @@ export function Inventory({
                   <TableRow className="bg-muted/40">
                     <TableHead className="text-xs font-semibold">
                       Material Name
+                    </TableHead>
+                    <TableHead className="text-xs font-semibold">
+                      Category
                     </TableHead>
                     <TableHead className="text-xs font-semibold">
                       Unit
@@ -487,164 +583,186 @@ export function Inventory({
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {inventoryItems.map((item, i) => (
-                    <TableRow
-                      key={item.id}
-                      className="cursor-pointer hover:bg-muted/50 transition-colors group"
-                      onClick={() => setSelectedMaterial(item)}
-                      data-ocid={`inventory.item.${i + 1}`}
-                    >
-                      <TableCell className="font-medium text-sm">
-                        <span className="flex items-center gap-1.5">
-                          {item.name}
-                          <ChevronRight className="w-3.5 h-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
-                        </span>
-                      </TableCell>
-                      <TableCell className="text-sm text-muted-foreground">
-                        {item.unit}
-                      </TableCell>
-                      <TableCell>
-                        <span className="font-mono text-xs">
-                          {item.quantityAvailable} {item.unit}
-                        </span>
-                      </TableCell>
-                      <TableCell>
-                        {(item.quantityReserved ?? 0) > 0 ? (
-                          <span className="font-mono text-xs text-amber-600">
-                            {item.quantityReserved} {item.unit}
+                  {inventoryItems
+                    .filter(
+                      (item) =>
+                        categoryFilter === "all" ||
+                        (item.category ?? "raw_material") === categoryFilter,
+                    )
+                    .map((item, i) => (
+                      <TableRow
+                        key={item.id}
+                        className="cursor-pointer hover:bg-muted/50 transition-colors group"
+                        onClick={() => setSelectedMaterial(item)}
+                        data-ocid={`inventory.item.${i + 1}`}
+                      >
+                        <TableCell className="font-medium text-sm">
+                          <span className="flex items-center gap-1.5">
+                            {item.name}
+                            <ChevronRight className="w-3.5 h-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
                           </span>
-                        ) : (
-                          <span className="text-muted-foreground text-xs">
-                            —
+                        </TableCell>
+                        <TableCell>
+                          <Badge
+                            variant="outline"
+                            className="text-xs font-normal"
+                          >
+                            {CATEGORY_LABEL[item.category ?? "raw_material"]}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground">
+                          {item.unit}
+                        </TableCell>
+                        <TableCell>
+                          <span className="font-mono text-xs">
+                            {item.quantityAvailable} {item.unit}
                           </span>
-                        )}
-                      </TableCell>
-                      <TableCell>
-                        {(() => {
-                          const avail =
-                            item.quantityAvailable -
-                            (item.quantityReserved ?? 0);
-                          return (
-                            <Badge
-                              variant={
-                                avail <= 0
-                                  ? "destructive"
-                                  : avail < 10
-                                    ? "secondary"
-                                    : "outline"
-                              }
-                              className="font-mono text-xs"
-                            >
-                              {Math.max(0, avail)} {item.unit}
-                            </Badge>
-                          );
-                        })()}
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {item.lastPurchasePrice &&
-                        item.lastPurchasePrice > 0 ? (
-                          `₹${item.lastPurchasePrice.toLocaleString("en-IN")}`
-                        ) : (
-                          <span className="text-muted-foreground/50">—</span>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {formatDate(item.lastUpdated)}
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex items-center gap-1">
-                          {pCreate && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="h-7 text-xs"
-                              onClick={(e) => openPurchaseDialog(e, item)}
-                              data-ocid="inventory.purchase_button"
-                            >
-                              <ShoppingCart className="w-3 h-3 mr-1" /> Purchase
-                            </Button>
+                        </TableCell>
+                        <TableCell>
+                          {(item.quantityReserved ?? 0) > 0 ? (
+                            <span className="font-mono text-xs text-amber-600">
+                              {item.quantityReserved} {item.unit}
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground text-xs">
+                              —
+                            </span>
                           )}
-                          {pEdit && (
-                            <button
-                              type="button"
-                              className="p-1 rounded hover:bg-muted transition-colors"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setEditingItem({
-                                  id: item.id,
-                                  name: item.name,
-                                  unit: item.unit,
-                                  reorderLevel:
-                                    item.reorderLevel != null
-                                      ? String(item.reorderLevel)
-                                      : "",
-                                  unitCost:
-                                    item.unitCost != null
-                                      ? String(item.unitCost)
-                                      : "",
-                                  estimatedPrice:
-                                    item.estimatedPrice != null
-                                      ? String(item.estimatedPrice)
-                                      : "",
-                                });
-                                setEditItemDialog(true);
-                              }}
-                              title="Edit material"
-                              data-ocid={`inventory.item.edit_button.${i + 1}`}
-                            >
-                              <Pencil className="w-3.5 h-3.5 text-muted-foreground hover:text-foreground" />
-                            </button>
+                        </TableCell>
+                        <TableCell>
+                          {(() => {
+                            const avail =
+                              item.quantityAvailable -
+                              (item.quantityReserved ?? 0);
+                            return (
+                              <Badge
+                                variant={
+                                  avail <= 0
+                                    ? "destructive"
+                                    : avail < 10
+                                      ? "secondary"
+                                      : "outline"
+                                }
+                                className="font-mono text-xs"
+                              >
+                                {Math.max(0, avail)} {item.unit}
+                              </Badge>
+                            );
+                          })()}
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {item.lastPurchasePrice &&
+                          item.lastPurchasePrice > 0 ? (
+                            `₹${item.lastPurchasePrice.toLocaleString("en-IN")}`
+                          ) : (
+                            <span className="text-muted-foreground/50">—</span>
                           )}
-                          {pDelete && (
-                            <button
-                              type="button"
-                              className="p-1 rounded hover:bg-muted transition-colors"
-                              onClick={async (e) => {
-                                e.stopPropagation();
-                                const hasPurchases = (
-                                  inventoryPurchases || []
-                                ).some((p) => p.inventoryItemId === item.id);
-                                const hasUsage = (materialUsages || []).some(
-                                  (u) => u.inventoryItemId === item.id,
-                                );
-                                if (hasPurchases || hasUsage) {
-                                  toast.error(
-                                    "Cannot delete material with existing records",
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {formatDate(item.lastUpdated)}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-1">
+                            {pCreate && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-7 text-xs"
+                                onClick={(e) => openPurchaseDialog(e, item)}
+                                data-ocid="inventory.purchase_button"
+                              >
+                                <ShoppingCart className="w-3 h-3 mr-1" />{" "}
+                                Purchase
+                              </Button>
+                            )}
+                            {pEdit && (
+                              <button
+                                type="button"
+                                className="p-1 rounded hover:bg-muted transition-colors"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setEditingItem({
+                                    id: item.id,
+                                    name: item.name,
+                                    unit: item.unit,
+                                    reorderLevel:
+                                      item.reorderLevel != null
+                                        ? String(item.reorderLevel)
+                                        : "",
+                                    unitCost:
+                                      item.unitCost != null
+                                        ? String(item.unitCost)
+                                        : "",
+                                    estimatedPrice:
+                                      item.estimatedPrice != null
+                                        ? String(item.estimatedPrice)
+                                        : "",
+                                    category: item.category ?? "raw_material",
+                                    brand: item.brand ?? "",
+                                    shade: item.shade ?? "",
+                                    ralCode: item.ralCode ?? "",
+                                    finish: item.finish ?? "",
+                                    powderType: item.powderType ?? "",
+                                    pretreatmentTank:
+                                      item.pretreatmentTank ?? "",
+                                  });
+                                  setEditItemDialog(true);
+                                }}
+                                title="Edit material"
+                                data-ocid={`inventory.item.edit_button.${i + 1}`}
+                              >
+                                <Pencil className="w-3.5 h-3.5 text-muted-foreground hover:text-foreground" />
+                              </button>
+                            )}
+                            {pDelete && (
+                              <button
+                                type="button"
+                                className="p-1 rounded hover:bg-muted transition-colors"
+                                onClick={async (e) => {
+                                  e.stopPropagation();
+                                  const hasPurchases = (
+                                    inventoryPurchases || []
+                                  ).some((p) => p.inventoryItemId === item.id);
+                                  const hasUsage = (materialUsages || []).some(
+                                    (u) => u.inventoryItemId === item.id,
                                   );
-                                  return;
-                                }
-                                const result = await deleteInventoryItemRemote(
-                                  item.id,
-                                );
-                                if (result.status === "unauthenticated") {
-                                  toast.error(
-                                    "Sign in required to delete inventory items",
-                                  );
-                                  return;
-                                }
-                                if (
-                                  result.status === "error" ||
-                                  result.status === "denied"
-                                ) {
-                                  toast.error(
-                                    result.error ||
-                                      "Failed to delete inventory item",
-                                  );
-                                  return;
-                                }
-                                deleteInventoryItem(item.id);
-                                toast.success("Material deleted");
-                              }}
-                              title="Delete material"
-                              data-ocid={`inventory.item.delete_button.${i + 1}`}
-                            >
-                              <Trash2 className="w-3.5 h-3.5 text-muted-foreground hover:text-destructive" />
-                            </button>
-                          )}
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  ))}
+                                  if (hasPurchases || hasUsage) {
+                                    toast.error(
+                                      "Cannot delete material with existing records",
+                                    );
+                                    return;
+                                  }
+                                  const result =
+                                    await deleteInventoryItemRemote(item.id);
+                                  if (result.status === "unauthenticated") {
+                                    toast.error(
+                                      "Sign in required to delete inventory items",
+                                    );
+                                    return;
+                                  }
+                                  if (
+                                    result.status === "error" ||
+                                    result.status === "denied"
+                                  ) {
+                                    toast.error(
+                                      result.error ||
+                                        "Failed to delete inventory item",
+                                    );
+                                    return;
+                                  }
+                                  deleteInventoryItem(item.id);
+                                  toast.success("Material deleted");
+                                }}
+                                title="Delete material"
+                                data-ocid={`inventory.item.delete_button.${i + 1}`}
+                              >
+                                <Trash2 className="w-3.5 h-3.5 text-muted-foreground hover:text-destructive" />
+                              </button>
+                            )}
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
                   {inventoryItems.length === 0 && (
                     <TableRow>
                       <TableCell
@@ -786,37 +904,9 @@ export function Inventory({
                                   <button
                                     type="button"
                                     className="p-1 rounded hover:bg-muted transition-colors"
-                                    onClick={async () => {
-                                      if (
-                                        !window.confirm(
-                                          "Delete this purchase record? This will recalculate stock.",
-                                        )
-                                      )
-                                        return;
-                                      const result =
-                                        await deleteInventoryPurchaseRemote(
-                                          p.id,
-                                          p.inventoryItemId,
-                                        );
-                                      if (result.status === "unauthenticated") {
-                                        toast.error(
-                                          "Not signed in to the server - purchase was not deleted",
-                                        );
-                                        return;
-                                      }
-                                      if (
-                                        result.status === "denied" ||
-                                        result.status === "error"
-                                      ) {
-                                        toast.error(
-                                          result.error ??
-                                            "Could not delete purchase",
-                                        );
-                                        return;
-                                      }
-                                      deleteInventoryPurchase(p.id);
-                                      toast.success("Purchase deleted");
-                                    }}
+                                    onClick={() =>
+                                      setDeletePurchaseRecordTarget(p)
+                                    }
                                     title="Delete purchase"
                                     data-ocid={`inventory.purchases.delete_button.${i + 1}`}
                                   >
@@ -921,6 +1011,14 @@ export function Inventory({
                   estimatedPrice: editingItem.estimatedPrice
                     ? Number(editingItem.estimatedPrice)
                     : undefined,
+                  category: editingItem.category,
+                  brand: editingItem.brand.trim() || undefined,
+                  shade: editingItem.shade.trim() || undefined,
+                  ralCode: editingItem.ralCode.trim() || undefined,
+                  finish: editingItem.finish.trim() || undefined,
+                  powderType: editingItem.powderType.trim() || undefined,
+                  pretreatmentTank:
+                    editingItem.pretreatmentTank.trim() || undefined,
                 });
                 if (result.status === "unauthenticated") {
                   toast.error("Sign in required to update inventory items");
@@ -976,6 +1074,107 @@ export function Inventory({
                     </SelectContent>
                   </Select>
                 </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Category</Label>
+                  <Select
+                    value={editingItem.category}
+                    onValueChange={(v) =>
+                      setEditingItem((p) =>
+                        p ? { ...p, category: v as InventoryItemCategory } : p,
+                      )
+                    }
+                  >
+                    <SelectTrigger data-ocid="inventory.edit.category.select">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {CATEGORIES.map((c) => (
+                        <SelectItem key={c.value} value={c.value}>
+                          {c.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {editingItem.category === "powder_coating_powder" && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Brand</Label>
+                      <Input
+                        value={editingItem.brand}
+                        onChange={(e) =>
+                          setEditingItem((p) =>
+                            p ? { ...p, brand: e.target.value } : p,
+                          )
+                        }
+                        data-ocid="inventory.edit.brand.input"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Shade</Label>
+                      <Input
+                        value={editingItem.shade}
+                        onChange={(e) =>
+                          setEditingItem((p) =>
+                            p ? { ...p, shade: e.target.value } : p,
+                          )
+                        }
+                        data-ocid="inventory.edit.shade.input"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">RAL Code</Label>
+                      <Input
+                        value={editingItem.ralCode}
+                        onChange={(e) =>
+                          setEditingItem((p) =>
+                            p ? { ...p, ralCode: e.target.value } : p,
+                          )
+                        }
+                        data-ocid="inventory.edit.ral_code.input"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Finish</Label>
+                      <Input
+                        value={editingItem.finish}
+                        onChange={(e) =>
+                          setEditingItem((p) =>
+                            p ? { ...p, finish: e.target.value } : p,
+                          )
+                        }
+                        data-ocid="inventory.edit.finish.input"
+                      />
+                    </div>
+                    <div className="space-y-1.5 col-span-2">
+                      <Label className="text-xs">Powder Type</Label>
+                      <Input
+                        value={editingItem.powderType}
+                        onChange={(e) =>
+                          setEditingItem((p) =>
+                            p ? { ...p, powderType: e.target.value } : p,
+                          )
+                        }
+                        data-ocid="inventory.edit.powder_type.input"
+                      />
+                    </div>
+                  </div>
+                )}
+                {editingItem.category === "pretreatment_chemical" && (
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Pretreatment Tank</Label>
+                    <Input
+                      placeholder="e.g. Degreasing Tank 1"
+                      value={editingItem.pretreatmentTank}
+                      onChange={(e) =>
+                        setEditingItem((p) =>
+                          p ? { ...p, pretreatmentTank: e.target.value } : p,
+                        )
+                      }
+                      data-ocid="inventory.edit.pretreatment_tank.input"
+                    />
+                  </div>
+                )}
                 <div className="space-y-1.5">
                   <Label className="text-xs">Reorder Level</Label>
                   <Input
@@ -1089,6 +1288,102 @@ export function Inventory({
                   </SelectContent>
                 </Select>
               </div>
+              <div className="space-y-1.5">
+                <Label>Category</Label>
+                <Select
+                  value={newItem.category}
+                  onValueChange={(v) =>
+                    setNewItem((p) => ({
+                      ...p,
+                      category: v as InventoryItemCategory,
+                    }))
+                  }
+                >
+                  <SelectTrigger data-ocid="inventory.add.category.select">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {CATEGORIES.map((c) => (
+                      <SelectItem key={c.value} value={c.value}>
+                        {c.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              {newItem.category === "powder_coating_powder" && (
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Brand</Label>
+                    <Input
+                      value={newItem.brand}
+                      onChange={(e) =>
+                        setNewItem((p) => ({ ...p, brand: e.target.value }))
+                      }
+                      data-ocid="inventory.add.brand.input"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Shade</Label>
+                    <Input
+                      value={newItem.shade}
+                      onChange={(e) =>
+                        setNewItem((p) => ({ ...p, shade: e.target.value }))
+                      }
+                      data-ocid="inventory.add.shade.input"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">RAL Code</Label>
+                    <Input
+                      value={newItem.ralCode}
+                      onChange={(e) =>
+                        setNewItem((p) => ({ ...p, ralCode: e.target.value }))
+                      }
+                      data-ocid="inventory.add.ral_code.input"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Finish</Label>
+                    <Input
+                      value={newItem.finish}
+                      onChange={(e) =>
+                        setNewItem((p) => ({ ...p, finish: e.target.value }))
+                      }
+                      data-ocid="inventory.add.finish.input"
+                    />
+                  </div>
+                  <div className="space-y-1.5 col-span-2">
+                    <Label className="text-xs">Powder Type</Label>
+                    <Input
+                      value={newItem.powderType}
+                      onChange={(e) =>
+                        setNewItem((p) => ({
+                          ...p,
+                          powderType: e.target.value,
+                        }))
+                      }
+                      data-ocid="inventory.add.powder_type.input"
+                    />
+                  </div>
+                </div>
+              )}
+              {newItem.category === "pretreatment_chemical" && (
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Pretreatment Tank</Label>
+                  <Input
+                    placeholder="e.g. Degreasing Tank 1"
+                    value={newItem.pretreatmentTank}
+                    onChange={(e) =>
+                      setNewItem((p) => ({
+                        ...p,
+                        pretreatmentTank: e.target.value,
+                      }))
+                    }
+                    data-ocid="inventory.add.pretreatment_tank.input"
+                  />
+                </div>
+              )}
             </div>
             <DialogFooter>
               <Button
@@ -1384,6 +1679,36 @@ export function Inventory({
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={!!deletePurchaseRecordTarget}
+        onOpenChange={(o) => !o && setDeletePurchaseRecordTarget(null)}
+        title="Delete purchase record?"
+        description="This will recalculate stock for the affected material."
+        onConfirm={async () => {
+          const p = deletePurchaseRecordTarget;
+          if (!p) return;
+          const result = await deleteInventoryPurchaseRemote(
+            p.id,
+            p.inventoryItemId,
+          );
+          if (result.status === "unauthenticated") {
+            toast.error(
+              "Not signed in to the server - purchase was not deleted",
+            );
+            setDeletePurchaseRecordTarget(null);
+            return;
+          }
+          if (result.status === "denied" || result.status === "error") {
+            toast.error(result.error ?? "Could not delete purchase");
+            setDeletePurchaseRecordTarget(null);
+            return;
+          }
+          deleteInventoryPurchase(p.id);
+          toast.success("Purchase deleted");
+          setDeletePurchaseRecordTarget(null);
+        }}
+      />
     </div>
   );
 }

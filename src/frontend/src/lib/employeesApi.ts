@@ -32,7 +32,7 @@
 // call itself, not a description of what RLS did) and check data.length.
 
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
-import type { Employee, EmployeeType, UserRole } from "@/types";
+import type { Employee, EmployeeType, EmploymentType, UserRole } from "@/types";
 
 // "denied" = the request reached Supabase and completed with no error,
 // but zero rows were affected - the confirmed signature of either an
@@ -63,6 +63,10 @@ interface EmployeeRow {
   emergency_contact_relation: string | null;
   emergency_contact_phone: string | null;
   employee_type: string | null;
+  employment_type: string | null;
+  temp_start_date: string | null;
+  temp_end_date: string | null;
+  daily_wage_rate: number | null;
 }
 
 function rowToEmployee(row: EmployeeRow): Employee {
@@ -83,6 +87,10 @@ function rowToEmployee(row: EmployeeRow): Employee {
     emergencyContactRelation: row.emergency_contact_relation ?? undefined,
     emergencyContactPhone: row.emergency_contact_phone ?? undefined,
     employeeType: (row.employee_type as EmployeeType | null) ?? undefined,
+    employmentType: (row.employment_type as EmploymentType | null) ?? undefined,
+    tempStartDate: row.temp_start_date ?? undefined,
+    tempEndDate: row.temp_end_date ?? undefined,
+    dailyWageRate: row.daily_wage_rate ?? undefined,
   };
 }
 
@@ -105,13 +113,18 @@ function toEmployeeFields(e: Omit<Employee, "id">) {
     emergency_contact_relation: e.emergencyContactRelation ?? null,
     emergency_contact_phone: e.emergencyContactPhone ?? null,
     employee_type: e.employeeType ?? null,
+    employment_type: e.employmentType ?? null,
+    temp_start_date: e.tempStartDate ?? null,
+    temp_end_date: e.tempEndDate ?? null,
+    daily_wage_rate: e.dailyWageRate ?? null,
   };
 }
 
 const SELECT_COLUMNS =
   "id, name, phone, role, monthly_salary, joining_date, photo_ref, " +
   "employee_code, designation, blood_group, emergency_contact_name, " +
-  "emergency_contact_relation, emergency_contact_phone, employee_type";
+  "emergency_contact_relation, emergency_contact_phone, employee_type, " +
+  "employment_type, temp_start_date, temp_end_date, daily_wage_rate";
 
 async function requireSession() {
   if (!isSupabaseConfigured) {

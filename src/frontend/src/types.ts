@@ -49,6 +49,10 @@ export interface LineItem {
   qty: number;
   unitPrice: number;
   amount: number;
+  /** Set when this line item was created via "+ Add Projects" (a real FK
+   * to the project it came from), rather than typed manually. Optional -
+   * manual line items (via "+ Add Row") never have this. */
+  projectId?: string;
 }
 
 export interface QuotationHistoryEntry {
@@ -65,8 +69,20 @@ export interface Quotation {
   projectId?: string;
   lineItems: LineItem[];
   subtotal: number;
-  gstRate: number;
-  gstAmount: number;
+  // §29-31: GST and IGST are both explicitly opt-in and mutually
+  // exclusive - neither applies unless its flag is true. cgst/sgst
+  // apply only when applyGST is true (intra-state, split evenly);
+  // igst applies only when applyIGST is true (inter-state). Mirrors
+  // Invoice's cgstRate/sgstRate/igstRate + cgstAmt/sgstAmt/igstAmt
+  // shape exactly (see Invoice in this same file).
+  applyGST: boolean;
+  applyIGST: boolean;
+  cgstRate: number;
+  sgstRate: number;
+  igstRate: number;
+  cgstAmt: number;
+  sgstAmt: number;
+  igstAmt: number;
   totalAmount: number;
   validUntil: string;
   terms: string;
@@ -98,8 +114,17 @@ export interface QuotationRevision {
   revisionNotes?: string;
   lineItems: LineItem[];
   subtotal: number;
-  gstRate: number;
-  gstAmount: number;
+  // Same optional GST/IGST shape as Quotation - see that interface's
+  // comment. Each revision keeps its own tax configuration frozen at
+  // the time it was current, same as every other revision field.
+  applyGST: boolean;
+  applyIGST: boolean;
+  cgstRate: number;
+  sgstRate: number;
+  igstRate: number;
+  cgstAmt: number;
+  sgstAmt: number;
+  igstAmt: number;
   totalAmount: number;
   validUntil: string;
   terms: string;
@@ -267,6 +292,10 @@ export interface InvLineItem {
   qty: number;
   rate: number;
   amount: number;
+  /** Set when this line item was created via "+ Add Projects" (a real FK
+   * to the project it came from), rather than typed manually. Optional -
+   * manual line items (via "+ Add") never have this. */
+  projectId?: string;
 }
 
 export interface BankDetails {
@@ -412,6 +441,8 @@ export type Page =
   | "petty-expenses"
   | "machinery"
   | "machine-detail"
+  | "tools"
+  | "dies"
   | "export-engine"
   | "scrap"
   | "qms-dashboard"
@@ -419,7 +450,8 @@ export type Page =
   | "qms-inspection-sheets"
   | "qms-my-inspections"
   | "drawing-editor"
-  | "ledger";
+  | "ledger"
+  | "machine-revenue";
 
 // ── Project Tracking Types ──────────────────────────────────────
 
@@ -471,6 +503,8 @@ export interface Project {
   projectName: string;
   workDescription: string;
   assignedEmployeeIds?: string[];
+  assignedMachineIds?: string[];
+  assignedDieIds?: string[];
   poNumber?: string;
   poDate?: string;
   poFiles?: PurchaseAttachment[];
@@ -669,6 +703,15 @@ export type EmployeeType =
   | "Management"
   | "Visitor";
 
+// Phase 43 — Employment classification, deliberately a new/distinct field
+// from EmployeeType above (which stays ID-card-accent-color-only, per
+// design decision). "Daily Wage" employees are ordinary Employee rows
+// that are never created/deleted daily - they stay in the register
+// permanently, remain selectable everywhere an Employee already is, and
+// use the pre-existing attendance_records table (Phase 2) to answer "who
+// worked on a particular day" - no new schema for that part.
+export type EmploymentType = "Permanent" | "Temporary" | "Daily Wage";
+
 export interface Employee {
   id: string;
   name: string;
@@ -690,6 +733,15 @@ export interface Employee {
   /** Card-specific setting, edited only from the ID Card tab. Determines
    * the card's accent color. Defaults to "Permanent" when unset. */
   employeeType?: EmployeeType;
+  // Phase 43 — Employment Type (see EmploymentType above). Undefined ==
+  // "Permanent" for every pre-existing employee (schema default), no
+  // extra fields populated. tempStartDate/tempEndDate are optional even
+  // for Temporary (never forced). dailyWageRate is meaningful only for
+  // "Daily Wage".
+  employmentType?: EmploymentType;
+  tempStartDate?: string;
+  tempEndDate?: string;
+  dailyWageRate?: number;
 }
 
 export interface AttendanceRecord {
@@ -776,6 +828,18 @@ export interface StockReservation {
   notes?: string;
 }
 
+// Phase 36 — Inventory classification (§3-5 of the master scope). Default
+// 'raw_material' preserves every pre-Phase-36 row's meaning unchanged.
+// Powder Coating (powder + pretreatment chemicals) is deliberately just
+// two more categories of ordinary InventoryItem, not a second ledger -
+// see database/phase-36 for the reasoning.
+export type InventoryItemCategory =
+  | "raw_material"
+  | "consumable"
+  | "spare_part"
+  | "powder_coating_powder"
+  | "pretreatment_chemical";
+
 export interface InventoryItem {
   id: string;
   name: string;
@@ -787,9 +851,33 @@ export interface InventoryItem {
   unitCost?: number;
   lastPurchasePrice?: number;
   estimatedPrice?: number;
+  category?: InventoryItemCategory;
+  // Powder Coating Powder fields (category === "powder_coating_powder") -
+  // kept independently trackable per §4.1: two rows sharing a name but
+  // different shade/RAL/finish/brand are genuinely different stock, never
+  // merged.
+  brand?: string;
+  shade?: string;
+  ralCode?: string;
+  finish?: string;
+  powderType?: string;
+  // Pretreatment Chemicals field (category === "pretreatment_chemical")
+  // per §4.2 - which tank/process this chemical is associated with.
+  pretreatmentTank?: string;
 }
 
 export type CompanyPOStatus = "Draft" | "Sent" | "Received";
+
+// Purchasing integration (§15/Task #211): a PO line may optionally be
+// "received" into Inventory/Tools/Machines/Dies via the
+// receive_company_po_item() RPC. resourceType/resourceItemId/
+// pendingGuidedCreation/receivedAt are populated by that RPC, never
+// set directly by the form's own free-text item editing.
+export type CompanyPOItemResourceType =
+  | "inventory"
+  | "tool"
+  | "machine"
+  | "die";
 
 export interface CompanyPOItem {
   id: string;
@@ -798,6 +886,13 @@ export interface CompanyPOItem {
   unit: string;
   rate: number;
   amount: number; // quantity * rate
+  resourceType?: CompanyPOItemResourceType;
+  resourceItemId?: string;
+  // true while a Machine/Die line is linked to resourceType but has no
+  // resourceItemId yet - the guided-creation Add form hasn't been
+  // completed/saved for it.
+  pendingGuidedCreation?: boolean;
+  receivedAt?: number;
 }
 
 export interface CompanyPO {
@@ -967,6 +1062,164 @@ export interface MasterPO {
   createdAt: number;
 }
 
+// ── Tool Register (Phase 37, master scope §6) ───────────────────
+
+export type ToolStatus =
+  | "Available"
+  | "In Use"
+  | "Under Repair"
+  | "Lost"
+  | "Retired";
+
+export interface Tool {
+  id: string;
+  toolCode: string; // TL-001
+  name: string;
+  category?: string;
+  quantity: number;
+  location?: string;
+  assignedEmployeeId?: string;
+  assignedEmployeeName?: string;
+  condition?: MachineCondition; // reuses the same 5-point scale as Machinery
+  status: ToolStatus;
+  purchaseDate?: string;
+  replacementValue?: number;
+  notes?: string;
+  // Phase 43 — photo + vendor, same base64-inline photo pattern and
+  // purchaseVendorId/Name pair Machines already carry (§17 mirror).
+  photoData?: string;
+  purchaseVendorId?: string;
+  purchaseVendorName?: string;
+  // Purchasing integration provenance (§15) - set only when this tool was
+  // created by receiving a CompanyPO line, never guessed.
+  sourceCompanyPoItemId?: string;
+  isActive: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+// Phase 43 — insert-only "who has/had this tool" audit log, mirroring
+// MachineServiceRate's insert-only shape exactly. tools.assignedEmployeeId
+// stays the live "current holder" scalar; this is purely the historical
+// trail layered on top (never a second source of truth for who has it
+// now). employeeName is resolved client-side like every other *Name
+// convenience field in this codebase.
+export interface ToolAssignmentHistory {
+  id: string;
+  toolId: string;
+  employeeId?: string; // undefined = returned/unassigned at this point
+  employeeName?: string;
+  action: "issued" | "returned";
+  notes?: string;
+  recordedBy?: string;
+  recordedAt: number;
+  createdAt: number;
+}
+
+// ── Tooling / Dies Register (Phase 38, master scope §7-9) ───────
+// Dies are reusable across projects (§8) - originalProjectId is
+// provenance/history only, never ownership; a die stays "Available" and
+// assignable to any later project regardless of which project it was
+// originally made for.
+
+export type DieStatus =
+  | "Available"
+  | "In Use"
+  | "Under Maintenance"
+  | "Retired";
+
+export interface Die {
+  id: string;
+  dieCode: string; // DIE-001
+  name: string;
+  type?: string;
+  purpose?: string;
+  compatibleMachineId?: string;
+  originalProjectId?: string;
+  location?: string;
+  status: DieStatus;
+  dateCreated?: string;
+  condition?: MachineCondition;
+  notes?: string;
+  // Phase 43 — photo + full purchase info, same shape Machines/Tools
+  // already carry.
+  photoData?: string;
+  purchaseDate?: string;
+  purchaseCost?: number;
+  purchaseVendorId?: string;
+  purchaseVendorName?: string;
+  // Purchasing integration provenance (§15) - set only when this die was
+  // created by receiving a CompanyPO line, never guessed.
+  sourceCompanyPoItemId?: string;
+  isActive: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+// Machine <-> Spare Part (Inventory item, category = spare_part) and
+// Machine <-> Die compatibility junctions (§9). Plain many-to-many link
+// rows - a die/spare-part can be compatible with more than one machine,
+// beyond whatever single "primary" compatibleMachineId a Die also
+// carries above.
+export interface MachineSparePart {
+  machineId: string;
+  inventoryItemId: string;
+  createdAt: number;
+}
+
+export interface MachineDie {
+  machineId: string;
+  dieId: string;
+  createdAt: number;
+}
+
+// ── Machine / Service Revenue (§17-28) ──────────────────────────
+// Revenue is revenue-only, never profit/costing, and lives on the
+// *service*, never the machine directly: a BillableService optionally
+// references one machine (machineId), but a machine may have zero, one,
+// or several services, and a process-level service (e.g. "Powder
+// Coating") may reference no machine at all. Rate history is
+// insert-only so a rate change never rewrites past revenue; every
+// MachineServiceUsage row freezes its own rateApplied/revenueAmount at
+// insert time. Assignment (Project.assignedMachineIds) never creates a
+// usage/revenue row - the two are structurally unconnected.
+export type ChargingMethod = "hour" | "piece" | "bend" | "kg" | "other";
+
+export interface BillableService {
+  id: string;
+  name: string;
+  machineId?: string; // optional - process-level services have none
+  chargingMethod: ChargingMethod;
+  unitLabel?: string; // display unit, e.g. "hrs", "pcs", "bends", "kg"
+  isActive: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface MachineServiceRate {
+  id: string;
+  billableServiceId: string;
+  rate: number;
+  effectiveFrom: number;
+  createdBy?: string;
+  createdAt: number;
+}
+
+export interface MachineServiceUsage {
+  id: string;
+  projectId: string;
+  billableServiceId: string;
+  usageDate: string; // yyyy-mm-dd
+  quantity: number;
+  unit?: string;
+  rateApplied: number; // frozen at insert time
+  revenueAmount: number; // frozen at insert time (quantity * rateApplied)
+  recordedBy?: string;
+  notes?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 // ── Machinery Management ────────────────────────────────────────
 
 export type MachineType =
@@ -1039,6 +1292,10 @@ export interface Machine {
   hourlyRate?: number;
   primaryImageData?: string; // base64 for localStorage phase
   notes?: string;
+  // Purchasing integration provenance (§15, Phase 38) - set only when
+  // this machine was created via the guided-creation flow off a received
+  // CompanyPO line, never guessed.
+  sourceCompanyPoItemId?: string;
   isActive: boolean;
   createdAt: number;
   updatedAt: number;

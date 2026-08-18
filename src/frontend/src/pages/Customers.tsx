@@ -17,9 +17,10 @@ import {
 } from "@/components/ui/table";
 import { Edit2, History, Plus, Search, Trash2 } from "lucide-react";
 import { ShieldOff } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import {
   createCustomerRemote,
   deleteCustomerRemote,
@@ -58,6 +59,9 @@ export function Customers({ onViewHistory }: Props) {
   const [editing, setEditing] = useState<Customer | null>(null);
   const [form, setForm] = useState(empty());
   const [isSaving, setIsSaving] = useState(false);
+  const [formErrors, setFormErrors] = useState<Record<string, string>>({});
+  const nameInputRef = useRef<HTMLInputElement>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Customer | null>(null);
 
   const filtered = customers.filter(
     (c) =>
@@ -68,6 +72,7 @@ export function Customers({ onViewHistory }: Props) {
   const openCreate = () => {
     setEditing(null);
     setForm(empty());
+    setFormErrors({});
     setOpen(true);
   };
   const openEdit = (c: Customer) => {
@@ -85,6 +90,7 @@ export function Customers({ onViewHistory }: Props) {
       emails: c.emails || [],
       primaryEmail: c.primaryEmail || c.email || "",
     });
+    setFormErrors({});
     setOpen(true);
   };
 
@@ -95,10 +101,16 @@ export function Customers({ onViewHistory }: Props) {
   // success. Mirrors Employees.tsx's Phase 18B pattern exactly.
   const handleSave = async () => {
     if (isSaving) return;
+    const errors: Record<string, string> = {};
     if (!form.name || !form.name.trim()) {
-      toast.error("Customer name is required");
+      errors.name = "Customer name is required";
+    }
+    if (Object.keys(errors).length > 0) {
+      setFormErrors(errors);
+      nameInputRef.current?.focus();
       return;
     }
+    setFormErrors({});
     // Sync primaryEmail to legacy email field for backward compat
     const emailsArr =
       ((form as any).emails as Array<{ email: string; type: string }>) || [];
@@ -153,9 +165,36 @@ export function Customers({ onViewHistory }: Props) {
     }
   };
 
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget) return;
+    const c = deleteTarget;
+    const result = await deleteCustomerRemote(c.id);
+    if (result.status === "unauthenticated") {
+      toast.error("Sign in required to delete customers");
+      setDeleteTarget(null);
+      return;
+    }
+    if (result.status === "error" || result.status === "denied") {
+      toast.error(result.error || "Failed to delete customer");
+      setDeleteTarget(null);
+      return;
+    }
+    deleteCustomer(c.id);
+    toast.success("Customer deleted");
+    setDeleteTarget(null);
+  };
+
   const f =
-    (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) =>
+    (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement>) => {
       setForm((p) => ({ ...p, [k]: e.target.value }));
+      if (formErrors[k as string]) {
+        setFormErrors((prev) => {
+          const next = { ...prev };
+          delete next[k as string];
+          return next;
+        });
+      }
+    };
 
   if (!canView(currentUser, "customers")) {
     return (
@@ -257,26 +296,20 @@ export function Customers({ onViewHistory }: Props) {
                           variant="ghost"
                           size="sm"
                           className="h-6 px-2"
-                          onClick={async () => {
+                          onClick={() => {
                             if (!canDelete(currentUser, "customers")) {
                               toast.error(
                                 "Access restricted: delete permission required",
                               );
                               return;
                             }
-                            if (
-                              !window.confirm(
-                                `Are you sure you want to delete customer "${c.name}"? This cannot be undone.`,
-                              )
-                            )
-                              return;
                             // Local linked-record guard, fail-fast BEFORE
-                            // any remote call - same check store.ts's
-                            // deleteCustomer runs, duplicated here so we
-                            // never even attempt a remote delete for a
-                            // customer with linked quotations/invoices/
-                            // projects (mirrors Employees.tsx's Phase 18B
-                            // pattern).
+                            // even offering the confirm dialog - same
+                            // check store.ts's deleteCustomer runs,
+                            // duplicated here so we never attempt a delete
+                            // for a customer with linked quotations/
+                            // invoices/projects (mirrors Employees.tsx's
+                            // Phase 18B pattern).
                             const s = useStore.getState();
                             const hasQuotations = (s.quotations || []).some(
                               (q) => q.customerId === c.id,
@@ -293,24 +326,7 @@ export function Customers({ onViewHistory }: Props) {
                               );
                               return;
                             }
-                            const result = await deleteCustomerRemote(c.id);
-                            if (result.status === "unauthenticated") {
-                              toast.error(
-                                "Sign in required to delete customers",
-                              );
-                              return;
-                            }
-                            if (
-                              result.status === "error" ||
-                              result.status === "denied"
-                            ) {
-                              toast.error(
-                                result.error || "Failed to delete customer",
-                              );
-                              return;
-                            }
-                            deleteCustomer(c.id);
-                            toast.success("Customer deleted");
+                            setDeleteTarget(c);
                           }}
                           data-ocid={`customers.delete_button.${i + 1}`}
                         >
@@ -379,13 +395,28 @@ export function Customers({ onViewHistory }: Props) {
                   key={key}
                   className={key === "address" ? "col-span-2" : ""}
                 >
-                  <Label className="text-xs">{label}</Label>
+                  <Label className="text-xs">
+                    {label}
+                    {key === "name" && (
+                      <span className="text-destructive"> *</span>
+                    )}
+                  </Label>
                   <Input
+                    ref={key === "name" ? nameInputRef : undefined}
                     data-ocid={`customers.form.${key}.input`}
-                    className="mt-1 h-8 text-sm"
+                    className={`mt-1 h-8 text-sm ${formErrors[key as string] ? "border-destructive" : ""}`}
                     value={form[key] as string}
                     onChange={f(key)}
+                    aria-invalid={!!formErrors[key as string]}
                   />
+                  {formErrors[key as string] && (
+                    <p
+                      className="text-xs text-destructive mt-1"
+                      data-ocid={`customers.form.${key}.error`}
+                    >
+                      {formErrors[key as string]}
+                    </p>
+                  )}
                 </div>
               ))}
             </div>
@@ -599,6 +630,14 @@ export function Customers({ onViewHistory }: Props) {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={!!deleteTarget}
+        onOpenChange={(o) => !o && setDeleteTarget(null)}
+        title="Delete customer?"
+        description={`Customer "${deleteTarget?.name}" will be permanently deleted.`}
+        onConfirm={handleConfirmDelete}
+      />
     </div>
   );
 }

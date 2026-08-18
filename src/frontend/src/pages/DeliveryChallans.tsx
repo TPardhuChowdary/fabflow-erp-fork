@@ -41,8 +41,10 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import { DeliveryChallanPrintView } from "../components/DeliveryChallanPrintView";
 import { StatusBadge } from "../components/StatusBadge";
+import { SearchableSelect } from "../components/ui/searchable-select";
 import { ChallanDocContent } from "../lib/documentRenderers";
 import {
   openShareModalV2,
@@ -205,6 +207,9 @@ export function DeliveryChallans() {
   const [showPreview, setShowPreview] = useState(false);
   // Edit dialog state (separate from preview)
   const [showEditDialog, setShowEditDialog] = useState(false);
+  const [deleteDCTarget, setDeleteDCTarget] = useState<DeliveryChallan | null>(
+    null,
+  );
   const [editingChallan, setEditingChallan] = useState<DeliveryChallan | null>(
     null,
   );
@@ -989,17 +994,11 @@ export function DeliveryChallans() {
                             type="button"
                             title="Delete"
                             className="p-1 rounded hover:bg-muted text-red-500"
-                            onClick={async () => {
-                              if (
-                                !window.confirm(
-                                  `Are you sure you want to delete challan "${dc.dcNo}"? This cannot be undone.`,
-                                )
-                              )
-                                return;
+                            onClick={() => {
                               // Relocated from the store's deleteDeliveryChallan
                               // action (now a pure local sync) - this is still
-                              // a local business rule, but it must run before
-                              // the remote delete call, not after.
+                              // a local business rule, checked before even
+                              // offering the confirm dialog.
                               const hasInvoices = (invoices || []).some(
                                 (inv) => inv.dcId === dc.id,
                               );
@@ -1009,30 +1008,7 @@ export function DeliveryChallans() {
                                 );
                                 return;
                               }
-                              const result = await deleteDeliveryChallanRemote(
-                                dc.id,
-                              );
-                              if (result.status === "unauthenticated") {
-                                toast.error(
-                                  "You must be signed in to delete a delivery challan",
-                                );
-                                return;
-                              }
-                              if (result.status === "denied") {
-                                toast.error(
-                                  "You do not have permission to delete delivery challans",
-                                );
-                                return;
-                              }
-                              if (result.status === "error") {
-                                toast.error(
-                                  result.error ||
-                                    "Failed to delete delivery challan",
-                                );
-                                return;
-                              }
-                              deleteDeliveryChallan(dc.id);
-                              toast.success("Delivery challan deleted");
+                              setDeleteDCTarget(dc);
                             }}
                             data-ocid={`delivery_challans.delete_button.${i + 1}`}
                           >
@@ -1460,36 +1436,25 @@ export function DeliveryChallans() {
                     Select Projects *
                   </Label>
                   <div className="flex gap-2">
-                    <Select value="" onValueChange={handleAddProject}>
-                      <SelectTrigger
-                        className="h-8 text-sm flex-1"
-                        data-ocid="delivery_challans.form.project.select"
-                      >
-                        <SelectValue placeholder="Add a project\u2026" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {availableProjects.length === 0 ? (
-                          <div className="py-2 px-3 text-xs text-muted-foreground">
-                            No more projects available
-                          </div>
-                        ) : (
-                          availableProjects.map((p) => (
-                            <SelectItem
-                              key={p.id}
-                              value={p.id}
-                              className="text-sm"
-                            >
-                              {getCustomerVisibleName(p)}
-                              {p.internalOrderCode
-                                ? ` · ${p.internalOrderCode}`
-                                : p.projectNo
-                                  ? ` (${p.projectNo})`
-                                  : ""}
-                            </SelectItem>
-                          ))
-                        )}
-                      </SelectContent>
-                    </Select>
+                    <SearchableSelect
+                      value=""
+                      onChange={handleAddProject}
+                      options={availableProjects.map((p) => ({
+                        value: p.id,
+                        label: `${getCustomerVisibleName(p)}${
+                          p.internalOrderCode
+                            ? ` · ${p.internalOrderCode}`
+                            : p.projectNo
+                              ? ` (${p.projectNo})`
+                              : ""
+                        }`,
+                      }))}
+                      placeholder="Add a project\u2026"
+                      searchPlaceholder="Search projects…"
+                      emptyText="No more projects available"
+                      className="h-8 text-sm flex-1"
+                      data-ocid="delivery_challans.form.project.select"
+                    />
                   </div>
 
                   {form.selectedProjectIds.length > 0 && (
@@ -1909,6 +1874,38 @@ export function DeliveryChallans() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={!!deleteDCTarget}
+        onOpenChange={(o) => !o && setDeleteDCTarget(null)}
+        title="Delete delivery challan?"
+        description={`Challan "${deleteDCTarget?.dcNo}" will be permanently deleted.`}
+        onConfirm={async () => {
+          const dc = deleteDCTarget;
+          if (!dc) return;
+          const result = await deleteDeliveryChallanRemote(dc.id);
+          if (result.status === "unauthenticated") {
+            toast.error("You must be signed in to delete a delivery challan");
+            setDeleteDCTarget(null);
+            return;
+          }
+          if (result.status === "denied") {
+            toast.error(
+              "You do not have permission to delete delivery challans",
+            );
+            setDeleteDCTarget(null);
+            return;
+          }
+          if (result.status === "error") {
+            toast.error(result.error || "Failed to delete delivery challan");
+            setDeleteDCTarget(null);
+            return;
+          }
+          deleteDeliveryChallan(dc.id);
+          toast.success("Delivery challan deleted");
+          setDeleteDCTarget(null);
+        }}
+      />
     </div>
   );
 }

@@ -63,6 +63,11 @@ interface DrawingRow {
   parent_drawing_id: string | null;
   source_design_file_id: string | null;
   original_drawing_id: string | null;
+  /** Phase 34 — see DrawingDocument.sourceKind. Optional on the row type
+   * only so any code path that doesn't SELECT it (there shouldn't be any
+   * after this phase, but defensively) still compiles; the DB column
+   * itself is `not null default 'pdf'`. */
+  source_kind?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -123,6 +128,7 @@ function rowToDrawing(
     parentDrawingId: row.parent_drawing_id ?? undefined,
     sourceDesignFileId: row.source_design_file_id ?? undefined,
     originalDrawingId: row.original_drawing_id ?? undefined,
+    sourceKind: (row.source_kind as DrawingDocument["sourceKind"]) ?? undefined,
   };
 }
 
@@ -428,6 +434,8 @@ export interface PromoteDesignFileInput {
   ownerType?: "project" | "machine" | "library";
   ownerId?: string;
   category?: DrawingDocument["category"];
+  /** Phase 34 — defaults to "pdf" (unchanged behavior) when omitted. */
+  sourceKind?: DrawingDocument["sourceKind"];
 }
 
 /** Creates the one-time editable Master Drawing for a DesignFile. Callers
@@ -463,6 +471,7 @@ export async function promoteDesignFileToMasterDrawing(
       uploaded_by: input.uploadedBy || null,
       uploaded_by_name: input.uploadedByName,
       source_design_file_id: input.sourceDesignFileId,
+      source_kind: input.sourceKind ?? "pdf",
     })
     .select()
     .single();

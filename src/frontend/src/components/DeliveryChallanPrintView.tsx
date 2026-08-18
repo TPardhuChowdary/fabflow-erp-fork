@@ -274,7 +274,7 @@ export function DeliveryChallanPrintView({
                   {deliveryAddress}
                 </div>
               ) : (
-                <div style={{ fontSize: "11px", color: "#aaa" }}>\u2014</div>
+                <div style={{ fontSize: "11px", color: "#aaa" }}>—</div>
               )}
             </div>
 

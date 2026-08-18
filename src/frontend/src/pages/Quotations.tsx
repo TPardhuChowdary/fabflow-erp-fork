@@ -1,5 +1,6 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -9,6 +10,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import {
   Select,
   SelectContent,
@@ -43,6 +45,9 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
+import { CustomerSelect } from "../components/CustomerSelect";
+import { ProjectMultiSelect } from "../components/ProjectMultiSelect";
 import { QuotationPrintView } from "../components/QuotationPrintView";
 import ShareButton from "../components/ShareButton";
 import { StatusBadge } from "../components/StatusBadge";
@@ -65,7 +70,11 @@ import {
   updateQuotationRemote,
   updateQuotationRevisionRemote,
 } from "../lib/quotationsApi";
-import { getCustomerVisibleName } from "../lib/utils";
+import {
+  cn,
+  getCustomerVisibleName,
+  projectsNeedingNewLineItems,
+} from "../lib/utils";
 import {
   canCreate,
   canDelete,
@@ -95,10 +104,43 @@ const newItem = (): LineItem => ({
 
 const todayStr = () => new Date().toISOString().split("T")[0];
 
+// §29-31: GST/IGST are opt-in and mutually exclusive; neither applies by
+// default (both false → 0 tax, matching "do not auto-apply 18% or any
+// tax when neither is selected"). Rates are fixed standard rates (18%
+// GST split evenly as 9% CGST + 9% SGST for intra-state, 18% IGST for
+// inter-state) - same numbers Invoice already defaults to - never
+// user-edited, since the checkboxes replace the old free-typed % input
+// entirely.
+const GST_HALF_RATE = 9;
+const IGST_RATE = 18;
+
+function computeQuotationTax(
+  applyGST: boolean,
+  applyIGST: boolean,
+  subtotal: number,
+) {
+  const cgstRate = applyGST ? GST_HALF_RATE : 0;
+  const sgstRate = applyGST ? GST_HALF_RATE : 0;
+  const igstRate = applyIGST ? IGST_RATE : 0;
+  const cgstAmt = Math.round((subtotal * cgstRate) / 100);
+  const sgstAmt = Math.round((subtotal * sgstRate) / 100);
+  const igstAmt = Math.round((subtotal * igstRate) / 100);
+  return {
+    cgstRate,
+    sgstRate,
+    igstRate,
+    cgstAmt,
+    sgstAmt,
+    igstAmt,
+    total: subtotal + cgstAmt + sgstAmt + igstAmt,
+  };
+}
+
 const emptyForm = (defaultTerms = "") => ({
   customerId: "",
   lineItems: [newItem()],
-  gstRate: 18,
+  applyGST: false,
+  applyIGST: false,
   validUntil: "",
   quotationDate: todayStr(),
   terms: defaultTerms,
@@ -216,6 +258,8 @@ export function Quotations() {
     null,
   );
   const [showRecordPO, setShowRecordPO] = useState(false);
+  const [deleteQuotationTarget, setDeleteQuotationTarget] =
+    useState<Quotation | null>(null);
   const [poTargetQuotation, setPoTargetQuotation] = useState<Quotation | null>(
     null,
   );
@@ -278,14 +322,15 @@ export function Quotations() {
   };
 
   const subtotal = (form.lineItems || []).reduce((s, li) => s + li.amount, 0);
-  const gstAmt = Math.round((subtotal * form.gstRate) / 100);
-  const total = subtotal + gstAmt;
+  const { cgstRate, sgstRate, igstRate, cgstAmt, sgstAmt, igstAmt, total } =
+    computeQuotationTax(form.applyGST, form.applyIGST, subtotal);
 
   const openEdit = (q: Quotation) => {
     setForm({
       customerId: q.customerId,
       lineItems: (q.lineItems || []).map((li) => ({ ...li })),
-      gstRate: q.gstRate || 18,
+      applyGST: q.applyGST ?? false,
+      applyIGST: q.applyIGST ?? false,
       validUntil: q.validUntil || "",
       quotationDate: (q as any).quotationDate || "",
       terms: q.terms || "",
@@ -302,7 +347,8 @@ export function Quotations() {
     setForm({
       customerId: q.customerId,
       lineItems: (q.lineItems || []).map((li) => ({ ...li })),
-      gstRate: q.gstRate || 18,
+      applyGST: q.applyGST ?? false,
+      applyIGST: q.applyIGST ?? false,
       validUntil: q.validUntil || "",
       quotationDate: todayStr(),
       terms: q.terms || "",
@@ -322,7 +368,8 @@ export function Quotations() {
       lineItems: (current?.lineItems ?? q.lineItems ?? []).map((li) => ({
         ...li,
       })),
-      gstRate: current?.gstRate ?? q.gstRate ?? 18,
+      applyGST: current?.applyGST ?? q.applyGST ?? false,
+      applyIGST: current?.applyIGST ?? q.applyIGST ?? false,
       validUntil: current?.validUntil ?? q.validUntil ?? "",
       quotationDate: todayStr(),
       terms: current?.terms ?? q.terms ?? "",
@@ -364,8 +411,12 @@ export function Quotations() {
         (s, li) => s + li.amount,
         0,
       );
-      const gstAmtVal = Math.round((subtotalVal * form.gstRate) / 100);
-      const totalVal = subtotalVal + gstAmtVal;
+      const taxVal = computeQuotationTax(
+        form.applyGST,
+        form.applyIGST,
+        subtotalVal,
+      );
+      const totalVal = taxVal.total;
 
       if (revisionMode && editingId) {
         const existing = (quotations || []).find((q) => q.id === editingId);
@@ -400,8 +451,14 @@ export function Quotations() {
           revisionDate: todayStr(),
           lineItems: form.lineItems,
           subtotal: subtotalVal,
-          gstRate: form.gstRate,
-          gstAmount: gstAmtVal,
+          applyGST: form.applyGST,
+          applyIGST: form.applyIGST,
+          cgstRate: taxVal.cgstRate,
+          sgstRate: taxVal.sgstRate,
+          igstRate: taxVal.igstRate,
+          cgstAmt: taxVal.cgstAmt,
+          sgstAmt: taxVal.sgstAmt,
+          igstAmt: taxVal.igstAmt,
           totalAmount: totalVal,
           validUntil: form.validUntil,
           terms: form.notes || form.terms,
@@ -434,8 +491,14 @@ export function Quotations() {
           projectId: existing.projectId,
           lineItems: form.lineItems,
           subtotal: subtotalVal,
-          gstRate: form.gstRate,
-          gstAmount: gstAmtVal,
+          applyGST: form.applyGST,
+          applyIGST: form.applyIGST,
+          cgstRate: taxVal.cgstRate,
+          sgstRate: taxVal.sgstRate,
+          igstRate: taxVal.igstRate,
+          cgstAmt: taxVal.cgstAmt,
+          sgstAmt: taxVal.sgstAmt,
+          igstAmt: taxVal.igstAmt,
           totalAmount: totalVal,
           validUntil: form.validUntil,
           quotationDate: existing.quotationDate,
@@ -472,8 +535,14 @@ export function Quotations() {
           projectId: existing.projectId,
           lineItems: form.lineItems,
           subtotal: subtotalVal,
-          gstRate: form.gstRate,
-          gstAmount: gstAmtVal,
+          applyGST: form.applyGST,
+          applyIGST: form.applyIGST,
+          cgstRate: taxVal.cgstRate,
+          sgstRate: taxVal.sgstRate,
+          igstRate: taxVal.igstRate,
+          cgstAmt: taxVal.cgstAmt,
+          sgstAmt: taxVal.sgstAmt,
+          igstAmt: taxVal.igstAmt,
           totalAmount: totalVal,
           validUntil: form.validUntil,
           quotationDate: form.quotationDate,
@@ -510,8 +579,14 @@ export function Quotations() {
             ...current,
             lineItems: form.lineItems,
             subtotal: subtotalVal,
-            gstRate: form.gstRate,
-            gstAmount: gstAmtVal,
+            applyGST: form.applyGST,
+            applyIGST: form.applyIGST,
+            cgstRate: taxVal.cgstRate,
+            sgstRate: taxVal.sgstRate,
+            igstRate: taxVal.igstRate,
+            cgstAmt: taxVal.cgstAmt,
+            sgstAmt: taxVal.sgstAmt,
+            igstAmt: taxVal.igstAmt,
             totalAmount: totalVal,
             validUntil: form.validUntil,
             terms: form.notes || form.terms,
@@ -533,8 +608,14 @@ export function Quotations() {
           projectId: undefined,
           lineItems: form.lineItems,
           subtotal: subtotalVal,
-          gstRate: form.gstRate,
-          gstAmount: gstAmtVal,
+          applyGST: form.applyGST,
+          applyIGST: form.applyIGST,
+          cgstRate: taxVal.cgstRate,
+          sgstRate: taxVal.sgstRate,
+          igstRate: taxVal.igstRate,
+          cgstAmt: taxVal.cgstAmt,
+          sgstAmt: taxVal.sgstAmt,
+          igstAmt: taxVal.igstAmt,
           totalAmount: totalVal,
           validUntil: form.validUntil,
           quotationDate: form.quotationDate,
@@ -570,8 +651,14 @@ export function Quotations() {
           revisionDate: form.quotationDate || todayStr(),
           lineItems: form.lineItems,
           subtotal: subtotalVal,
-          gstRate: form.gstRate,
-          gstAmount: gstAmtVal,
+          applyGST: form.applyGST,
+          applyIGST: form.applyIGST,
+          cgstRate: taxVal.cgstRate,
+          sgstRate: taxVal.sgstRate,
+          igstRate: taxVal.igstRate,
+          cgstAmt: taxVal.cgstAmt,
+          sgstAmt: taxVal.sgstAmt,
+          igstAmt: taxVal.igstAmt,
           totalAmount: totalVal,
           validUntil: form.validUntil,
           terms: form.notes || form.terms,
@@ -615,8 +702,14 @@ export function Quotations() {
         projectId: q.projectId,
         lineItems: q.lineItems,
         subtotal: q.subtotal,
-        gstRate: q.gstRate,
-        gstAmount: q.gstAmount,
+        applyGST: q.applyGST,
+        applyIGST: q.applyIGST,
+        cgstRate: q.cgstRate,
+        sgstRate: q.sgstRate,
+        igstRate: q.igstRate,
+        cgstAmt: q.cgstAmt,
+        sgstAmt: q.sgstAmt,
+        igstAmt: q.igstAmt,
         totalAmount: q.totalAmount,
         validUntil: q.validUntil,
         quotationDate: q.quotationDate,
@@ -858,6 +951,171 @@ export function Quotations() {
   // PO is recorded, so it's never subject to the post-PO lock.
   const isLocked = hasRecordedPO && !forceEdit && !revisionMode;
 
+  // The full action set for one quotation row — extracted so it renders
+  // identically (same handlers, same permission gates) from both the
+  // desktop table cell and the mobile card (Fix 1), instead of having
+  // two copies of ~140 lines of button JSX to keep in sync. `compact`
+  // only changes button sizing (table = tight icon buttons, card =
+  // touch-sized) via the existing size conventions already used for
+  // each layout elsewhere on this page.
+  const QuotationRowActions = ({
+    q,
+    i,
+    compact,
+  }: {
+    q: Quotation;
+    i: number;
+    compact: boolean;
+  }) => {
+    const btnSize = compact ? "h-7 w-7" : "h-9 w-9";
+    const iconSize = compact ? "w-3.5 h-3.5" : "w-4 h-4";
+    return (
+      <>
+        <Button
+          variant="ghost"
+          size="icon"
+          className={btnSize}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setPrintQuotation(q);
+          }}
+          title="View"
+          data-ocid={`quotations.view_button.${i + 1}`}
+        >
+          <Eye className={iconSize} />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className={btnSize}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setSelectedQuotation(q);
+          }}
+          title="Revisions & Purchase Orders"
+          data-ocid={`quotations.revisions_button.${i + 1}`}
+        >
+          <Layers className={iconSize} />
+        </Button>
+        {pEdit && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className={btnSize}
+            onClick={() => openEdit(q)}
+            title="Edit"
+          >
+            <Edit2 className={iconSize} />
+          </Button>
+        )}
+        {pCreate && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className={btnSize}
+            onClick={() => openDuplicate(q)}
+            title="Duplicate"
+            data-ocid={`quotations.duplicate_button.${i + 1}`}
+          >
+            <Copy className={iconSize} />
+          </Button>
+        )}
+        {pEdit && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className={btnSize}
+            onClick={() => openCreateRevision(q)}
+            title="Create Revision"
+            data-ocid={`quotations.create_revision.button.${i + 1}`}
+          >
+            <GitBranch className={iconSize} />
+          </Button>
+        )}
+        {pPrint && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className={btnSize}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              handlePrint(q);
+            }}
+            title="Print"
+          >
+            <Printer className={iconSize} />
+          </Button>
+        )}
+        {pDownload && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className={btnSize}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              handleDownload(q);
+            }}
+            title="Download PDF"
+          >
+            <Download className={iconSize} />
+          </Button>
+        )}
+        {pShare && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className={btnSize}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              handleShare(q);
+            }}
+            title="Share"
+          >
+            <Share2 className={iconSize} />
+          </Button>
+        )}
+        {pDelete && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className={cn(btnSize, "text-destructive hover:text-destructive")}
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setDeleteQuotationTarget(q);
+            }}
+            title="Delete"
+          >
+            <Trash2 className={iconSize} />
+          </Button>
+        )}
+        {pEdit && q.status === "Accepted" && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className={cn(btnSize, "text-green-700 hover:text-green-900")}
+            title="Record Purchase Order"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setPoTargetQuotation(q);
+              setPoTargetRevisionId(getCurrentRevision(q.id)?.id || null);
+              setShowRecordPO(true);
+            }}
+            data-ocid={`quotations.record_po.button.${i + 1}`}
+          >
+            <Plus className={iconSize} />
+          </Button>
+        )}
+      </>
+    );
+  };
+
   if (!pView) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
@@ -901,7 +1159,75 @@ export function Quotations() {
         )}
       </div>
 
-      <div className="table-wrapper">
+      {/* Mobile cards (Fix 1, < sm/640px): the desktop table's 8 columns +
+          10 possible action buttons don't fit a phone width. Shows the
+          curated fields (QT No., Customer, Amount, Status, Valid Until/PO)
+          plus the same QuotationRowActions used by the desktop table, so
+          every action stays reachable and in sync with one implementation. */}
+      <div className="sm:hidden space-y-2" data-ocid="quotations.list.cards">
+        {sorted.map((q, i) => {
+          const cust = customers.find((c) => c.id === q.customerId);
+          const rPO = (q as Quotation & { recordedPO?: { poNumber: string } })
+            .recordedPO;
+          const qPOCount = getPOsForQuotation(q.id).length;
+          return (
+            <div
+              key={q.id}
+              className="rounded-md border p-3 space-y-2"
+              data-ocid={`quotations.list.card.${i + 1}`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="text-sm font-mono font-semibold">
+                    {q.qtNo}
+                  </div>
+                  <div className="text-sm text-muted-foreground truncate">
+                    {cust?.name ?? "—"}
+                  </div>
+                </div>
+                <StatusBadge status={q.status} />
+              </div>
+              <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-xs">
+                <div>
+                  <span className="text-muted-foreground">Amount: </span>
+                  <span className="font-semibold">{fmt(q.totalAmount)}</span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Valid Until: </span>
+                  {q.validUntil || "—"}
+                </div>
+                <div className="col-span-2">
+                  <span className="text-muted-foreground">PO: </span>
+                  {qPOCount > 0 ? (
+                    <span className="font-mono text-green-700 font-semibold">
+                      {qPOCount} PO{qPOCount > 1 ? "s" : ""}
+                    </span>
+                  ) : rPO ? (
+                    <span className="font-mono text-green-700 font-semibold">
+                      {rPO.poNumber}
+                    </span>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
+                </div>
+              </div>
+              <div className="flex items-center gap-1 flex-wrap pt-1 border-t">
+                <QuotationRowActions q={q} i={i} compact={false} />
+              </div>
+            </div>
+          );
+        })}
+        {sorted.length === 0 && (
+          <p
+            className="text-center py-8 text-sm text-muted-foreground"
+            data-ocid="quotations.list.cards.empty_state"
+          >
+            No quotations
+          </p>
+        )}
+      </div>
+
+      <div className="hidden sm:block table-wrapper">
         <div className="rounded-md border" data-ocid="quotations.list.table">
           <Table>
             <TableHeader>
@@ -962,7 +1288,7 @@ export function Quotations() {
                           {rPO.poNumber}
                         </span>
                       ) : (
-                        <span className="text-muted-foreground">\u2014</span>
+                        <span className="text-muted-foreground">—</span>
                       )}
                     </TableCell>
                     <TableCell>
@@ -1001,165 +1327,7 @@ export function Quotations() {
                     </TableCell>
                     <TableCell onClick={(e) => e.stopPropagation()}>
                       <div className="flex gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            setPrintQuotation(q);
-                          }}
-                          title="View"
-                          data-ocid={`quotations.view_button.${i + 1}`}
-                        >
-                          <Eye className="w-3.5 h-3.5" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            setSelectedQuotation(q);
-                          }}
-                          title="Revisions & Purchase Orders"
-                          data-ocid={`quotations.revisions_button.${i + 1}`}
-                        >
-                          <Layers className="w-3.5 h-3.5" />
-                        </Button>
-                        {pEdit && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7"
-                            onClick={() => openEdit(q)}
-                            title="Edit"
-                          >
-                            <Edit2 className="w-3.5 h-3.5" />
-                          </Button>
-                        )}
-                        {pCreate && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7"
-                            onClick={() => openDuplicate(q)}
-                            title="Duplicate"
-                            data-ocid={`quotations.duplicate_button.${i + 1}`}
-                          >
-                            <Copy className="w-3.5 h-3.5" />
-                          </Button>
-                        )}
-                        {pEdit && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7"
-                            onClick={() => openCreateRevision(q)}
-                            title="Create Revision"
-                            data-ocid={`quotations.create_revision.button.${i + 1}`}
-                          >
-                            <GitBranch className="w-3.5 h-3.5" />
-                          </Button>
-                        )}
-                        {pPrint && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7"
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              handlePrint(q);
-                            }}
-                            title="Print"
-                          >
-                            <Printer className="w-3.5 h-3.5" />
-                          </Button>
-                        )}
-                        {pDownload && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7"
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              handleDownload(q);
-                            }}
-                            title="Download PDF"
-                          >
-                            <Download className="w-3.5 h-3.5" />
-                          </Button>
-                        )}
-                        {pShare && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7"
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              handleShare(q);
-                            }}
-                            title="Share"
-                          >
-                            <Share2 className="w-3.5 h-3.5" />
-                          </Button>
-                        )}
-                        {pDelete && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7 text-destructive hover:text-destructive"
-                            onClick={async () => {
-                              if (!confirm("Delete this quotation?")) return;
-                              const result = await deleteQuotationRemote(q.id);
-                              if (result.status === "unauthenticated") {
-                                toast.error(
-                                  "Not signed in to the server - quotation was not deleted",
-                                );
-                                return;
-                              }
-                              if (
-                                result.status === "denied" ||
-                                result.status === "error"
-                              ) {
-                                toast.error(
-                                  result.error ?? "Could not delete quotation",
-                                );
-                                return;
-                              }
-                              deleteQuotation(q.id);
-                              toast.success("Quotation deleted");
-                            }}
-                            title="Delete"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </Button>
-                        )}
-                        {pEdit && q.status === "Accepted" && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7 text-green-700 hover:text-green-900"
-                            title="Record Purchase Order"
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              setPoTargetQuotation(q);
-                              setPoTargetRevisionId(
-                                getCurrentRevision(q.id)?.id || null,
-                              );
-                              setShowRecordPO(true);
-                            }}
-                            data-ocid={`quotations.record_po.button.${i + 1}`}
-                          >
-                            <Plus className="w-3.5 h-3.5" />
-                          </Button>
-                        )}
+                        <QuotationRowActions q={q} i={i} compact />
                       </div>
                     </TableCell>
                   </TableRow>
@@ -1264,27 +1432,14 @@ export function Quotations() {
                   <Label className="text-xs">
                     Customer <span className="text-destructive">*</span>
                   </Label>
-                  <Select
+                  <CustomerSelect
                     value={form.customerId}
-                    onValueChange={(v) =>
-                      setForm((p) => ({ ...p, customerId: v }))
-                    }
+                    onChange={(v) => setForm((p) => ({ ...p, customerId: v }))}
                     disabled={isLocked}
-                  >
-                    <SelectTrigger
-                      data-ocid="quotations.form.customer.select"
-                      className="mt-1 h-8 text-sm"
-                    >
-                      <SelectValue placeholder="Select" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {(customers || []).map((c) => (
-                        <SelectItem key={c.id} value={c.id} className="text-sm">
-                          {c.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                    placeholder="Select"
+                    className="mt-1 w-full"
+                    data-ocid="quotations.form.customer.select"
+                  />
                 </div>
                 <div>
                   <Label className="text-xs">Quotation Date</Label>
@@ -1316,21 +1471,44 @@ export function Quotations() {
                 <div className="flex items-center justify-between mb-2">
                   <Label className="text-xs font-semibold">Line Items</Label>
                   {!isLocked && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-6 text-xs"
-                      onClick={() =>
-                        setForm((p) => ({
-                          ...p,
-                          lineItems: [...(p.lineItems || []), newItem()],
-                        }))
-                      }
-                      data-ocid="quotations.form.add_item.button"
-                    >
-                      <Plus className="w-3 h-3 mr-1" /> Add Row
-                    </Button>
+                    <div className="flex items-center gap-2">
+                      <ProjectMultiSelect
+                        customerId={form.customerId}
+                        className="h-6"
+                        data-ocid="quotations.form.add_projects.button"
+                        onAdd={(selected) => {
+                          const toAdd = projectsNeedingNewLineItems(
+                            selected,
+                            form.lineItems || [],
+                          );
+                          if (toAdd.length === 0) return;
+                          const newLines: LineItem[] = toAdd.map((proj) => ({
+                            ...newItem(),
+                            desc: getCustomerVisibleName(proj),
+                            projectId: proj.id,
+                          }));
+                          setForm((p) => ({
+                            ...p,
+                            lineItems: [...(p.lineItems || []), ...newLines],
+                          }));
+                        }}
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-6 text-xs"
+                        onClick={() =>
+                          setForm((p) => ({
+                            ...p,
+                            lineItems: [...(p.lineItems || []), newItem()],
+                          }))
+                        }
+                        data-ocid="quotations.form.add_item.button"
+                      >
+                        <Plus className="w-3 h-3 mr-1" /> Add Row
+                      </Button>
+                    </div>
                   )}
                 </div>
                 {/* Line items — responsive stacked grid, no fixed width, no overflow */}
@@ -1357,28 +1535,38 @@ export function Quotations() {
                       {/* Description */}
                       <div>
                         <span className="line-item-label">Description</span>
-                        {projectNames.length > 0 && !isLocked ? (
-                          <Select
+                        {li.projectId &&
+                          (() => {
+                            const linkedProject = (projects || []).find(
+                              (p) => p.id === li.projectId,
+                            );
+                            if (!linkedProject) return null;
+                            return (
+                              <Badge
+                                variant="secondary"
+                                className="mb-1 block w-fit truncate text-[10px] font-normal"
+                                data-ocid={`quotations.form.item.${idx + 1}.project_chip`}
+                              >
+                                {getCustomerVisibleName(linkedProject)}
+                              </Badge>
+                            );
+                          })()}
+                        {!isLocked ? (
+                          <SearchableSelect
                             value={li.desc}
-                            onValueChange={(val) =>
-                              updateItem(idx, "desc", val)
-                            }
-                          >
-                            <SelectTrigger className="h-7 text-xs w-full">
-                              <SelectValue placeholder="Select project name" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {projectNames.map((name) => (
-                                <SelectItem
-                                  key={name}
-                                  value={name}
-                                  className="text-xs"
-                                >
-                                  {name}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
+                            onChange={(val) => updateItem(idx, "desc", val)}
+                            options={projectNames.map((name) => ({
+                              value: name,
+                              label: name,
+                            }))}
+                            creatable
+                            createLabel={(text) => `Use "${text}"`}
+                            placeholder="Description"
+                            searchPlaceholder="Search project names or type…"
+                            emptyText="No matching project names — type to use free text."
+                            className="h-7 text-xs w-full"
+                            data-ocid={`quotations.form.item.${idx + 1}.description.select`}
+                          />
                         ) : (
                           <Input
                             className="h-7 text-xs"
@@ -1468,25 +1656,62 @@ export function Quotations() {
               </div>
 
               <div className="flex justify-between items-end mt-3">
-                <div className="flex items-center gap-2">
-                  <Label className="text-xs">GST %</Label>
-                  <Input
-                    data-ocid="quotations.form.gst.input"
-                    className="h-7 w-16 text-xs"
-                    type="number"
-                    value={form.gstRate}
-                    onChange={(e) =>
-                      setForm((p) => ({ ...p, gstRate: +e.target.value }))
-                    }
-                  />
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="quotation-apply-gst"
+                      data-ocid="quotations.form.gst.checkbox"
+                      checked={form.applyGST}
+                      onCheckedChange={(v) =>
+                        setForm((p) => ({
+                          ...p,
+                          applyGST: !!v,
+                          applyIGST: v ? false : p.applyIGST,
+                        }))
+                      }
+                    />
+                    <Label htmlFor="quotation-apply-gst" className="text-xs">
+                      Apply GST (CGST {GST_HALF_RATE}% + SGST {GST_HALF_RATE}
+                      %)
+                    </Label>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="quotation-apply-igst"
+                      data-ocid="quotations.form.igst.checkbox"
+                      checked={form.applyIGST}
+                      onCheckedChange={(v) =>
+                        setForm((p) => ({
+                          ...p,
+                          applyIGST: !!v,
+                          applyGST: v ? false : p.applyGST,
+                        }))
+                      }
+                    />
+                    <Label htmlFor="quotation-apply-igst" className="text-xs">
+                      Apply IGST ({IGST_RATE}%)
+                    </Label>
+                  </div>
                 </div>
                 <div className="text-right text-sm space-y-0.5">
                   <div className="text-muted-foreground">
                     Subtotal: {fmt(subtotal)}
                   </div>
-                  <div className="text-muted-foreground">
-                    GST ({form.gstRate}%): {fmt(gstAmt)}
-                  </div>
+                  {form.applyGST && (
+                    <>
+                      <div className="text-muted-foreground">
+                        CGST ({cgstRate}%): {fmt(cgstAmt)}
+                      </div>
+                      <div className="text-muted-foreground">
+                        SGST ({sgstRate}%): {fmt(sgstAmt)}
+                      </div>
+                    </>
+                  )}
+                  {form.applyIGST && (
+                    <div className="text-muted-foreground">
+                      IGST ({igstRate}%): {fmt(igstAmt)}
+                    </div>
+                  )}
                   <div className="font-bold text-base">Total: {fmt(total)}</div>
                 </div>
               </div>
@@ -1833,12 +2058,30 @@ export function Quotations() {
                         <span className="text-muted-foreground">Subtotal</span>
                         <span>{fmt(qtSubtotal)}</span>
                       </div>
-                      <div className="flex justify-between">
-                        <span className="text-muted-foreground">
-                          GST ({selectedQuotation.gstRate}%)
-                        </span>
-                        <span>{fmt(selectedQuotation.gstAmount)}</span>
-                      </div>
+                      {selectedQuotation.applyGST && (
+                        <>
+                          <div className="flex justify-between">
+                            <span className="text-muted-foreground">
+                              CGST ({selectedQuotation.cgstRate}%)
+                            </span>
+                            <span>{fmt(selectedQuotation.cgstAmt)}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span className="text-muted-foreground">
+                              SGST ({selectedQuotation.sgstRate}%)
+                            </span>
+                            <span>{fmt(selectedQuotation.sgstAmt)}</span>
+                          </div>
+                        </>
+                      )}
+                      {selectedQuotation.applyIGST && (
+                        <div className="flex justify-between">
+                          <span className="text-muted-foreground">
+                            IGST ({selectedQuotation.igstRate}%)
+                          </span>
+                          <span>{fmt(selectedQuotation.igstAmt)}</span>
+                        </div>
+                      )}
                       <div className="flex justify-between font-bold border-t pt-1">
                         <span>Total</span>
                         <span>{fmt(selectedQuotation.totalAmount)}</span>
@@ -2069,6 +2312,33 @@ export function Quotations() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={!!deleteQuotationTarget}
+        onOpenChange={(o) => !o && setDeleteQuotationTarget(null)}
+        title="Delete quotation?"
+        description={`Quotation "${deleteQuotationTarget?.qtNo}" will be permanently deleted.`}
+        onConfirm={async () => {
+          const q = deleteQuotationTarget;
+          if (!q) return;
+          const result = await deleteQuotationRemote(q.id);
+          if (result.status === "unauthenticated") {
+            toast.error(
+              "Not signed in to the server - quotation was not deleted",
+            );
+            setDeleteQuotationTarget(null);
+            return;
+          }
+          if (result.status === "denied" || result.status === "error") {
+            toast.error(result.error ?? "Could not delete quotation");
+            setDeleteQuotationTarget(null);
+            return;
+          }
+          deleteQuotation(q.id);
+          toast.success("Quotation deleted");
+          setDeleteQuotationTarget(null);
+        }}
+      />
     </div>
   );
 }

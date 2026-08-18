@@ -178,6 +178,26 @@ Deno.serve(async (req: Request) => {
     );
   }
 
+  const { data: canAssignRoles, error: rolePermError } =
+    await callerClient.rpc("has_permission", {
+      p_module: "users",
+      p_action: "assign_roles",
+    });
+
+  if (rolePermError) {
+    return jsonResponse(
+      { error: `Role permission check failed: ${rolePermError.message}` },
+      500,
+    );
+  }
+
+  if (!canAssignRoles) {
+    return jsonResponse(
+      { error: "You do not have permission to assign user roles." },
+      403,
+    );
+  }
+
   const { data: callerOrgId, error: orgError } = await callerClient.rpc(
     "current_organization_id",
   );

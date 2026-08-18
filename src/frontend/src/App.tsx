@@ -12,6 +12,7 @@ import { CustomerHistory } from "./pages/CustomerHistory";
 import { Customers } from "./pages/Customers";
 import { Dashboard } from "./pages/Dashboard";
 import { DeliveryChallans } from "./pages/DeliveryChallans";
+import { Dies } from "./pages/Dies";
 import { EmployeeDetail } from "./pages/EmployeeDetail";
 import { Employees } from "./pages/Employees";
 import { ExportEngine } from "./pages/ExportEngine";
@@ -20,6 +21,7 @@ import { Invoices } from "./pages/Invoices";
 import { Ledger } from "./pages/Ledger";
 import { LoginPage } from "./pages/LoginPage";
 import { MachineDetail } from "./pages/MachineDetail";
+import { MachineRevenue } from "./pages/MachineRevenue";
 import { Machinery } from "./pages/Machinery";
 import { MaterialRequisitions } from "./pages/MaterialRequisitions";
 import { Payables } from "./pages/Payables";
@@ -33,6 +35,7 @@ import { Quality } from "./pages/Quality";
 import { Quotations } from "./pages/Quotations";
 import { ScrapManagement } from "./pages/ScrapManagement";
 import { Settings } from "./pages/Settings";
+import { Tools } from "./pages/Tools";
 import { Vendors } from "./pages/Vendors";
 import { canView } from "./permissions";
 import { InspectionSheetsList } from "./qms/pages/InspectionSheetsList";
@@ -369,6 +372,15 @@ function AppInner() {
             }}
           />
         );
+      case "tools":
+        if (!canView(currentUser, "tools")) return accessDenied;
+        return <Tools />;
+      case "dies":
+        if (!canView(currentUser, "tooling_dies")) return accessDenied;
+        return <Dies />;
+      case "machine-revenue":
+        if (!canView(currentUser, "machine_revenue")) return accessDenied;
+        return <MachineRevenue />;
       case "export-engine":
         if (!canView(currentUser, "export_engine")) return accessDenied;
         return (

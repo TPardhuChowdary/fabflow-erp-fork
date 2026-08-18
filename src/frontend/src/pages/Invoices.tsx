@@ -1,3 +1,4 @@
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -7,6 +8,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import {
   Select,
   SelectContent,
@@ -38,6 +40,7 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import { InvoicePrintView } from "../components/InvoicePrintView";
 import { StatusBadge } from "../components/StatusBadge";
 import { InvoiceDocContent } from "../lib/documentRenderers";
@@ -47,14 +50,18 @@ import {
   handleDownload as triggerDownload,
 } from "../lib/documentUtils";
 
-import { ProjectSelect } from "../components/ProjectSelect";
+import { CustomerSelect } from "../components/CustomerSelect";
+import { ProjectMultiSelect } from "../components/ProjectMultiSelect";
 import {
   createInvoiceRemote,
   deleteInvoiceRemote,
   updateInvoiceRemote,
   updateInvoiceStatusRemote,
 } from "../lib/invoicesApi";
-import { getCustomerVisibleName } from "../lib/utils";
+import {
+  getCustomerVisibleName,
+  projectsNeedingNewLineItems,
+} from "../lib/utils";
 import {
   canCreate,
   canDelete,
@@ -221,6 +228,10 @@ export function Invoices() {
   }
   const [editingInvoice, setEditingInvoice] = useState<Invoice | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [deleteInvoiceId, setDeleteInvoiceId] = useState<string | null>(null);
+  const deleteInvoiceTarget = (invoices || []).find(
+    (i) => i.id === deleteInvoiceId,
+  );
 
   const handleAfterSave = () => {
     setOpen(false);
@@ -320,6 +331,22 @@ export function Invoices() {
         setIsSaving(false);
         return;
       }
+      // Due Date used to be left blank by default (rendering as an
+      // unexplained "—" in the list) unless the user manually filled it
+      // in — nothing derived it from Payment Terms even though that field
+      // sits right next to it. Auto-fill from invoiceDate + the parsed
+      // number of days in paymentTerms (e.g. "30 days") whenever the user
+      // hasn't set one explicitly, so a due date is always present exactly
+      // like customerId already is required to be.
+      const resolvedDueDate = (() => {
+        if (form.dueDate) return form.dueDate;
+        const daysMatch = form.paymentTerms?.match(/\d+/);
+        const days = daysMatch ? Number.parseInt(daysMatch[0], 10) : 30;
+        const base = new Date(form.invoiceDate || todayStr());
+        if (Number.isNaN(base.getTime())) return form.dueDate;
+        base.setDate(base.getDate() + days);
+        return base.toISOString().split("T")[0];
+      })();
       // Validate against DC quantity
       if (form.dcId && availableQty !== null) {
         const totalInvoiceQty = form.lineItems.reduce(
@@ -383,7 +410,7 @@ export function Invoices() {
           igstAmt,
           totalAmount: total,
           invoiceDate: form.invoiceDate,
-          dueDate: form.dueDate,
+          dueDate: resolvedDueDate,
           paymentTerms: form.paymentTerms,
           status: editingInvoice.status,
           paidAmount: editingInvoice.paidAmount,
@@ -436,7 +463,7 @@ export function Invoices() {
           igstAmt,
           totalAmount: total,
           invoiceDate: form.invoiceDate,
-          dueDate: form.dueDate,
+          dueDate: resolvedDueDate,
           paymentTerms: form.paymentTerms,
           status: "Unpaid",
           paidAmount: 0,
@@ -453,7 +480,7 @@ export function Invoices() {
           reminderEnabled: (form as any).reminderEnabled ?? true,
           reminderIntervalDays: (form as any).reminderIntervalDays ?? 5,
           reminderFrequencyDays: (form as any).reminderFrequencyDays ?? 5,
-          nextReminderAt: form.dueDate || new Date().toISOString(),
+          nextReminderAt: resolvedDueDate || new Date().toISOString(),
           lastReminderSentAt: null,
           reminderCount: 0,
           nextReminderCustomDate: null,
@@ -768,10 +795,7 @@ export function Invoices() {
                       variant="ghost"
                       size="icon"
                       className="h-10 w-10 text-destructive hover:text-destructive"
-                      onClick={() => {
-                        if (window.confirm("Delete this invoice?"))
-                          handleDeleteInvoice(inv.id);
-                      }}
+                      onClick={() => setDeleteInvoiceId(inv.id)}
                       title="Delete"
                       data-ocid={`invoices.delete_button.${i + 1}`}
                     >
@@ -995,10 +1019,7 @@ export function Invoices() {
                             variant="ghost"
                             size="icon"
                             className="h-7 w-7 text-destructive hover:text-destructive"
-                            onClick={() => {
-                              if (confirm("Delete this invoice?"))
-                                handleDeleteInvoice(inv.id);
-                            }}
+                            onClick={() => setDeleteInvoiceId(inv.id)}
                             title="Delete"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
@@ -1132,6 +1153,7 @@ export function Invoices() {
                               qty: li.qty,
                               rate: li.unitPrice || 0,
                               amount: li.qty * (li.unitPrice || 0),
+                              projectId: li.projectId,
                             }))
                           : undefined;
                       setForm((p) => {
@@ -1191,9 +1213,9 @@ export function Invoices() {
                 {/* Customer — full width, auto-fills buyer fields */}
                 <div className="col-span-3">
                   <Label className="text-xs">Customer *</Label>
-                  <Select
+                  <CustomerSelect
                     value={form.customerId}
-                    onValueChange={(v) => {
+                    onChange={(v) => {
                       const cust = customers.find((c) => c.id === v);
                       setForm((p) => ({
                         ...p,
@@ -1207,21 +1229,9 @@ export function Invoices() {
                         selectedEmail: cust?.primaryEmail || cust?.email || "",
                       }));
                     }}
-                  >
-                    <SelectTrigger
-                      data-ocid="invoices.form.customer.select"
-                      className="mt-1 h-8 text-sm"
-                    >
-                      <SelectValue placeholder="Select customer" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {customers.map((c) => (
-                        <SelectItem key={c.id} value={c.id} className="text-sm">
-                          {c.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                    className="mt-1 w-full"
+                    data-ocid="invoices.form.customer.select"
+                  />
                 </div>
                 {/* Email selector — shown when customer has emails[] */}
                 {(() => {
@@ -1264,43 +1274,6 @@ export function Invoices() {
                     </div>
                   );
                 })()}
-                <div>
-                  <Label className="text-xs">Project (optional)</Label>
-                  <div
-                    className="mt-1 w-full"
-                    data-ocid="invoices.form.project.select"
-                  >
-                    <ProjectSelect
-                      value={form.projectId || ""}
-                      onChange={(v) =>
-                        setForm((p) => ({
-                          ...p,
-                          projectId: v,
-                          linkedPoId: "",
-                          poNumber: "",
-                          poDate: "",
-                        }))
-                      }
-                      placeholder="Select project"
-                      className="w-full"
-                    />
-                  </div>
-                  {form.projectId &&
-                    (() => {
-                      const selectedProj = (projects || []).find(
-                        (p) => p.id === form.projectId,
-                      );
-                      if (selectedProj && selectedProj.totalQty == null) {
-                        return (
-                          <p className="text-xs text-yellow-600 mt-1">
-                            ⚠ This project has no Total Quantity set. Invoice
-                            creation is blocked.
-                          </p>
-                        );
-                      }
-                      return null;
-                    })()}
-                </div>
                 <div>
                   <Label className="text-xs">Delivery Challan</Label>
                   <Select
@@ -1460,22 +1433,45 @@ export function Invoices() {
               <div className="mt-3">
                 <div className="flex items-center justify-between mb-2">
                   <Label className="text-xs font-semibold">Line Items</Label>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    className="h-6 text-xs"
-                    onClick={() =>
-                      setForm((p) => ({
-                        ...p,
-                        lineItems: [...p.lineItems, newItem()],
-                      }))
-                    }
-                    data-ocid="invoices.form.add_item.button"
-                  >
-                    <Plus className="w-3 h-3 mr-1" />
-                    Add
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    <ProjectMultiSelect
+                      customerId={form.customerId}
+                      className="h-6"
+                      data-ocid="invoices.form.add_projects.button"
+                      onAdd={(selected) => {
+                        const toAdd = projectsNeedingNewLineItems(
+                          selected,
+                          form.lineItems,
+                        );
+                        if (toAdd.length === 0) return;
+                        const newLines: InvLineItem[] = toAdd.map((proj) => ({
+                          ...newItem(),
+                          desc: getCustomerVisibleName(proj),
+                          projectId: proj.id,
+                        }));
+                        setForm((p) => ({
+                          ...p,
+                          lineItems: [...p.lineItems, ...newLines],
+                        }));
+                      }}
+                    />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-6 text-xs"
+                      onClick={() =>
+                        setForm((p) => ({
+                          ...p,
+                          lineItems: [...p.lineItems, newItem()],
+                        }))
+                      }
+                      data-ocid="invoices.form.add_item.button"
+                    >
+                      <Plus className="w-3 h-3 mr-1" />
+                      Add
+                    </Button>
+                  </div>
                 </div>
                 {/* Line items — responsive stacked grid, no fixed width, no overflow */}
                 <div className="space-y-2">
@@ -1501,36 +1497,37 @@ export function Invoices() {
                       {/* Description */}
                       <div>
                         <span className="line-item-label">Description</span>
-                        {projectNames.length > 0 ? (
-                          <Select
-                            value={li.desc}
-                            onValueChange={(v) => updateItem(idx, "desc", v)}
-                          >
-                            <SelectTrigger className="h-7 text-xs w-full">
-                              <SelectValue placeholder="Select project name" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {projectNames.map((name) => (
-                                <SelectItem
-                                  key={name}
-                                  value={name}
-                                  className="text-xs"
-                                >
-                                  {name}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        ) : (
-                          <Input
-                            className="h-7 text-xs"
-                            value={li.desc}
-                            onChange={(e) =>
-                              updateItem(idx, "desc", e.target.value)
-                            }
-                            placeholder="Description"
-                          />
-                        )}
+                        {li.projectId &&
+                          (() => {
+                            const linkedProject = (projects || []).find(
+                              (p) => p.id === li.projectId,
+                            );
+                            if (!linkedProject) return null;
+                            return (
+                              <Badge
+                                variant="secondary"
+                                className="mb-1 block w-fit truncate text-[10px] font-normal"
+                                data-ocid={`invoices.form.item.${idx + 1}.project_chip`}
+                              >
+                                {getCustomerVisibleName(linkedProject)}
+                              </Badge>
+                            );
+                          })()}
+                        <SearchableSelect
+                          value={li.desc}
+                          onChange={(val) => updateItem(idx, "desc", val)}
+                          options={projectNames.map((name) => ({
+                            value: name,
+                            label: name,
+                          }))}
+                          creatable
+                          createLabel={(text) => `Use "${text}"`}
+                          placeholder="Description"
+                          searchPlaceholder="Search project names or type…"
+                          emptyText="No matching project names — type to use free text."
+                          className="h-7 text-xs w-full"
+                          data-ocid={`invoices.form.item.${idx + 1}.description.select`}
+                        />
                       </div>
                       {/* HSN */}
                       <div>
@@ -1703,6 +1700,17 @@ export function Invoices() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={!!deleteInvoiceId}
+        onOpenChange={(o) => !o && setDeleteInvoiceId(null)}
+        title="Delete invoice?"
+        description={`Invoice "${deleteInvoiceTarget?.invNo ?? ""}" will be permanently deleted.`}
+        onConfirm={async () => {
+          if (deleteInvoiceId) await handleDeleteInvoice(deleteInvoiceId);
+          setDeleteInvoiceId(null);
+        }}
+      />
     </div>
   );
 }

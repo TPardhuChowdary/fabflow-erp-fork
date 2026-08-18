@@ -15,6 +15,7 @@ import type { PDFDocumentProxy, PDFPageProxy, PageViewport } from "pdfjs-dist";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../../AuthContext";
+import { ConfirmDeleteDialog } from "../../components/ConfirmDeleteDialog";
 import { DesignFilePreviewDialog } from "../../components/DesignFilePreviewDialog";
 import { WorkDrawingPreviewDialog } from "../../components/WorkDrawingPreviewDialog";
 import { getCustomerVisibleName } from "../../lib/utils";
@@ -81,6 +82,7 @@ import {
   type CropRect,
   type DetectedView,
   type DrawingDocument,
+  type DrawingLink,
   type DrawingView,
   EMPTY_TITLE_BLOCK,
   type EditorMode,
@@ -235,6 +237,15 @@ export function DrawingEditorPage({
   const [detectedViews, setDetectedViews] = useState<DetectedView[]>([]);
   const [selectionMode, setSelectionMode] = useState<SelectionMode>("crop");
   const [vectorModeDetected, setVectorModeDetected] = useState(false);
+  /** Phase 34 — bumped after renderDxfVectorObjects' async population of
+   * vectorFabricRef finishes, purely to force a re-render so the Vector
+   * Mode panel's objectCount (read directly off the ref) stops showing a
+   * stale "0 objects loaded" between enterAnnotate's synchronous
+   * setPhase("annotate") and the DXF scene actually landing. The PDF path
+   * doesn't need this — renderVectorObjects runs synchronously inside
+   * enterAnnotate, so the ref is already populated by the time that same
+   * setPhase call re-renders this panel. */
+  const [, forceVectorPanelRerender] = useState(0);
   const [modeModalOpen, setModeModalOpen] = useState(false);
   const [editorMode, setEditorMode] = useState<EditorMode | null>(null);
   const [globalEditMode, setGlobalEditMode] = useState<GlobalEditMode>("full");
@@ -273,6 +284,21 @@ export function DrawingEditorPage({
   const bgImageRef = useRef<fabric.Image | undefined>(undefined);
   const fitScaleRef = useRef(1);
   const pdfDocRef = useRef<PDFDocumentProxy | null>(null);
+  /** Phase 34 — Universal Edit. The raw uploaded blob for a "dxf"/"image"
+   * sourceKind drawing (never a PDF — those keep using pdfDocRef exactly
+   * as before). Set once in openDrawing, read by loadPage to produce the
+   * raster pageCanvas content that Pixel/Original annotate mode already
+   * knows how to draw from — see the file-header note on sourceKind. */
+  const sourceBlobRef = useRef<Blob | null>(null);
+  /** Phase 34 — the parsed (not yet built-into-fabric-objects) DXF data
+   * for a "dxf" drawing, cached so entering Vector mode can call
+   * buildDxfScene() again for a *fresh* set of editable fabric objects
+   * without re-parsing the file text or reusing objects already attached
+   * to the throwaway raster canvas in loadPage (fabric objects are only
+   * ever safely owned by one canvas at a time). */
+  const dxfParsedRef = useRef<import("../../lib/dxfPreview").ParsedDxf | null>(
+    null,
+  );
   /** Set by openDrawing right before activeDrawing changes; consumed once
    * by the page-load effect below to decide whether to restore a saved
    * view instead of landing on a blank crop-selection screen. A ref (not
@@ -359,16 +385,109 @@ export function DrawingEditorPage({
   }, [cropRect, selectionMode, detectedViews, phase]);
 
   // ── Loading a page ───────────────────────────────────────────────
+  /** Phase 34 — produces the pageCanvas raster (and, for DXF, the parsed
+   * data needed to re-populate Vector mode later) for a non-PDF drawing.
+   * Everything downstream of this — crop selection, Mode Selection modal,
+   * buildFabricCanvas, the Pixel/Original annotate branch in
+   * enterAnnotate, save, composeLatestView/Preview — is untouched and
+   * shared with PDF; only this one loading step differs. */
+  const loadNonPdfPage = useCallback(async (kind: "dxf" | "image") => {
+    const pageCanvas = pageCanvasRef.current;
+    const overlayCanvas = overlayCanvasRef.current;
+    const blob = sourceBlobRef.current;
+    if (!pageCanvas || !overlayCanvas || !blob) return;
+
+    pageProxyRef.current = null;
+    pageViewportRef.current = null;
+    pageTextItemsRef.current = [];
+    setDetectedViews([]);
+    pageVectorObjectsRef.current = [];
+
+    if (kind === "image") {
+      const url = URL.createObjectURL(blob);
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => {
+            pageCanvas.width = img.naturalWidth || 1;
+            pageCanvas.height = img.naturalHeight || 1;
+            const ctx = pageCanvas.getContext("2d");
+            ctx?.drawImage(img, 0, 0);
+            resolve();
+          };
+          img.onerror = () => reject(new Error("Could not load image"));
+          img.src = url;
+        });
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+      overlayCanvas.width = pageCanvas.width;
+      overlayCanvas.height = pageCanvas.height;
+      setVectorModeDetected(false); // a photo never has vector geometry
+      return;
+    }
+
+    // DXF — reuse the existing, already-shipped preview parser/scene
+    // builder (lib/dxfPreview.ts) unchanged. Rendered once onto a
+    // throwaway offscreen canvas (never inserted into the DOM) purely
+    // to produce a flattened raster for pageCanvas; the parsed entity
+    // data itself is cached in dxfParsedRef so Vector mode can build a
+    // second, genuinely editable set of fabric objects from it later.
+    const text = await blob.text();
+    const {
+      parseDxfInWorker,
+      buildDxfScene,
+      mountDxfCanvas,
+      fitDxfCanvasToViewport,
+    } = await import("../../lib/dxfPreview");
+    const dxf = await parseDxfInWorker(text);
+    dxfParsedRef.current = dxf;
+    const scene = buildDxfScene(dxf);
+    setVectorModeDetected(scene.objects.length > 3);
+
+    const W = 1600;
+    const H = 1200;
+    const offCanvas = document.createElement("canvas");
+    const offFc = mountDxfCanvas(offCanvas, scene);
+    fitDxfCanvasToViewport(offFc, scene, W, H);
+    offFc.renderAll();
+    const dataUrl = offFc.toDataURL({ format: "png" });
+    offFc.dispose();
+
+    await new Promise<void>((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        pageCanvas.width = W;
+        pageCanvas.height = H;
+        const ctx = pageCanvas.getContext("2d");
+        ctx?.drawImage(img, 0, 0, W, H);
+        resolve();
+      };
+      img.onerror = () => reject(new Error("Could not render DXF"));
+      img.src = dataUrl;
+    });
+    overlayCanvas.width = W;
+    overlayCanvas.height = H;
+  }, []);
+
   const loadPage = useCallback(
     async (pageNumber: number) => {
-      const pdf = pdfDocRef.current;
       const pageCanvas = pageCanvasRef.current;
       const overlayCanvas = overlayCanvasRef.current;
-      if (!pdf || !pageCanvas || !overlayCanvas) return;
+      if (!pageCanvas || !overlayCanvas) return;
 
       setPhase("select");
       setCurrentPage(pageNumber);
       setCropRect(null);
+
+      const kind = activeDrawing?.sourceKind;
+      if (kind === "dxf" || kind === "image") {
+        await loadNonPdfPage(kind);
+        return;
+      }
+
+      const pdf = pdfDocRef.current;
+      if (!pdf) return;
 
       const page = await pdf.getPage(pageNumber);
       pageProxyRef.current = page;
@@ -394,7 +513,7 @@ export function DrawingEditorPage({
       setVectorModeDetected(vectorMode);
       // eslint-disable-next-line react-hooks/exhaustive-deps
     },
-    [zoom],
+    [zoom, activeDrawing?.sourceKind, loadNonPdfPage],
   );
 
   // Load a drawing's page once its PDF is ready and canvases have mounted —
@@ -407,7 +526,13 @@ export function DrawingEditorPage({
   // ref value if React ever re-invokes it for the same activeDrawing.id.
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally re-run only on drawing change
   useEffect(() => {
-    if (!activeDrawing || !pdfDocRef.current) return;
+    if (!activeDrawing) return;
+    const kind = activeDrawing.sourceKind;
+    const ready =
+      kind === "dxf" || kind === "image"
+        ? !!sourceBlobRef.current
+        : !!pdfDocRef.current;
+    if (!ready) return;
     const view = pendingRestoreViewRef.current;
     (async () => {
       await loadPage(view ? view.pageNumber : 1);
@@ -419,11 +544,25 @@ export function DrawingEditorPage({
   const openDrawing = async (drawing: DrawingDocument) => {
     // drawing is almost always list-sourced (no pdfBlob attached — see
     // types.ts) — fetch the actual bytes from Storage on demand here,
-    // the one place that genuinely needs to render the PDF.
-    const pdfBlob = drawing.pdfBlob ?? (await getDrawingPdfBlob(drawing.id));
-    const pdf = await loadPdf(pdfBlob);
-    const thumbs = await buildThumbnails(pdf);
+    // the one place that genuinely needs to render the source file.
+    const blob = drawing.pdfBlob ?? (await getDrawingPdfBlob(drawing.id));
     const latestView = await getLatestDrawingView(drawing.id);
+
+    if (drawing.sourceKind === "dxf" || drawing.sourceKind === "image") {
+      // Phase 34 — no pdf.js document for a non-PDF source; loadPage
+      // (via loadNonPdfPage) reads the raw blob directly instead.
+      pdfDocRef.current = null;
+      sourceBlobRef.current = blob;
+      dxfParsedRef.current = null;
+      setThumbnails([]); // single-view sources have no page thumbnails
+      pendingRestoreViewRef.current = latestView ?? null;
+      setActiveDrawing(drawing);
+      return;
+    }
+
+    sourceBlobRef.current = null;
+    const pdf = await loadPdf(blob);
+    const thumbs = await buildThumbnails(pdf);
     pdfDocRef.current = pdf;
     setThumbnails(thumbs);
     pendingRestoreViewRef.current = latestView ?? null;
@@ -485,6 +624,9 @@ export function DrawingEditorPage({
     await openDrawing(working);
   };
 
+  const [deleteDrawingTarget, setDeleteDrawingTarget] =
+    useState<DrawingDocument | null>(null);
+
   const handleDeleteDrawing = async (drawing: DrawingDocument) => {
     const children = await getChildDrawings(drawing.id);
     if (children.length > 0) {
@@ -493,10 +635,12 @@ export function DrawingEditorPage({
       );
       return;
     }
-    if (
-      !window.confirm(`Delete "${drawing.fileName}" and all its saved views?`)
-    )
-      return;
+    setDeleteDrawingTarget(drawing);
+  };
+
+  const handleConfirmDeleteDrawing = async () => {
+    const drawing = deleteDrawingTarget;
+    if (!drawing) return;
     await deleteDrawing(drawing.id);
     addAuditLog({
       module: "drawing_editor",
@@ -506,6 +650,7 @@ export function DrawingEditorPage({
       changedBy: userName,
     });
     toast.success("Drawing deleted");
+    setDeleteDrawingTarget(null);
   };
 
   const handleRenameDrawing = async (
@@ -588,7 +733,7 @@ export function DrawingEditorPage({
 
   const handleAddLink = async (
     drawing: DrawingDocument,
-    linkedType: "project" | "machine" | "vendor" | "customer",
+    linkedType: DrawingLink["linkedType"],
     linkedId: string,
   ) => {
     await addLink(drawing.id, linkedType, linkedId);
@@ -713,11 +858,17 @@ export function DrawingEditorPage({
 
   const proceedWithMode = (mode: EditorMode, remember: boolean) => {
     let finalMode = mode;
-    if (
-      finalMode === "vector" &&
-      !vectorModeDetected &&
-      pageVectorObjectsRef.current.length === 0
-    ) {
+    // Phase 34 — DXF never populates pageVectorObjectsRef (that ref is
+    // PDF-specific; DXF's vector geometry lives in dxfParsedRef instead,
+    // rebuilt fresh by renderDxfVectorObjects when Vector mode is
+    // actually entered), so the PDF-only fallback check below must also
+    // accept a parsed DXF as "we have vector data" or every DXF would
+    // silently get force-switched to Pixel regardless of content.
+    const hasVectorData =
+      vectorModeDetected ||
+      pageVectorObjectsRef.current.length > 0 ||
+      !!dxfParsedRef.current;
+    if (finalMode === "vector" && !hasVectorData) {
       toast.error(
         "This page has no vector data — switching to Pixel Editing instead.",
       );
@@ -779,7 +930,11 @@ export function DrawingEditorPage({
     const displayH = cr.h * fitScale;
 
     if (mode === "vector") {
-      renderVectorObjects(fc, cr, fitScale);
+      if (activeDrawing?.sourceKind === "dxf") {
+        renderDxfVectorObjects(fc, cr, fitScale);
+      } else {
+        renderVectorObjects(fc, cr, fitScale);
+      }
     } else {
       const tmp = document.createElement("canvas");
       tmp.width = displayW;
@@ -1016,6 +1171,101 @@ export function DrawingEditorPage({
     }
     vectorFabricRef.current = entries;
     fc.renderAll();
+  };
+
+  /** Phase 34 — DXF's Vector mode equivalent of renderVectorObjects. Builds
+   * a *fresh* set of editable fabric objects from the cached parsed DXF
+   * (dxfParsedRef) rather than reusing the objects already consumed by the
+   * throwaway raster canvas in loadNonPdfPage — a fabric object is only
+   * ever safely owned by one canvas at a time. Positions/scales each
+   * object using the exact same fit-to-viewport zoom/pan loadNonPdfPage
+   * used to build the pageCanvas raster, read back from a bare probe
+   * canvas rather than recomputed by hand, so Vector mode lines up with
+   * whatever the user already saw and cropped in Pixel/Original mode.
+   * Tagged role="GEOMETRY"/colorClass="OTHER" — DXF has no PDF-style
+   * blue/red/black convention, and these values keep the objects safe
+   * from VectorModePanel's Delete Blue/Delete Red/Keep Black bulk actions
+   * (see their filters a few hundred lines below), leaving only individual
+   * click-to-delete and Invert Selection applicable, same as any other
+   * "OTHER"-classed object already handled by that panel. */
+  const renderDxfVectorObjects = async (
+    fc: fabric.Canvas,
+    cr: CropRect,
+    fs: number,
+  ) => {
+    const dxf = dxfParsedRef.current;
+    if (!dxf) return;
+    const { buildDxfScene, fitDxfCanvasToViewport } = await import(
+      "../../lib/dxfPreview"
+    );
+    const scene = buildDxfScene(dxf);
+
+    // fitDxfCanvasToViewport only ever reads scene.bbox — it never touches
+    // scene.objects — so it's safe to run against a bare, never-rendered
+    // probe canvas purely to read back the zoom/pan it computes.
+    const probe = new fabric.Canvas(document.createElement("canvas"));
+    const zoom = fitDxfCanvasToViewport(probe, scene, 1600, 1200);
+    const vpt = probe.viewportTransform ?? [1, 0, 0, 1, 0, 0];
+    probe.dispose();
+
+    const displayW = cr.w * fs;
+    const displayH = cr.h * fs;
+
+    const bgRect = new fabric.Rect({
+      left: 0,
+      top: 0,
+      width: displayW,
+      height: displayH,
+      fill: "#ffffff",
+      selectable: false,
+      evented: false,
+    });
+    fc.add(bgRect);
+    bgImageRef.current = bgRect as unknown as fabric.Image;
+
+    const entries: VectorFabricEntry[] = [];
+    for (const obj of scene.objects) {
+      const worldLeft = obj.left ?? 0;
+      const worldTop = obj.top ?? 0;
+      const left = (worldLeft * zoom + vpt[4] - cr.x) * fs;
+      const top = (worldTop * zoom + vpt[5] - cr.y) * fs;
+      const w = (obj.width ?? 0) * (obj.scaleX ?? 1) * zoom * fs;
+      const h = (obj.height ?? 0) * (obj.scaleY ?? 1) * zoom * fs;
+      // Cull anything entirely outside this crop's display frame — a full
+      // DXF can carry far more geometry than any one crop needs on-canvas.
+      if (left + w < 0 || left > displayW || top + h < 0 || top > displayH) {
+        continue;
+      }
+      obj.set({
+        left,
+        top,
+        scaleX: (obj.scaleX ?? 1) * zoom * fs,
+        scaleY: (obj.scaleY ?? 1) * zoom * fs,
+        selectable: true,
+        evented: true,
+        hoverCursor: "pointer",
+      });
+      (obj as fabric.Object & { role?: string; colorClass?: string }).role =
+        "GEOMETRY";
+      (
+        obj as fabric.Object & { role?: string; colorClass?: string }
+      ).colorClass = "OTHER";
+      fc.add(obj);
+      entries.push({
+        obj,
+        role: "GEOMETRY",
+        colorClass: "OTHER",
+        hidden: false,
+        deleted: false,
+      });
+    }
+    vectorFabricRef.current = entries;
+    fc.renderAll();
+    // This population happens after enterAnnotate's own setPhase("annotate")
+    // re-render already ran (the dynamic import resolves later), so without
+    // this the Vector Mode panel's objectCount would keep showing a stale
+    // "0 objects loaded" until something unrelated re-rendered the page.
+    forceVectorPanelRerender((n) => n + 1);
   };
 
   // ── Fabric mouse events: annotation drawing tools ────────────────
@@ -1938,6 +2188,14 @@ export function DrawingEditorPage({
           onClose={() => setFloatToolbar(null)}
         />
       )}
+
+      <ConfirmDeleteDialog
+        open={!!deleteDrawingTarget}
+        onOpenChange={(o) => !o && setDeleteDrawingTarget(null)}
+        title="Delete drawing?"
+        description={`"${deleteDrawingTarget?.fileName}" and all its saved views will be permanently deleted.`}
+        onConfirm={handleConfirmDeleteDrawing}
+      />
     </div>
   );
 }

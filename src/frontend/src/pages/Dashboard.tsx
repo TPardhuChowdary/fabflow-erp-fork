@@ -1,4 +1,3 @@
-import type React from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
@@ -13,6 +12,7 @@ import {
   Wrench,
   Zap,
 } from "lucide-react";
+import type React from "react";
 import { StatusBadge } from "../components/StatusBadge";
 import { useStore } from "../store";
 import type { Page } from "../types";
@@ -22,7 +22,16 @@ interface Props {
 }
 
 export function Dashboard({ onNavigate }: Props) {
-  const { invoices, payments, customers, projects, quotations, machines, inventoryItems, payables } = useStore();
+  const {
+    invoices,
+    payments,
+    customers,
+    projects,
+    quotations,
+    machines,
+    inventoryItems,
+    payables,
+  } = useStore();
 
   const activeProjects = (projects || []).length;
   const activeQuotations = (quotations || []).filter(
@@ -70,14 +79,23 @@ export function Dashboard({ onNavigate }: Props) {
   const todayMs = today.getTime();
 
   const overdueInvoices = (invoices || []).filter(
-    (i) => i.status !== "Paid" && i.invoiceType !== "proforma" && i.dueDate && new Date(i.dueDate).getTime() < todayMs,
+    (i) =>
+      i.status !== "Paid" &&
+      i.invoiceType !== "proforma" &&
+      i.dueDate &&
+      new Date(i.dueDate).getTime() < todayMs,
   );
 
   const overduePayables = (payables || []).filter(
-    (p) => p.paidAmount < p.totalAmount && p.dueDate && new Date(p.dueDate).getTime() < todayMs,
+    (p) =>
+      p.paidAmount < p.totalAmount &&
+      p.dueDate &&
+      new Date(p.dueDate).getTime() < todayMs,
   );
 
-  const breakdownMachines = (machines || []).filter((m) => m.currentStatus === "Breakdown");
+  const breakdownMachines = (machines || []).filter(
+    (m) => m.currentStatus === "Breakdown",
+  );
 
   const serviceOverdueMachines = (machines || []).filter((m) => {
     if (!m.nextServiceDue || m.currentStatus === "Decommissioned") return false;
@@ -112,7 +130,10 @@ export function Dashboard({ onNavigate }: Props) {
   }
 
   if (overdueInvoices.length > 0) {
-    const total = overdueInvoices.reduce((s, i) => s + ((i.totalAmount ?? 0) - (i.paidAmount ?? 0)), 0);
+    const total = overdueInvoices.reduce(
+      (s, i) => s + ((i.totalAmount ?? 0) - (i.paidAmount ?? 0)),
+      0,
+    );
     alerts.push({
       id: "overdue-inv",
       level: "critical",
@@ -124,7 +145,10 @@ export function Dashboard({ onNavigate }: Props) {
   }
 
   if (overduePayables.length > 0) {
-    const total = overduePayables.reduce((s, p) => s + ((p.totalAmount ?? 0) - (p.paidAmount ?? 0)), 0);
+    const total = overduePayables.reduce(
+      (s, p) => s + ((p.totalAmount ?? 0) - (p.paidAmount ?? 0)),
+      0,
+    );
     alerts.push({
       id: "overdue-pay",
       level: "warning",
@@ -152,7 +176,11 @@ export function Dashboard({ onNavigate }: Props) {
       level: "warning",
       icon: <Package className="w-4 h-4" />,
       title: `${lowStockItems.length} Low Stock Item${lowStockItems.length > 1 ? "s" : ""}`,
-      detail: lowStockItems.map((i) => i.name).slice(0, 3).join(", ") + (lowStockItems.length > 3 ? "…" : ""),
+      detail:
+        lowStockItems
+          .map((i) => i.name)
+          .slice(0, 3)
+          .join(", ") + (lowStockItems.length > 3 ? "…" : ""),
       navigate: "inventory",
     });
   }
@@ -192,11 +220,18 @@ export function Dashboard({ onNavigate }: Props) {
 
       {/* Factory Alerts */}
       {alerts.length > 0 ? (
-        <div className="rounded-xl border border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800" data-ocid="dashboard.alerts.section">
+        <div
+          className="rounded-xl border border-amber-200 bg-amber-50 dark:bg-amber-950/20 dark:border-amber-800"
+          data-ocid="dashboard.alerts.section"
+        >
           <div className="flex items-center gap-2 px-4 py-2.5 border-b border-amber-200 dark:border-amber-800">
             <AlertTriangle className="w-4 h-4 text-amber-600" />
-            <span className="text-sm font-semibold text-amber-800 dark:text-amber-300">Factory Alerts</span>
-            <span className="ml-auto text-xs text-amber-600 dark:text-amber-400">{alerts.length} action{alerts.length > 1 ? "s" : ""} needed</span>
+            <span className="text-sm font-semibold text-amber-800 dark:text-amber-300">
+              Factory Alerts
+            </span>
+            <span className="ml-auto text-xs text-amber-600 dark:text-amber-400">
+              {alerts.length} action{alerts.length > 1 ? "s" : ""} needed
+            </span>
           </div>
           <div className="divide-y divide-amber-100 dark:divide-amber-900">
             {alerts.map((alert) => (
@@ -204,26 +239,45 @@ export function Dashboard({ onNavigate }: Props) {
                 key={alert.id}
                 className={`flex items-center gap-3 px-4 py-2.5 ${alert.navigate ? "cursor-pointer hover:bg-amber-100/60 dark:hover:bg-amber-900/30 transition-colors" : ""}`}
                 onClick={() => alert.navigate && onNavigate(alert.navigate)}
-                onKeyDown={(e) => e.key === "Enter" && alert.navigate && onNavigate(alert.navigate)}
+                onKeyDown={(e) =>
+                  e.key === "Enter" &&
+                  alert.navigate &&
+                  onNavigate(alert.navigate)
+                }
                 role={alert.navigate ? "button" : undefined}
                 tabIndex={alert.navigate ? 0 : undefined}
               >
-                <div className={`flex items-center justify-center w-7 h-7 rounded-full shrink-0 ${alert.level === "critical" ? "bg-red-100 text-red-600 dark:bg-red-900/50 dark:text-red-400" : "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-400"}`}>
+                <div
+                  className={`flex items-center justify-center w-7 h-7 rounded-full shrink-0 ${alert.level === "critical" ? "bg-red-100 text-red-600 dark:bg-red-900/50 dark:text-red-400" : "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-400"}`}
+                >
                   {alert.icon}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className={`text-xs font-semibold ${alert.level === "critical" ? "text-red-700 dark:text-red-400" : "text-amber-800 dark:text-amber-300"}`}>{alert.title}</p>
-                  <p className="text-[11px] text-muted-foreground truncate">{alert.detail}</p>
+                  <p
+                    className={`text-xs font-semibold ${alert.level === "critical" ? "text-red-700 dark:text-red-400" : "text-amber-800 dark:text-amber-300"}`}
+                  >
+                    {alert.title}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground truncate">
+                    {alert.detail}
+                  </p>
                 </div>
-                {alert.navigate && <ArrowRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />}
+                {alert.navigate && (
+                  <ArrowRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                )}
               </div>
             ))}
           </div>
         </div>
       ) : (
-        <div className="flex items-center gap-2 px-4 py-3 rounded-xl border border-green-200 bg-green-50 dark:bg-green-950/20 dark:border-green-800" data-ocid="dashboard.no_alerts">
+        <div
+          className="flex items-center gap-2 px-4 py-3 rounded-xl border border-green-200 bg-green-50 dark:bg-green-950/20 dark:border-green-800"
+          data-ocid="dashboard.no_alerts"
+        >
           <CheckCircle2 className="w-4 h-4 text-green-600 shrink-0" />
-          <span className="text-sm text-green-700 dark:text-green-400 font-medium">All clear — no operational alerts</span>
+          <span className="text-sm text-green-700 dark:text-green-400 font-medium">
+            All clear — no operational alerts
+          </span>
         </div>
       )}
 

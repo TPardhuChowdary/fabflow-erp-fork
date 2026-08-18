@@ -37,6 +37,8 @@ import { ShieldOff } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
+import { CustomerSelect } from "../components/CustomerSelect";
 import {
   createProjectRemote,
   deleteProjectRemote,
@@ -79,6 +81,8 @@ export function Projects({ onViewProject }: Props) {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editForm, setEditForm] = useState<Project | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [deleteProjectTarget, setDeleteProjectTarget] =
+    useState<Project | null>(null);
   // Users with any permission (view/create/edit) see all projects
   // Only users with NO project permissions at all see just their assigned projects
   const visibleProjects =
@@ -217,6 +221,55 @@ export function Projects({ onViewProject }: Props) {
     }
   };
 
+  // Shared by the desktop table row and the mobile card (Fix 1) so this
+  // logic exists exactly once rather than being duplicated per layout.
+  // Split into a "request" step (permission + linked-record guard, then
+  // opens the confirm dialog) and a "confirmed" step (the actual remote
+  // delete) so the destructive action itself only ever runs from the
+  // dialog's own Delete button, never from a native confirm().
+  const handleDeleteProject = (p: Project) => {
+    // Local linked-record guard, fail-fast BEFORE even offering the
+    // confirm dialog - same check store.ts's deleteProject runs,
+    // duplicated here so we never attempt a delete for a project with
+    // linked local records (mirrors Customers.tsx's established pattern).
+    const s = useStore.getState();
+    const hasInvoices = (s.invoices || []).some(
+      (inv) => inv.projectId === p.id,
+    );
+    const hasDCs = (s.deliveryChallans || []).some((dc) =>
+      (dc.projectEntries || []).some((entry) => entry.projectId === p.id),
+    );
+    const hasUsages = (s.materialUsages || []).some(
+      (u) => u.projectId === p.id,
+    );
+    if (hasInvoices || hasDCs || hasUsages) {
+      toast.error(
+        "Cannot delete project. Linked records exist (invoices, delivery challans, or material usage).",
+      );
+      return;
+    }
+    setDeleteProjectTarget(p);
+  };
+
+  const handleConfirmDeleteProject = async () => {
+    const p = deleteProjectTarget;
+    if (!p) return;
+    const result = await deleteProjectRemote(p.id);
+    if (result.status === "unauthenticated") {
+      toast.error("Not signed in to the server - project was not deleted");
+      setDeleteProjectTarget(null);
+      return;
+    }
+    if (result.status === "denied" || result.status === "error") {
+      toast.error(result.error ?? "Could not delete project");
+      setDeleteProjectTarget(null);
+      return;
+    }
+    deleteProject(p.id);
+    toast.success("Project deleted");
+    setDeleteProjectTarget(null);
+  };
+
   if (!pView) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
@@ -267,8 +320,96 @@ export function Projects({ onViewProject }: Props) {
         />
       </div>
 
-      {/* Table */}
-      <div className="table-wrapper">
+      {/* Mobile card list (< sm) — responsive audit Fix 1. Same data,
+          same actions/permissions/handlers as the table below; only the
+          presentation differs. Desktop/tablet table is unchanged. */}
+      <div className="sm:hidden space-y-2" data-ocid="projects.cards">
+        {filtered.map((p, i) => {
+          const customer = customers.find((c) => c.id === p.customerId);
+          return (
+            <div
+              key={p.id}
+              className="rounded-md border bg-card p-3 space-y-2"
+              data-ocid={`projects.card.${i + 1}`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-sm font-medium truncate">
+                      {getCustomerVisibleName(p)}
+                    </span>
+                    {p.projectType === "REPEAT_ORDER" &&
+                      p.internalOrderCode && (
+                        <span className="font-mono text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded shrink-0">
+                          Repeat · {p.internalOrderCode}
+                        </span>
+                      )}
+                  </div>
+                  <div className="text-xs font-mono font-semibold text-primary mt-0.5">
+                    {p.projectNo}
+                  </div>
+                </div>
+              </div>
+              <div className="text-xs text-muted-foreground">
+                {customer?.name ?? "—"}
+              </div>
+              <div className="text-[11px] text-muted-foreground">
+                Created {new Date(p.createdAt).toLocaleDateString("en-IN")}
+              </div>
+              <div className="flex items-center gap-1.5 pt-1">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 px-2.5 text-xs flex-1"
+                  onClick={() => onViewProject(p.id)}
+                  data-ocid={`projects.card_view_button.${i + 1}`}
+                >
+                  <FolderOpen className="w-3.5 h-3.5 mr-1" /> View
+                </Button>
+                {pEdit && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-8 px-2.5 text-xs"
+                    onClick={() => {
+                      setEditForm(p);
+                      setEditDialogOpen(true);
+                    }}
+                    data-ocid={`projects.card_edit_button.${i + 1}`}
+                    title="Edit project"
+                  >
+                    <Pencil className="w-3.5 h-3.5" />
+                  </Button>
+                )}
+                {pDelete && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="h-8 px-2.5 text-destructive hover:text-destructive"
+                    onClick={() => handleDeleteProject(p)}
+                    data-ocid={`projects.card_delete_button.${i + 1}`}
+                    title="Delete project"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </Button>
+                )}
+              </div>
+            </div>
+          );
+        })}
+        {filtered.length === 0 && (
+          <p
+            className="text-center py-10 text-sm text-muted-foreground"
+            data-ocid="projects.cards_empty_state"
+          >
+            No projects found
+          </p>
+        )}
+      </div>
+
+      {/* Table (>= sm) — unchanged from before Fix 1 except the delete
+          handler now calls the shared handleDeleteProject function. */}
+      <div className="hidden sm:block table-wrapper">
         <div className="rounded-md border" data-ocid="projects.table">
           <Table>
             <TableHeader>
@@ -305,11 +446,12 @@ export function Projects({ onViewProject }: Props) {
                     <TableCell className="text-sm font-medium">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span>{getCustomerVisibleName(p)}</span>
-                        {p.projectType === "REPEAT_ORDER" && p.internalOrderCode && (
-                          <span className="font-mono text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded shrink-0">
-                            Repeat · {p.internalOrderCode}
-                          </span>
-                        )}
+                        {p.projectType === "REPEAT_ORDER" &&
+                          p.internalOrderCode && (
+                            <span className="font-mono text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded shrink-0">
+                              Repeat · {p.internalOrderCode}
+                            </span>
+                          )}
                       </div>
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground max-w-[220px] truncate">
@@ -350,58 +492,9 @@ export function Projects({ onViewProject }: Props) {
                             variant="ghost"
                             size="sm"
                             className="h-7 px-2 text-destructive hover:text-destructive"
-                            onClick={async (e) => {
+                            onClick={(e) => {
                               e.stopPropagation();
-                              if (
-                                !window.confirm(
-                                  `Are you sure you want to delete project "${p.projectName}"? This cannot be undone.`,
-                                )
-                              )
-                                return;
-                              // Local linked-record guard, fail-fast
-                              // BEFORE any remote call - same check
-                              // store.ts's deleteProject runs, duplicated
-                              // here so we never even attempt a remote
-                              // delete for a project with linked local
-                              // records (mirrors Customers.tsx's
-                              // established pattern).
-                              const s = useStore.getState();
-                              const hasInvoices = (s.invoices || []).some(
-                                (inv) => inv.projectId === p.id,
-                              );
-                              const hasDCs = (s.deliveryChallans || []).some(
-                                (dc) =>
-                                  (dc.projectEntries || []).some(
-                                    (entry) => entry.projectId === p.id,
-                                  ),
-                              );
-                              const hasUsages = (s.materialUsages || []).some(
-                                (u) => u.projectId === p.id,
-                              );
-                              if (hasInvoices || hasDCs || hasUsages) {
-                                toast.error(
-                                  "Cannot delete project. Linked records exist (invoices, delivery challans, or material usage).",
-                                );
-                                return;
-                              }
-                              const result = await deleteProjectRemote(p.id);
-                              if (result.status === "unauthenticated") {
-                                toast.error(
-                                  "Not signed in to the server - project was not deleted",
-                                );
-                                return;
-                              }
-                              if (
-                                result.status === "denied" ||
-                                result.status === "error"
-                              ) {
-                                toast.error(
-                                  result.error ?? "Could not delete project",
-                                );
-                                return;
-                              }
-                              deleteProject(p.id);
-                              toast.success("Project deleted");
+                              handleDeleteProject(p);
                             }}
                             data-ocid={`projects.delete_button.${i + 1}`}
                             title="Delete project"
@@ -446,23 +539,12 @@ export function Projects({ onViewProject }: Props) {
             <div className="space-y-4 py-2">
               <div className="space-y-1.5">
                 <Label htmlFor="proj-customer">Customer *</Label>
-                <Select
+                <CustomerSelect
                   value={form.customerId}
-                  onValueChange={(v) =>
-                    setForm((f) => ({ ...f, customerId: v }))
-                  }
-                >
-                  <SelectTrigger id="proj-customer" data-ocid="projects.select">
-                    <SelectValue placeholder="Select customer" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {customers.map((c) => (
-                      <SelectItem key={c.id} value={c.id}>
-                        {c.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                  onChange={(v) => setForm((f) => ({ ...f, customerId: v }))}
+                  className="w-full"
+                  data-ocid="projects.select"
+                />
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="proj-name">Project Name *</Label>
@@ -546,23 +628,13 @@ export function Projects({ onViewProject }: Props) {
               <div className="space-y-4 py-2">
                 <div className="space-y-1.5">
                   <Label htmlFor="edit-proj-customer">Customer *</Label>
-                  <Select
+                  <CustomerSelect
                     value={editForm.customerId}
-                    onValueChange={(v) =>
+                    onChange={(v) =>
                       setEditForm((f) => (f ? { ...f, customerId: v } : f))
                     }
-                  >
-                    <SelectTrigger id="edit-proj-customer">
-                      <SelectValue placeholder="Select customer" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {customers.map((c) => (
-                        <SelectItem key={c.id} value={c.id}>
-                          {c.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                    className="w-full"
+                  />
                 </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="edit-proj-name">Project Name *</Label>
@@ -626,6 +698,14 @@ export function Projects({ onViewProject }: Props) {
           </DialogContent>
         </Dialog>
       )}
+
+      <ConfirmDeleteDialog
+        open={!!deleteProjectTarget}
+        onOpenChange={(o) => !o && setDeleteProjectTarget(null)}
+        title="Delete project?"
+        description={`Project "${deleteProjectTarget?.projectName}" will be permanently deleted.`}
+        onConfirm={handleConfirmDeleteProject}
+      />
     </div>
   );
 }

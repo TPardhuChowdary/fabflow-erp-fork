@@ -28,6 +28,8 @@ import { Package, Plus, ShieldOff, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
+import { ProjectSelect } from "../components/ProjectSelect";
 import { canCreate, canDelete, canEdit, canView } from "../permissions";
 import { useStore } from "../store";
 import type { ScrapRecord, ScrapStatus } from "../types";
@@ -41,15 +43,29 @@ export function ScrapManagement() {
   const pEdit = canEdit(currentUser, "inventory");
   const pDelete = canDelete(currentUser, "inventory");
 
-  const { scrapRecords, addScrapRecord, updateScrapRecord, deleteScrapRecord, projects } = useStore();
+  const {
+    scrapRecords,
+    addScrapRecord,
+    updateScrapRecord,
+    deleteScrapRecord,
+    projects,
+  } = useStore();
 
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<ScrapRecord | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<ScrapRecord | null>(null);
   const [form, setForm] = useState<Partial<ScrapRecord>>({});
 
   function openNew() {
     setEditing(null);
-    setForm({ unit: "kg", generatedQty: 0, reusableQty: 0, soldQty: 0, disposedQty: 0, status: "In Stock" });
+    setForm({
+      unit: "kg",
+      generatedQty: 0,
+      reusableQty: 0,
+      soldQty: 0,
+      disposedQty: 0,
+      status: "In Stock",
+    });
     setShowForm(true);
   }
 
@@ -60,7 +76,10 @@ export function ScrapManagement() {
   }
 
   function handleSave() {
-    if (!form.materialType?.trim()) { toast.error("Material type required"); return; }
+    if (!form.materialType?.trim()) {
+      toast.error("Material type required");
+      return;
+    }
     if (editing) {
       updateScrapRecord({ ...editing, ...form } as ScrapRecord);
       toast.success("Scrap record updated");
@@ -101,7 +120,9 @@ export function ScrapManagement() {
         </div>
         <div className="text-center">
           <h2 className="text-lg font-bold">Access Restricted</h2>
-          <p className="text-sm text-muted-foreground mt-1">You do not have permission to view this module.</p>
+          <p className="text-sm text-muted-foreground mt-1">
+            You do not have permission to view this module.
+          </p>
         </div>
       </div>
     );
@@ -117,7 +138,9 @@ export function ScrapManagement() {
           </div>
           <div>
             <h1 className="text-xl font-bold">Scrap Management</h1>
-            <p className="text-sm text-muted-foreground">{scrapRecords.length} records</p>
+            <p className="text-sm text-muted-foreground">
+              {scrapRecords.length} records
+            </p>
           </div>
         </div>
         {pCreate && (
@@ -130,20 +153,34 @@ export function ScrapManagement() {
       {/* KPIs */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <div className="rounded-lg border bg-card p-4">
-          <p className="text-xs text-muted-foreground uppercase tracking-wide">Total Generated</p>
+          <p className="text-xs text-muted-foreground uppercase tracking-wide">
+            Total Generated
+          </p>
           <p className="text-2xl font-bold mt-1">{totalScrap} kg</p>
         </div>
         <div className="rounded-lg border bg-card p-4">
-          <p className="text-xs text-muted-foreground uppercase tracking-wide">Reusable</p>
-          <p className="text-2xl font-bold mt-1 text-green-600">{totalReusable} kg</p>
+          <p className="text-xs text-muted-foreground uppercase tracking-wide">
+            Reusable
+          </p>
+          <p className="text-2xl font-bold mt-1 text-green-600">
+            {totalReusable} kg
+          </p>
         </div>
         <div className="rounded-lg border bg-card p-4">
-          <p className="text-xs text-muted-foreground uppercase tracking-wide">Sold</p>
-          <p className="text-2xl font-bold mt-1 text-blue-600">{totalSold} kg</p>
+          <p className="text-xs text-muted-foreground uppercase tracking-wide">
+            Sold
+          </p>
+          <p className="text-2xl font-bold mt-1 text-blue-600">
+            {totalSold} kg
+          </p>
         </div>
         <div className="rounded-lg border bg-card p-4">
-          <p className="text-xs text-muted-foreground uppercase tracking-wide">Scrap Value</p>
-          <p className="text-2xl font-bold mt-1 text-amber-600">{fmt(totalValue)}</p>
+          <p className="text-xs text-muted-foreground uppercase tracking-wide">
+            Scrap Value
+          </p>
+          <p className="text-2xl font-bold mt-1 text-amber-600">
+            {fmt(totalValue)}
+          </p>
         </div>
       </div>
 
@@ -160,26 +197,49 @@ export function ScrapManagement() {
               <TableHead className="text-xs font-semibold">Sold</TableHead>
               <TableHead className="text-xs font-semibold">Value</TableHead>
               <TableHead className="text-xs font-semibold">Status</TableHead>
-              <TableHead className="text-xs font-semibold w-20">Actions</TableHead>
+              <TableHead className="text-xs font-semibold w-20">
+                Actions
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {scrapRecords.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={9} className="text-center text-muted-foreground py-10">
+                <TableCell
+                  colSpan={9}
+                  className="text-center text-muted-foreground py-10"
+                >
                   No scrap records yet.
                 </TableCell>
               </TableRow>
             ) : (
               scrapRecords.map((r) => (
-                <TableRow key={r.id} className="cursor-pointer hover:bg-muted/30" onClick={() => pEdit && openEdit(r)}>
-                  <TableCell className="text-sm font-medium">{r.materialType}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{r.projectName || "—"}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{r.stage || "—"}</TableCell>
-                  <TableCell className="text-sm">{r.generatedQty} {r.unit}</TableCell>
-                  <TableCell className="text-sm text-green-600">{r.reusableQty} {r.unit}</TableCell>
-                  <TableCell className="text-sm text-blue-600">{r.soldQty} {r.unit}</TableCell>
-                  <TableCell className="text-sm">{r.scrapValue ? fmt(r.scrapValue) : "—"}</TableCell>
+                <TableRow
+                  key={r.id}
+                  className="cursor-pointer hover:bg-muted/30"
+                  onClick={() => pEdit && openEdit(r)}
+                >
+                  <TableCell className="text-sm font-medium">
+                    {r.materialType}
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {r.projectName || "—"}
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">
+                    {r.stage || "—"}
+                  </TableCell>
+                  <TableCell className="text-sm">
+                    {r.generatedQty} {r.unit}
+                  </TableCell>
+                  <TableCell className="text-sm text-green-600">
+                    {r.reusableQty} {r.unit}
+                  </TableCell>
+                  <TableCell className="text-sm text-blue-600">
+                    {r.soldQty} {r.unit}
+                  </TableCell>
+                  <TableCell className="text-sm">
+                    {r.scrapValue ? fmt(r.scrapValue) : "—"}
+                  </TableCell>
                   <TableCell>
                     <Badge
                       variant="outline"
@@ -190,7 +250,12 @@ export function ScrapManagement() {
                   </TableCell>
                   <TableCell onClick={(e) => e.stopPropagation()}>
                     {pDelete && (
-                      <Button variant="ghost" size="icon" className="h-7 w-7 text-destructive hover:text-destructive" onClick={() => { if (confirm("Delete?")) deleteScrapRecord(r.id); }}>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-destructive hover:text-destructive"
+                        onClick={() => setDeleteTarget(r)}
+                      >
                         <Trash2 className="w-3.5 h-3.5" />
                       </Button>
                     )}
@@ -206,42 +271,78 @@ export function ScrapManagement() {
       <Dialog open={showForm} onOpenChange={setShowForm}>
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>{editing ? "Edit Scrap Record" : "Log Scrap"}</DialogTitle>
+            <DialogTitle>
+              {editing ? "Edit Scrap Record" : "Log Scrap"}
+            </DialogTitle>
           </DialogHeader>
           <div className="space-y-4 py-2">
             <div className="grid grid-cols-2 gap-3">
               <div className="col-span-2">
                 <Label className="text-xs">Material Type *</Label>
-                <Input className="mt-1 h-8 text-sm" placeholder="e.g. MS Sheet offcuts" value={form.materialType ?? ""} onChange={(e) => setForm({ ...form, materialType: e.target.value })} />
+                <Input
+                  className="mt-1 h-8 text-sm"
+                  placeholder="e.g. MS Sheet offcuts"
+                  value={form.materialType ?? ""}
+                  onChange={(e) =>
+                    setForm({ ...form, materialType: e.target.value })
+                  }
+                />
               </div>
               <div>
                 <Label className="text-xs">Unit</Label>
-                <Select value={form.unit ?? "kg"} onValueChange={(v) => setForm({ ...form, unit: v })}>
-                  <SelectTrigger className="mt-1 h-8 text-sm"><SelectValue /></SelectTrigger>
+                <Select
+                  value={form.unit ?? "kg"}
+                  onValueChange={(v) => setForm({ ...form, unit: v })}
+                >
+                  <SelectTrigger className="mt-1 h-8 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
                   <SelectContent>
-                    {["kg", "pcs", "sheets", "meters", "liters"].map((u) => <SelectItem key={u} value={u}>{u}</SelectItem>)}
+                    {["kg", "pcs", "sheets", "meters", "liters"].map((u) => (
+                      <SelectItem key={u} value={u}>
+                        {u}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
               <div>
                 <Label className="text-xs">Project (optional)</Label>
-                <Select value={form.projectId ?? ""} onValueChange={(v) => setForm({ ...form, projectId: v })}>
-                  <SelectTrigger className="mt-1 h-8 text-sm"><SelectValue placeholder="Select project" /></SelectTrigger>
-                  <SelectContent>
-                    {projects.map((p) => <SelectItem key={p.id} value={p.id}>{p.projectName}</SelectItem>)}
-                  </SelectContent>
-                </Select>
+                <ProjectSelect
+                  value={form.projectId ?? ""}
+                  onChange={(v) => setForm({ ...form, projectId: v })}
+                  placeholder="Select project"
+                  className="mt-1 w-full"
+                />
               </div>
               <div>
                 <Label className="text-xs">Stage (optional)</Label>
-                <Input className="mt-1 h-8 text-sm" placeholder="e.g. Laser Cutting" value={form.stage ?? ""} onChange={(e) => setForm({ ...form, stage: e.target.value })} />
+                <Input
+                  className="mt-1 h-8 text-sm"
+                  placeholder="e.g. Laser Cutting"
+                  value={form.stage ?? ""}
+                  onChange={(e) => setForm({ ...form, stage: e.target.value })}
+                />
               </div>
               <div>
                 <Label className="text-xs">Status</Label>
-                <Select value={form.status ?? "In Stock"} onValueChange={(v) => setForm({ ...form, status: v as ScrapStatus })}>
-                  <SelectTrigger className="mt-1 h-8 text-sm"><SelectValue /></SelectTrigger>
+                <Select
+                  value={form.status ?? "In Stock"}
+                  onValueChange={(v) =>
+                    setForm({ ...form, status: v as ScrapStatus })
+                  }
+                >
+                  <SelectTrigger className="mt-1 h-8 text-sm">
+                    <SelectValue />
+                  </SelectTrigger>
                   <SelectContent>
-                    {(["In Stock", "Sold", "Disposed"] as ScrapStatus[]).map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}
+                    {(["In Stock", "Sold", "Disposed"] as ScrapStatus[]).map(
+                      (s) => (
+                        <SelectItem key={s} value={s}>
+                          {s}
+                        </SelectItem>
+                      ),
+                    )}
                   </SelectContent>
                 </Select>
               </div>
@@ -255,25 +356,68 @@ export function ScrapManagement() {
               ].map(({ field, label }) => (
                 <div key={field}>
                   <Label className="text-xs">{label}</Label>
-                  <Input type="number" min={0} className="mt-1 h-8 text-sm" value={(form as any)[field] ?? 0} onChange={(e) => setForm({ ...form, [field]: Number(e.target.value) })} />
+                  <Input
+                    type="number"
+                    min={0}
+                    className="mt-1 h-8 text-sm"
+                    value={(form as any)[field] ?? 0}
+                    onChange={(e) =>
+                      setForm({ ...form, [field]: Number(e.target.value) })
+                    }
+                  />
                 </div>
               ))}
               <div>
                 <Label className="text-xs">Scrap Value (₹)</Label>
-                <Input type="number" min={0} className="mt-1 h-8 text-sm" value={form.scrapValue ?? ""} onChange={(e) => setForm({ ...form, scrapValue: Number(e.target.value) || undefined })} />
+                <Input
+                  type="number"
+                  min={0}
+                  className="mt-1 h-8 text-sm"
+                  value={form.scrapValue ?? ""}
+                  onChange={(e) =>
+                    setForm({
+                      ...form,
+                      scrapValue: Number(e.target.value) || undefined,
+                    })
+                  }
+                />
               </div>
             </div>
             <div>
               <Label className="text-xs">Notes</Label>
-              <Input className="mt-1 h-8 text-sm" value={form.notes ?? ""} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+              <Input
+                className="mt-1 h-8 text-sm"
+                value={form.notes ?? ""}
+                onChange={(e) => setForm({ ...form, notes: e.target.value })}
+              />
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" size="sm" type="button" onClick={() => setShowForm(false)}>Cancel</Button>
-            <Button size="sm" onClick={handleSave}>Save</Button>
+            <Button
+              variant="outline"
+              size="sm"
+              type="button"
+              onClick={() => setShowForm(false)}
+            >
+              Cancel
+            </Button>
+            <Button size="sm" onClick={handleSave}>
+              Save
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={!!deleteTarget}
+        onOpenChange={(o) => !o && setDeleteTarget(null)}
+        title="Delete scrap record?"
+        description="This scrap record will be permanently deleted."
+        onConfirm={() => {
+          if (deleteTarget) deleteScrapRecord(deleteTarget.id);
+          setDeleteTarget(null);
+        }}
+      />
     </div>
   );
 }

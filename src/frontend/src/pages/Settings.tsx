@@ -30,6 +30,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   AlertTriangle,
   Building2,
@@ -42,23 +43,44 @@ import {
   Lock,
   Mail,
   MessageSquare,
+  Monitor,
+  Moon,
+  Palette,
   Plus,
   Power,
   PowerOff,
   Settings as SettingsIcon,
   Shield,
+  Sun,
   UserCog,
   XCircle,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import { useTheme } from "../ThemeContext";
 import { CompanyProfilePrintView } from "../components/CompanyProfilePrintView";
+import { ThemePreviewCard } from "../components/ThemePreviewCard";
 import {
   type MigrationItemResult,
   type MigrationReport,
   migrateDrawingRepositoryToSupabase,
 } from "../drawingEditor/lib/migrateToSupabase";
+import {
+  type MachineMigrationItemResult,
+  type MachineMigrationReport,
+  migrateMachinesToSupabase,
+} from "../lib/machinesMigration";
+import {
+  type ProductionMigrationItemResult,
+  type ProductionMigrationReport,
+  migrateProjectProductionsToSupabase,
+} from "../lib/productionStagesMigration";
+import {
+  type QmsInspectionMigrationReport,
+  type QmsMigrationItemResult,
+  migrateQmsInspectionsToSupabase,
+} from "../lib/qmsInspectionsMigration";
 import {
   type OrgUserRow,
   createOrgUser,
@@ -77,6 +99,8 @@ import type { AppSettings } from "../types";
 export function Settings() {
   const { currentUser } = useAuth();
   const { settings, updateSettings } = useStore();
+  const { themeId, setThemeId, mode, setMode, resolvedMode, themes } =
+    useTheme();
 
   const [showCompanyPreview, setShowCompanyPreview] = useState(false);
 
@@ -506,6 +530,64 @@ export function Settings() {
         </CardContent>
       </Card>
 
+      {/* Appearance */}
+      <Card data-ocid="settings.appearance.card">
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <CardTitle className="text-sm font-semibold flex items-center gap-2">
+              <Palette className="w-4 h-4 text-primary" />
+              Appearance
+            </CardTitle>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div>
+              <Label className="text-sm font-medium">Theme</Label>
+              <p className="text-xs text-muted-foreground">
+                Choose a color palette for the entire ERP. Applies everywhere
+                immediately.
+              </p>
+            </div>
+            <ToggleGroup
+              type="single"
+              variant="outline"
+              size="sm"
+              value={mode}
+              onValueChange={(value) => {
+                if (value) setMode(value as "light" | "dark" | "system");
+              }}
+              data-ocid="settings.appearance.mode_toggle"
+            >
+              <ToggleGroupItem value="light" aria-label="Light mode">
+                <Sun className="w-3.5 h-3.5 mr-1" /> Light
+              </ToggleGroupItem>
+              <ToggleGroupItem value="dark" aria-label="Dark mode">
+                <Moon className="w-3.5 h-3.5 mr-1" /> Dark
+              </ToggleGroupItem>
+              <ToggleGroupItem value="system" aria-label="Match system">
+                <Monitor className="w-3.5 h-3.5 mr-1" /> System
+              </ToggleGroupItem>
+            </ToggleGroup>
+          </div>
+
+          <div
+            className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3"
+            data-ocid="settings.appearance.theme_grid"
+          >
+            {themes.map((preset) => (
+              <ThemePreviewCard
+                key={preset.id}
+                preset={preset}
+                mode={resolvedMode}
+                isSelected={preset.id === themeId}
+                onSelect={() => setThemeId(preset.id)}
+              />
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
       {/* WhatsApp / Twilio */}
       <Card data-ocid="settings.whatsapp.card">
         <CardHeader className="pb-3">
@@ -687,6 +769,15 @@ export function Settings() {
 
       {/* Drawing Repository migration (Phase 14, one-time, self-service) */}
       <DrawingRepositoryMigration />
+
+      {/* Machinery migration (Phase 35, one-time, self-service) */}
+      <MachinesMigration />
+
+      {/* Production Stages migration (Phase 45, one-time, self-service) */}
+      <ProductionStagesMigration />
+
+      {/* QMS Inspection workflow migration (Phase 46, one-time, self-service) */}
+      <QmsInspectionsMigration />
 
       {/* User Management */}
       <UserManagement />
@@ -976,6 +1067,373 @@ function DrawingRepositoryMigration() {
               ...report.views,
               ...report.links,
               ...report.preferences,
+            ]
+              .filter((r) => r.status === "failed")
+              .map((r) => (
+                <p key={r.id} className="text-xs text-destructive">
+                  {r.label}: {r.error}
+                </p>
+              ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Machinery Migration Component ────────────────────────────────────────
+//
+// One-time, user-triggered local (Zustand/localStorage) -> Supabase import
+// for the Machinery module (Phase 35). Safe to run more than once —
+// already-migrated machines (matched by id) are skipped, nothing is
+// duplicated, and local state is never modified or cleared by this action
+// (see lib/machinesMigration.ts). Gated on machinery.create — the same
+// permission the module already requires to add a machine, not a new
+// permission.
+
+function MachinesMigration() {
+  const { currentUser } = useAuth();
+  // Deliberately NOT `s.machines` - see the field's comment on the Store
+  // interface (store.ts). By the time this component renders, `machines`
+  // has almost always already been overwritten by a successful Supabase
+  // hydration; this snapshot is the one place pre-migration local data
+  // actually survives long enough to be migrated.
+  const preMigrationMachines = useStore((s) => s.preMigrationMachinesSnapshot);
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState<string>("");
+  const [report, setReport] = useState<MachineMigrationReport | null>(null);
+
+  if (!hasPermission(currentUser, "machinery.create")) return null;
+
+  const handleMigrate = async () => {
+    setRunning(true);
+    setProgress("Starting…");
+    setReport(null);
+    try {
+      const result = await migrateMachinesToSupabase(
+        preMigrationMachines || [],
+        (msg) => setProgress(msg),
+      );
+      setReport(result);
+      const failed = result.machines.filter(
+        (r) => r.status === "failed",
+      ).length;
+      if (failed > 0) {
+        toast.error(
+          `Migration finished with ${failed} failed item(s) — see details below.`,
+        );
+      } else {
+        toast.success("Machinery migration finished successfully.");
+      }
+    } catch (e) {
+      toast.error(
+        e instanceof Error ? e.message : "Migration failed to start.",
+      );
+    } finally {
+      setRunning(false);
+      setProgress("");
+    }
+  };
+
+  const summarize = (items: MachineMigrationItemResult[]) => ({
+    migrated: items.filter((i) => i.status === "migrated").length,
+    already: items.filter((i) => i.status === "already_migrated").length,
+    failed: items.filter((i) => i.status === "failed").length,
+  });
+
+  return (
+    <Card data-ocid="settings.machines_migration.card">
+      <CardHeader>
+        <CardTitle className="text-base">Machinery Migration</CardTitle>
+        <p className="text-sm text-muted-foreground">
+          One-time import of locally-stored Machines into Supabase. Safe to run
+          more than once — already-migrated machines are skipped by id, never
+          duplicated. Your local machine data is never modified or deleted by
+          this action. Service records, service parts, and machine documents
+          remain local-only and are unaffected.
+        </p>
+        <p className="text-xs text-muted-foreground">
+          {preMigrationMachines?.length ?? 0} machine(s) found in this browser's
+          local snapshot, taken before Machinery started syncing to Supabase.
+        </p>
+      </CardHeader>
+      <CardContent>
+        <div className="flex items-center gap-3">
+          <Button
+            onClick={handleMigrate}
+            disabled={running}
+            data-ocid="settings.machines_migration.run_button"
+          >
+            {running ? "Migrating…" : "Migrate Local Machines to Supabase"}
+          </Button>
+          {running && progress && (
+            <span className="text-xs text-muted-foreground truncate max-w-xs">
+              {progress}
+            </span>
+          )}
+        </div>
+
+        {report && (
+          <div className="mt-4 space-y-3 text-sm">
+            {(() => {
+              const s = summarize(report.machines);
+              return (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium w-24">Machines:</span>
+                  <Badge variant="secondary">{s.migrated} migrated</Badge>
+                  <Badge variant="outline">{s.already} already migrated</Badge>
+                  {s.failed > 0 && (
+                    <Badge variant="destructive">{s.failed} failed</Badge>
+                  )}
+                </div>
+              );
+            })()}
+
+            {report.machines
+              .filter((r) => r.status === "failed")
+              .map((r) => (
+                <p key={r.id} className="text-xs text-destructive">
+                  {r.label}: {r.error}
+                </p>
+              ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ProductionStagesMigration() {
+  const { currentUser } = useAuth();
+  // Deliberately NOT `s.projectProductions` - see the field's comment on
+  // the Store interface (store.ts), same rationale as
+  // preMigrationMachinesSnapshot above: by the time this component
+  // renders, projectProductions has almost always already been
+  // overwritten by a successful Supabase hydration.
+  const preMigrationProductions = useStore(
+    (s) => s.preMigrationProjectProductionsSnapshot,
+  );
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState<string>("");
+  const [report, setReport] = useState<ProductionMigrationReport | null>(null);
+
+  if (!hasPermission(currentUser, "production.edit")) return null;
+
+  const handleMigrate = async () => {
+    setRunning(true);
+    setProgress("Starting…");
+    setReport(null);
+    try {
+      const result = await migrateProjectProductionsToSupabase(
+        preMigrationProductions || [],
+        (msg) => setProgress(msg),
+      );
+      setReport(result);
+      const failed = result.productions.filter(
+        (r) => r.status === "failed",
+      ).length;
+      if (failed > 0) {
+        toast.error(
+          `Migration finished with ${failed} failed item(s) — see details below.`,
+        );
+      } else {
+        toast.success("Production Stages migration finished successfully.");
+      }
+    } catch (e) {
+      toast.error(
+        e instanceof Error ? e.message : "Migration failed to start.",
+      );
+    } finally {
+      setRunning(false);
+      setProgress("");
+    }
+  };
+
+  const summarize = (items: ProductionMigrationItemResult[]) => ({
+    migrated: items.filter((i) => i.status === "migrated").length,
+    failed: items.filter((i) => i.status === "failed").length,
+  });
+
+  return (
+    <Card data-ocid="settings.production_stages_migration.card">
+      <CardHeader>
+        <CardTitle className="text-base">Production Stages Migration</CardTitle>
+        <p className="text-sm text-muted-foreground">
+          One-time import of locally-stored Production Stages (and their
+          Send/Receive transaction history) into Supabase. Safe to run more than
+          once — every stage upserts by its existing id, never duplicated. Your
+          local data is never modified or deleted by this action.
+        </p>
+        <p className="text-xs text-muted-foreground">
+          {
+            (preMigrationProductions || []).filter(
+              (p) => (p.stages || []).length > 0,
+            ).length
+          }{" "}
+          project(s) with stages found in this browser's local snapshot, taken
+          before Production Stages started syncing to Supabase.
+        </p>
+      </CardHeader>
+      <CardContent>
+        <div className="flex items-center gap-3">
+          <Button
+            onClick={handleMigrate}
+            disabled={running}
+            data-ocid="settings.production_stages_migration.run_button"
+          >
+            {running
+              ? "Migrating…"
+              : "Migrate Local Production Stages to Supabase"}
+          </Button>
+          {running && progress && (
+            <span className="text-xs text-muted-foreground truncate max-w-xs">
+              {progress}
+            </span>
+          )}
+        </div>
+
+        {report && (
+          <div className="mt-4 space-y-3 text-sm">
+            {(() => {
+              const s = summarize(report.productions);
+              return (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium w-24">Projects:</span>
+                  <Badge variant="secondary">{s.migrated} migrated</Badge>
+                  {s.failed > 0 && (
+                    <Badge variant="destructive">{s.failed} failed</Badge>
+                  )}
+                </div>
+              );
+            })()}
+
+            {report.productions
+              .filter((r) => r.status === "failed")
+              .map((r) => (
+                <p key={r.projectId} className="text-xs text-destructive">
+                  {r.label}: {r.error}
+                </p>
+              ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function QmsInspectionsMigration() {
+  const { currentUser } = useAuth();
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState<string>("");
+  const [report, setReport] = useState<QmsInspectionMigrationReport | null>(
+    null,
+  );
+
+  // Unlike Machines/Production Stages, this reads straight from IndexedDB
+  // (never touched by Supabase hydration) — no pre-migration snapshot
+  // capture is needed, it's safe to run at any time.
+  if (!hasPermission(currentUser, "inspection_sheets.generate")) return null;
+
+  const handleMigrate = async () => {
+    setRunning(true);
+    setProgress("Starting…");
+    setReport(null);
+    try {
+      const result = await migrateQmsInspectionsToSupabase((msg) =>
+        setProgress(msg),
+      );
+      setReport(result);
+      const failed = [
+        ...result.sheets,
+        ...result.stageEntries,
+        ...result.stageCompletions,
+        ...result.documents,
+        ...result.history,
+      ].filter((r) => r.status === "failed").length;
+      if (failed > 0) {
+        toast.error(
+          `Migration finished with ${failed} failed item(s) — see details below.`,
+        );
+      } else {
+        toast.success("QMS Inspection data migration finished successfully.");
+      }
+    } catch (e) {
+      toast.error(
+        e instanceof Error ? e.message : "Migration failed to start.",
+      );
+    } finally {
+      setRunning(false);
+      setProgress("");
+    }
+  };
+
+  const summarize = (items: QmsMigrationItemResult[]) => ({
+    migrated: items.filter((i) => i.status === "migrated").length,
+    failed: items.filter((i) => i.status === "failed").length,
+  });
+
+  return (
+    <Card data-ocid="settings.qms_inspections_migration.card">
+      <CardHeader>
+        <CardTitle className="text-base">
+          QMS Inspection Data Migration
+        </CardTitle>
+        <p className="text-sm text-muted-foreground">
+          One-time import of this browser's locally-stored Inspection Sheets,
+          stage entries, stage completions, documents, and history into
+          Supabase. Safe to run more than once — every item upserts by its
+          existing id, never duplicated. Your local IndexedDB data is never
+          modified or deleted by this action.
+        </p>
+      </CardHeader>
+      <CardContent>
+        <div className="flex items-center gap-3">
+          <Button
+            onClick={handleMigrate}
+            disabled={running}
+            data-ocid="settings.qms_inspections_migration.run_button"
+          >
+            {running
+              ? "Migrating…"
+              : "Migrate Local QMS Inspection Data to Supabase"}
+          </Button>
+          {running && progress && (
+            <span className="text-xs text-muted-foreground truncate max-w-xs">
+              {progress}
+            </span>
+          )}
+        </div>
+
+        {report && (
+          <div className="mt-4 space-y-3 text-sm">
+            {(
+              [
+                ["Sheets", report.sheets],
+                ["Stage Entries", report.stageEntries],
+                ["Stage Completions", report.stageCompletions],
+                ["Documents", report.documents],
+                ["History", report.history],
+              ] as const
+            ).map(([label, items]) => {
+              const s = summarize(items);
+              if (s.migrated === 0 && s.failed === 0) return null;
+              return (
+                <div key={label} className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium w-32">{label}:</span>
+                  <Badge variant="secondary">{s.migrated} migrated</Badge>
+                  {s.failed > 0 && (
+                    <Badge variant="destructive">{s.failed} failed</Badge>
+                  )}
+                </div>
+              );
+            })}
+
+            {[
+              ...report.sheets,
+              ...report.stageEntries,
+              ...report.stageCompletions,
+              ...report.documents,
+              ...report.history,
             ]
               .filter((r) => r.status === "failed")
               .map((r) => (

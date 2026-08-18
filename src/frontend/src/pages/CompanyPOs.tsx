@@ -29,6 +29,7 @@ import {
   Download,
   Eye,
   FileText,
+  Package,
   Paperclip,
   Pencil,
   Plus,
@@ -44,6 +45,9 @@ import { createRoot } from "react-dom/client";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
 import { CompanyPOPrintView } from "../components/CompanyPOPrintView";
+import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
+import { ReceiveCompanyPoItemDialog } from "../components/ReceiveCompanyPoItemDialog";
+import { VendorSelect } from "../components/VendorSelect";
 import {
   createCompanyPORemote,
   deleteCompanyPORemote,
@@ -175,6 +179,7 @@ function CompanyPOsInner() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [viewPO, setViewPO] = useState<CompanyPO | null>(null);
+  const [receivingPO, setReceivingPO] = useState<CompanyPO | null>(null);
   async function handleDownload(po: CompanyPO) {
     const container = document.createElement("div");
     container.style.cssText =
@@ -449,23 +454,33 @@ function CompanyPOsInner() {
     }
   };
 
-  const handleDelete = async (id: string) => {
+  const [deletePOTarget, setDeletePOTarget] = useState<string | null>(null);
+
+  const handleDelete = (id: string) => {
     if (!pDelete) {
       alert("Access restricted");
       return;
     }
-    if (!window.confirm("Delete this Purchase Order?")) return;
+    setDeletePOTarget(id);
+  };
+
+  const handleConfirmDelete = async () => {
+    const id = deletePOTarget;
+    if (!id) return;
     const result = await deleteCompanyPORemote(id);
     if (result.status === "unauthenticated") {
       toast.error("Not signed in to the server - PO was not deleted");
+      setDeletePOTarget(null);
       return;
     }
     if (result.status === "denied" || result.status === "error") {
       toast.error(result.error ?? "Could not delete PO");
+      setDeletePOTarget(null);
       return;
     }
     deleteCompanyPO(id);
     toast.success("PO deleted.");
+    setDeletePOTarget(null);
   };
 
   const fmt = (n: number) =>
@@ -599,6 +614,18 @@ function CompanyPOsInner() {
                       data-ocid={`company-po.edit_button.${idx + 1}`}
                     >
                       <Pencil className="w-4 h-4" />
+                    </Button>
+                  )}
+                  {pEdit && po.status === "Received" && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-10 w-10"
+                      onClick={() => setReceivingPO(po)}
+                      title="Receive Items"
+                      data-ocid={`company-po.receive_button.${idx + 1}`}
+                    >
+                      <Package className="w-4 h-4" />
                     </Button>
                   )}
                   {pPrint && (
@@ -755,6 +782,17 @@ function CompanyPOsInner() {
                               <Pencil className="w-3.5 h-3.5" />
                             </Button>
                           )}
+                          {pEdit && po.status === "Received" && (
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7"
+                              onClick={() => setReceivingPO(po)}
+                              title="Receive Items"
+                            >
+                              <Package className="w-3.5 h-3.5" />
+                            </Button>
+                          )}
                           {pPrint && (
                             <Button
                               variant="ghost"
@@ -827,6 +865,16 @@ function CompanyPOsInner() {
         }}
       />
 
+      <ReceiveCompanyPoItemDialog
+        po={
+          receivingPO
+            ? (safePos.find((p) => p.id === receivingPO.id) ?? null)
+            : null
+        }
+        open={!!receivingPO}
+        onClose={() => setReceivingPO(null)}
+      />
+
       {/* Create/Edit Dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent
@@ -852,9 +900,9 @@ function CompanyPOsInner() {
                 {safeVendors.length > 0 && (
                   <div>
                     <Label>Select Vendor</Label>
-                    <Select
+                    <VendorSelect
                       value={form.vendorId}
-                      onValueChange={(val) => {
+                      onChange={(val) => {
                         const v = safeVendors.find((x) => x.id === val);
                         if (v) {
                           setForm((f) => ({
@@ -867,18 +915,10 @@ function CompanyPOsInner() {
                           }));
                         }
                       }}
-                    >
-                      <SelectTrigger data-ocid="company-po.select">
-                        <SelectValue placeholder="Choose vendor..." />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {safeVendors.map((v) => (
-                          <SelectItem key={v.id} value={v.id}>
-                            {v.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                      placeholder="Choose vendor..."
+                      className="w-full"
+                      data-ocid="company-po.select"
+                    />
                   </div>
                 )}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -964,7 +1004,12 @@ function CompanyPOsInner() {
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <h3 className="font-semibold text-sm">Items</h3>
-                  <Button type="button" variant="outline" size="sm" onClick={addItem}>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={addItem}
+                  >
                     <Plus className="w-3.5 h-3.5 mr-1" /> Add Item
                   </Button>
                 </div>
@@ -1193,6 +1238,14 @@ function CompanyPOsInner() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={!!deletePOTarget}
+        onOpenChange={(o) => !o && setDeletePOTarget(null)}
+        title="Delete Purchase Order?"
+        description="This Purchase Order will be permanently deleted."
+        onConfirm={handleConfirmDelete}
+      />
     </div>
   );
 }

@@ -277,7 +277,7 @@ export function CompanyProfilePrintView({ open, onClose }: Props) {
                 ) : (
                   <div>
                     <strong>Phone:</strong>{" "}
-                    <span style={{ color: "#aaa" }}>\u2014</span>
+                    <span style={{ color: "#aaa" }}>—</span>
                   </div>
                 )}
                 {settings.companyEmail ? (
@@ -287,7 +287,7 @@ export function CompanyProfilePrintView({ open, onClose }: Props) {
                 ) : (
                   <div>
                     <strong>Email:</strong>{" "}
-                    <span style={{ color: "#aaa" }}>\u2014</span>
+                    <span style={{ color: "#aaa" }}>—</span>
                   </div>
                 )}
               </div>

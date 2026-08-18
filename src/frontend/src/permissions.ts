@@ -111,6 +111,28 @@ export const MODULE_PERMISSIONS: Record<
       "upload",
     ],
   },
+  // Phase 37 — Tool Register (master scope §6). Reuses the same
+  // Production-category pattern as `machinery`.
+  tools: {
+    label: "Tools",
+    category: "Production",
+    actions: ["view", "create", "edit", "delete", "assign"],
+  },
+  // Phase 38 — Tooling/Dies Register (master scope §7-9).
+  tooling_dies: {
+    label: "Tooling / Dies",
+    category: "Production",
+    actions: ["view", "create", "edit", "delete"],
+  },
+  // Phase 40 — Machine/Service Revenue (master scope §17-28). Gates
+  // billable_services, machine_service_rate_history (manage_rates only
+  // - a deliberately narrower action than edit, since rate changes
+  // affect all future revenue calculations), and machine_service_usage.
+  machine_revenue: {
+    label: "Machine / Service Revenue",
+    category: "Production",
+    actions: ["view", "create", "edit", "delete", "manage_rates"],
+  },
   export_engine: {
     label: "Export / Print Engine",
     category: "System",
@@ -216,6 +238,7 @@ export const ROLE_DEFAULTS: Record<string, Record<string, boolean>> = {
     "company_po.*",
     "material_requisitions.*",
     "inventory.*",
+    "tools.view",
   ]),
   production: buildPerms([
     "projects.view",
@@ -227,6 +250,16 @@ export const ROLE_DEFAULTS: Record<string, Record<string, boolean>> = {
     "machinery.view",
     "machinery.service_create",
     "machinery.upload",
+    "tools.view",
+    "tools.create",
+    "tools.edit",
+    "tools.assign",
+    "tooling_dies.view",
+    "tooling_dies.create",
+    "tooling_dies.edit",
+    "machine_revenue.view",
+    "machine_revenue.create",
+    "machine_revenue.edit",
     "inspection_sheets.view",
     "inspection_sheets.complete",
     "inspection_sheets.upload",
@@ -269,6 +302,7 @@ export const ROLE_DEFAULTS: Record<string, Record<string, boolean>> = {
     "projects.view",
     "employees.view",
     "machinery.view",
+    "machine_revenue.view",
     "export_engine.*",
     "ledger.*",
   ]),

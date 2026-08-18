@@ -1,7 +1,9 @@
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { downloadInspectionDocumentBlob } from "@/lib/qmsInspectionWorkflowApi";
 import { Download, FileText, Upload } from "lucide-react";
-import { useRef } from "react";
+import { useRef, useState } from "react";
+import { toast } from "sonner";
 import type {
   InspectionDocument,
   InspectionStageDefinition,
@@ -27,8 +29,25 @@ export function DocumentUploadPanel({
   canUpload,
 }: Props) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const stageName = (id?: string) =>
     id ? (stages.find((s) => s.id === id)?.name ?? "Stage") : "Whole Sheet";
+
+  // Bytes are fetched on demand — Phase 46 moved document storage to
+  // Supabase Storage, so `doc.blob` is no longer eagerly populated on the
+  // list read that produces `documents`.
+  const handleView = async (doc: InspectionDocument) => {
+    setDownloadingId(doc.id);
+    try {
+      const blob = doc.blob ?? (await downloadInspectionDocumentBlob(doc.id));
+      const url = URL.createObjectURL(blob);
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not open document");
+    } finally {
+      setDownloadingId(null);
+    }
+  };
 
   return (
     <Card data-ocid="qms.inspection.documents_panel">
@@ -94,10 +113,8 @@ export function DocumentUploadPanel({
                 size="sm"
                 variant="ghost"
                 className="h-6 w-6 p-0 shrink-0"
-                onClick={() => {
-                  const url = URL.createObjectURL(doc.blob);
-                  window.open(url, "_blank", "noopener,noreferrer");
-                }}
+                disabled={downloadingId === doc.id}
+                onClick={() => handleView(doc)}
                 data-ocid={`qms.inspection.document_view.${i + 1}`}
                 title="View / Download"
               >

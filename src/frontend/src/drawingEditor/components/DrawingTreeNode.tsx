@@ -111,9 +111,9 @@ export function DrawingTreeRow({
         className={cn(isHighlighted && "bg-amber-50 dark:bg-amber-950/30")}
         data-ocid={`drawing_editor.tree_row.${drawing.id}`}
       >
-        <TableCell className="text-xs font-medium">
+        <TableCell className="text-xs font-medium max-w-[180px] sm:max-w-[320px]">
           <div
-            className="flex items-center gap-1"
+            className="flex items-center gap-1 min-w-0"
             style={{ paddingLeft: depth * 20 }}
           >
             {hasChildren ? (
@@ -141,20 +141,32 @@ export function DrawingTreeRow({
             ) : (
               <FileText className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
             )}
-            <span className="truncate">{drawing.fileName}</span>
+            {/* Long filenames (e.g. "MEBOXAL00405-FNMUX INPUT CONNECTER
+                HOUSING SET VER1.2.PDF") used to force this whole column,
+                and every column after it, off-screen. min-w-0 + truncate
+                lets this span actually shrink instead of growing to fit
+                its text; the full name stays available via title. */}
+            <span className="truncate min-w-0" title={drawing.fileName}>
+              {drawing.fileName}
+            </span>
             {isHighlighted && (
-              <Badge className="text-[10px] px-1 py-0">You are here</Badge>
+              <Badge className="text-[10px] px-1 py-0 shrink-0">
+                You are here
+              </Badge>
             )}
             {drawing.sourceDesignFileId && (
               <Badge
                 variant="outline"
-                className="text-[10px] px-1 py-0 border-blue-400 text-blue-600"
+                className="text-[10px] px-1 py-0 border-blue-400 text-blue-600 shrink-0"
               >
                 Master
               </Badge>
             )}
             {drawing.parentDrawingId && (
-              <Badge variant="outline" className="text-[10px] px-1 py-0">
+              <Badge
+                variant="outline"
+                className="text-[10px] px-1 py-0 shrink-0"
+              >
                 Production
               </Badge>
             )}
@@ -164,7 +176,7 @@ export function DrawingTreeRow({
               !drawing.originalDrawingId && (
                 <Badge
                   variant="outline"
-                  className="text-[10px] px-1 py-0 border-emerald-400 text-emerald-600"
+                  className="text-[10px] px-1 py-0 border-emerald-400 text-emerald-600 shrink-0"
                 >
                   Original
                 </Badge>
@@ -173,13 +185,16 @@ export function DrawingTreeRow({
               workingDrawingOriginalIds?.has(drawing.id) && (
                 <Badge
                   variant="outline"
-                  className="text-[10px] px-1 py-0 border-amber-400 text-amber-600"
+                  className="text-[10px] px-1 py-0 border-amber-400 text-amber-600 shrink-0"
                 >
                   Edited
                 </Badge>
               )}
             {!expanded && hasChildren && (
-              <Badge variant="outline" className="text-[10px] px-1 py-0">
+              <Badge
+                variant="outline"
+                className="text-[10px] px-1 py-0 shrink-0"
+              >
                 {children.length} {children.length === 1 ? "child" : "children"}
               </Badge>
             )}

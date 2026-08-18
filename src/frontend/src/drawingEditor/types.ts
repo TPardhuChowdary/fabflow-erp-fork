@@ -14,8 +14,22 @@ export interface DrawingDocument {
    * lookups) returns this absent — the PDF itself lives in Supabase
    * Storage (Phase 14) and is fetched on demand, not eagerly downloaded
    * just to render a list/tree row. */
+  /** Despite the name, this is now the generic *source* blob for any
+   * sourceKind (Phase 34) — a PDF for "pdf", raw DXF text bytes for "dxf",
+   * an image file for "image". Kept as `pdfBlob` rather than renamed to
+   * minimize churn across every existing PDF-only call site; the meaning
+   * is "whatever was uploaded", not literally "always a PDF". */
   pdfBlob?: Blob;
   numPages: number;
+  /** Phase 34 — which kind of file this drawing was promoted from, and
+   * therefore how the editor's loading step must interpret `pdfBlob`.
+   * Absent = "pdf", the only kind that existed before this field — every
+   * pre-Phase-34 row keeps working unchanged. DXF and image both still
+   * flow through the exact same crop → mode-select → annotate → save
+   * pipeline as PDF; this field only changes how the initial page raster
+   * (and, for DXF, vector objects) gets produced. See
+   * pages/DrawingEditorPage.tsx's openDrawing/loadPage. */
+  sourceKind?: "pdf" | "dxf" | "image";
   /** Optional link to an ERP Project — kept for backward compatibility with
    * every drawing uploaded before ownerType/ownerId existed, and as the
    * convenience field for the (still most common) project-owned case.
@@ -85,7 +99,12 @@ export interface DrawingDocument {
 export interface DrawingLink {
   id: string;
   drawingId: string;
-  linkedType: "project" | "machine" | "vendor" | "customer";
+  // Phase 43 — "die" added to reuse this exact many-to-many table for the
+  // Dies module's mandatory drawing linkage (database/phase-43 widened the
+  // matching Postgres check constraint). No new table, no duplicate
+  // drawing storage — the Drawing Repository stays the sole source of
+  // truth for every drawing's actual content.
+  linkedType: "project" | "machine" | "vendor" | "customer" | "die";
   linkedId: string;
   createdAt: number;
 }

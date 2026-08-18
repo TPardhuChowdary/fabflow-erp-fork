@@ -104,15 +104,7 @@ export function LoginPage() {
         </div>
 
         <p className="text-center text-xs text-muted-foreground mt-6">
-          © {new Date().getFullYear()}. Built with love using{" "}
-          <a
-            href={`https://caffeine.ai?utm_source=caffeine-footer&utm_medium=referral&utm_content=${encodeURIComponent(window.location.hostname)}`}
-            target="_blank"
-            rel="noreferrer"
-            className="text-primary hover:underline"
-          >
-            caffeine.ai
-          </a>
+          © {new Date().getFullYear()} FabFlow ERP. All rights reserved.
         </p>
       </div>
     </div>

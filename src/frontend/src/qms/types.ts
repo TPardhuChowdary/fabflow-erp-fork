@@ -323,7 +323,16 @@ export interface InspectionDocument {
   fileName: string;
   fileType: string;
   fileSize: number;
-  blob: Blob;
+  // Phase 46 — bytes now live in Supabase Storage (qms-inspection-documents
+  // bucket), not inline. `blob` is populated only when explicitly
+  // downloaded on demand (downloadInspectionDocumentBlob) — list/metadata
+  // reads (getDocuments) never populate it, matching the drawingEditor
+  // Storage precedent ("fetching every file just to render a list row
+  // would defeat the point of moving blobs out of memory"). `storagePath`
+  // is what locates the object in Storage; present on every row fetched
+  // from Supabase, absent only for a not-yet-persisted local upload.
+  blob?: Blob;
+  storagePath?: string;
   uploadedAt: number;
   uploadedBy: string;
   notes?: string; // doubles as "Comments" per Phase 3 §9/§10

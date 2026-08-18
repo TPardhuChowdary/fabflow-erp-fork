@@ -27,6 +27,7 @@ import { ArrowUpDown, Plus, Search, X } from "lucide-react";
 import { Fragment, useMemo, useRef, useState } from "react";
 import { buildDrawingForest } from "../lib/drawingTree";
 import type { DrawingDocument, DrawingLink } from "../types";
+import { DrawingCardNode } from "./DrawingCardNode";
 import { DrawingTreeRow } from "./DrawingTreeNode";
 
 const ALL = "__all__";
@@ -543,11 +544,90 @@ export function DrawingsListPanel({
         />
       </div>
 
-      <div className="rounded-md border">
+      {/* Mobile cards (responsive audit Fix 1, < sm/640px): same forest/
+          groupedForest data and the exact same handlers the desktop tree
+          below uses — DrawingCardNode is a presentation-only sibling to
+          DrawingTreeRow (see its own file comment), so this adds zero new
+          business logic and leaves DrawingTreeNode.tsx (shared by the
+          Machine tab, View Lineage dialog, and Design Files hierarchy)
+          completely untouched. */}
+      <div
+        className="sm:hidden space-y-2"
+        data-ocid="drawing_editor.list.cards"
+      >
+        {focused
+          ? forest.map((node) => (
+              <DrawingCardNode
+                key={node.drawing.id}
+                node={node}
+                depth={0}
+                canEdit={canEdit}
+                canDelete={canDelete}
+                onOpen={onOpen}
+                openLabel={openLabel}
+                onRename={openRename}
+                onLink={openLinkDialog}
+                onDuplicate={handleDuplicate}
+                onChangeOwner={openOwnerDialog}
+                onDelete={onDelete}
+                onPreview={onPreview}
+                onPreviewOriginal={onPreviewOriginal}
+                onPrint={onPrint}
+                previewLabel={previewLabel}
+                showOriginalBadges={!focused}
+                workingDrawingOriginalIds={workingDrawingOriginalIds}
+              />
+            ))
+          : groupedForest?.map(([label, roots]) => (
+              <div key={label} className="space-y-2">
+                <div className="text-xs font-semibold text-muted-foreground px-1">
+                  {label}
+                </div>
+                {roots.map((node) => (
+                  <DrawingCardNode
+                    key={node.drawing.id}
+                    node={node}
+                    depth={0}
+                    canEdit={canEdit}
+                    canDelete={canDelete}
+                    onOpen={onOpen}
+                    openLabel={openLabel}
+                    onRename={openRename}
+                    onLink={openLinkDialog}
+                    onDuplicate={handleDuplicate}
+                    onChangeOwner={openOwnerDialog}
+                    onDelete={onDelete}
+                    onPreview={onPreview}
+                    onPreviewOriginal={onPreviewOriginal}
+                    onPrint={onPrint}
+                    previewLabel={previewLabel}
+                    showOriginalBadges={!focused}
+                    workingDrawingOriginalIds={workingDrawingOriginalIds}
+                  />
+                ))}
+              </div>
+            ))}
+        {(focused
+          ? forest.length === 0
+          : (groupedForest?.length ?? 0) === 0) && (
+          <p
+            className="text-center py-10 text-sm text-muted-foreground"
+            data-ocid="drawing_editor.list.cards.empty_state"
+          >
+            {drawings.length === 0
+              ? "No drawings yet — upload a PDF to get started."
+              : "No drawings match your search/filter."}
+          </p>
+        )}
+      </div>
+
+      <div className="hidden sm:block rounded-md border">
         <Table>
           <TableHeader>
             <TableRow className="bg-muted/40">
-              <TableHead className="text-xs font-semibold">File</TableHead>
+              <TableHead className="text-xs font-semibold max-w-[180px] sm:max-w-[320px]">
+                File
+              </TableHead>
               <TableHead className="text-xs font-semibold">Pages</TableHead>
               <TableHead className="text-xs font-semibold">
                 Uploaded By

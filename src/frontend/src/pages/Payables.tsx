@@ -1,4 +1,3 @@
-import React from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -34,9 +33,11 @@ import {
   Plus,
   Trash2,
 } from "lucide-react";
+import React from "react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import { SearchableSelect } from "../components/ui/searchable-select";
 import { VendorSelect } from "../components/VendorSelect";
 import { canCreate, canDelete, canEdit, canView } from "../permissions";
 import { useStore } from "../store";
@@ -415,9 +416,7 @@ export function Payables() {
 
                 return (
                   <React.Fragment key={payable.id}>
-                    <TableRow
-                      data-ocid={`payables.list.row.${i + 1}`}
-                    >
+                    <TableRow data-ocid={`payables.list.row.${i + 1}`}>
                       <TableCell className="pr-0">
                         <button
                           type="button"
@@ -682,27 +681,27 @@ export function Payables() {
               </div>
               <div className="space-y-1">
                 <Label className="text-xs">Link to Project (optional)</Label>
-                <Select
+                <SearchableSelect
                   value={addForm.projectId || "none"}
-                  onValueChange={(v) =>
+                  onChange={(v) =>
                     setAddForm((f) => ({
                       ...f,
                       projectId: v === "none" ? "" : v,
                     }))
                   }
-                >
-                  <SelectTrigger data-ocid="payables.project.select">
-                    <SelectValue placeholder="None" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">None</SelectItem>
-                    {projects.map((p) => (
-                      <SelectItem key={p.id} value={p.id}>
-                        {p.projectNo} — {p.projectName}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                  options={[
+                    { value: "none", label: "None" },
+                    ...projects.map((p) => ({
+                      value: p.id,
+                      label: `${p.projectNo} — ${p.projectName}`,
+                    })),
+                  ]}
+                  placeholder="None"
+                  searchPlaceholder="Search projects…"
+                  emptyText="No projects found."
+                  className="w-full"
+                  data-ocid="payables.project.select"
+                />
               </div>
               <div className="space-y-1">
                 <Label className="text-xs">Notes</Label>

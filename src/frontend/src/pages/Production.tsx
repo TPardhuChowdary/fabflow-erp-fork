@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import {
   Select,
   SelectContent,
@@ -154,39 +155,32 @@ function SentToSelect({
 
   return (
     <>
-      <Select value={displayValue} onValueChange={handleSelect}>
-        <SelectTrigger className="h-8 text-xs">
-          <SelectValue placeholder="Select...">
-            {vendorId === "inhouse" ? (
-              "In-house"
-            ) : vendorName ? (
-              vendorName
-            ) : (
-              <span className="text-muted-foreground">Select...</span>
-            )}
-          </SelectValue>
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="inhouse" className="text-xs font-medium">
-            🏭 In-house
-          </SelectItem>
-          {vendors.map((v) => (
-            <SelectItem key={v.id} value={v.id} className="text-xs">
-              {v.name}
-            </SelectItem>
-          ))}
-          {pCreateVendor && (
-            <div className="border-t border-border mt-1 pt-1">
-              <SelectItem
-                value="__add_new__"
-                className="text-xs text-primary font-medium"
-              >
-                + Add New Vendor
-              </SelectItem>
-            </div>
-          )}
-        </SelectContent>
-      </Select>
+      <SearchableSelect
+        value={displayValue}
+        onChange={handleSelect}
+        options={[
+          { value: "inhouse", label: "🏭 In-house" },
+          ...vendors.map((v) => ({
+            value: v.id,
+            label: v.name,
+            searchText: `${v.phone ?? ""} ${v.gstNumber ?? ""}`,
+          })),
+          ...(pCreateVendor
+            ? [{ value: "__add_new__", label: "+ Add New Vendor" }]
+            : []),
+        ]}
+        placeholder="Select..."
+        searchPlaceholder="Search vendors…"
+        emptyText="No vendors found."
+        className="h-8 text-xs"
+        renderOption={(o) =>
+          o.value === "__add_new__" ? (
+            <span className="text-primary font-medium">{o.label}</span>
+          ) : (
+            <span className="flex-1 truncate">{o.label}</span>
+          )
+        }
+      />
 
       <Dialog open={addModalOpen} onOpenChange={setAddModalOpen}>
         <DialogContent>
@@ -387,7 +381,7 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
 
   // ---- Handlers ----
 
-  const handleStatusChange = (
+  const handleStatusChange = async (
     projectId: string,
     stageIdx: number,
     newStatus: ProjectStageStatus,
@@ -448,10 +442,11 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
     const updated = (prod.stages || []).map((s, i) =>
       i === stageIdx ? { ...s, status: newStatus } : s,
     );
-    updateProjectStagesV2(projectId, updated);
+    const ok = await updateProjectStagesV2(projectId, updated);
+    if (!ok) toast.error("Could not save stage status - please try again");
   };
 
-  const handleCompleteStage = (projectId: string, stageIdx: number) => {
+  const handleCompleteStage = async (projectId: string, stageIdx: number) => {
     if (!pEdit) {
       toast.error("Access restricted: edit permission required");
       return;
@@ -504,11 +499,19 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
     const updated = (prod.stages || []).map((s, i) =>
       i === stageIdx ? { ...s, status: "Completed" as ProjectStageStatus } : s,
     );
-    updateProjectStagesV2(projectId, updated);
-    toast.success("Stage marked complete");
+    const ok = await updateProjectStagesV2(projectId, updated);
+    if (ok) {
+      toast.success("Stage marked complete");
+    } else {
+      toast.error("Could not save stage completion - please try again");
+    }
   };
 
-  const handleNotesChange = (
+  // Fires on blur, not on every keystroke (see the Textarea's onBlur call
+  // site below) - now that this goes through the remote-first
+  // updateProjectStagesV2, awaiting a network round-trip on every
+  // character would make the field lag/drop keystrokes.
+  const handleNotesChange = async (
     projectId: string,
     stageIdx: number,
     notes: string,
@@ -519,13 +522,15 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
     }
     const prod = projectProductions.find((pp) => pp.projectId === projectId);
     if (!prod) return;
+    if (prod.stages?.[stageIdx]?.notes === notes) return; // no-op blur, unchanged
     const updated = (prod.stages || []).map((s, i) =>
       i === stageIdx ? { ...s, notes } : s,
     );
-    updateProjectStagesV2(projectId, updated);
+    const ok = await updateProjectStagesV2(projectId, updated);
+    if (!ok) toast.error("Could not save notes - please try again");
   };
 
-  const handleSendMaterial = () => {
+  const handleSendMaterial = async () => {
     if (!pEdit) {
       toast.error("Access restricted: edit permission required");
       return;
@@ -543,13 +548,21 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
       sentToVendorId: sendForm.vendorId,
       sentToVendorName: sendForm.vendorName,
     };
-    addStageTransaction(sendDialog.projectId, sendDialog.stageIdx, tx);
+    const ok = await addStageTransaction(
+      sendDialog.projectId,
+      sendDialog.stageIdx,
+      tx,
+    );
+    if (!ok) {
+      toast.error("Could not record material sent - please try again");
+      return;
+    }
     setSendDialog(null);
     setSendForm({ quantity: 0, dateTime: "", vendorId: "", vendorName: "" });
     toast.success("Material sent recorded");
   };
 
-  const handleReceiveMaterial = () => {
+  const handleReceiveMaterial = async () => {
     if (!pEdit) {
       toast.error("Access restricted: edit permission required");
       return;
@@ -579,13 +592,21 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
       quantity: receiveForm.quantity,
       dateTime: receiveForm.dateTime || new Date().toISOString(),
     };
-    addStageTransaction(receiveDialog.projectId, receiveDialog.stageIdx, tx);
+    const ok = await addStageTransaction(
+      receiveDialog.projectId,
+      receiveDialog.stageIdx,
+      tx,
+    );
+    if (!ok) {
+      toast.error("Could not record material received - please try again");
+      return;
+    }
     setReceiveDialog(null);
     setReceiveForm({ quantity: 0, dateTime: "" });
     toast.success("Material received recorded");
   };
 
-  const handleSaveQty = () => {
+  const handleSaveQty = async () => {
     if (!pEdit) {
       toast.error("Access restricted: edit permission required");
       return;
@@ -614,12 +635,16 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
           }
         : s,
     );
-    updateProjectStagesV2(qtyDialog.projectId, updated);
+    const ok = await updateProjectStagesV2(qtyDialog.projectId, updated);
+    if (!ok) {
+      toast.error("Could not save production quantities - please try again");
+      return;
+    }
     setQtyDialog(null);
     toast.success("Production quantities saved");
   };
 
-  const handleSendToRework = () => {
+  const handleSendToRework = async () => {
     if (!pEdit) {
       toast.error("Access restricted: edit permission required");
       return;
@@ -628,7 +653,7 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
       toast.error("Select a target stage");
       return;
     }
-    const { projectId, stage, stageIdx } = reworkDialog;
+    const { projectId, stage } = reworkDialog;
     const prod = projectProductions.find((pp) => pp.projectId === projectId);
     if (!prod) return;
     const newReworkStage: ProjectProductionStage = {
@@ -646,8 +671,11 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
       requiresMaterialTracking: false,
       transactions: [],
       isRework: true,
-      stageId: `rework-${Date.now()}`,
-      referenceId: stage.stageId || `stage-${stageIdx}`,
+      // A real UUID, not a timestamp string - this becomes the
+      // production_stage_transactions/inspection-gate-referenced stageId,
+      // which must cast to Postgres uuid.
+      stageId: crypto.randomUUID(),
+      referenceId: stage.stageId,
       reworkStage: reworkTargetStage,
       sentQty: 0,
       receivedQty: 0,
@@ -657,7 +685,11 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
       vendor: "",
     };
     const updated = [...(prod.stages || []), newReworkStage];
-    updateProjectStagesV2(projectId, updated);
+    const ok = await updateProjectStagesV2(projectId, updated);
+    if (!ok) {
+      toast.error("Could not create rework stage - please try again");
+      return;
+    }
     setReworkDialog(null);
     setReworkTargetStage("");
     toast.success(`Rework stage created: Rework: ${reworkTargetStage}`);
@@ -1452,11 +1484,12 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                   <div className="space-y-1">
                                     <Label className="text-xs">Notes</Label>
                                     <Textarea
+                                      key={stage.stageId ?? idx}
                                       rows={2}
                                       className="text-xs"
                                       placeholder="Notes for this stage..."
-                                      value={stage.notes}
-                                      onChange={(e) =>
+                                      defaultValue={stage.notes}
+                                      onBlur={(e) =>
                                         handleNotesChange(
                                           project.id,
                                           idx,
@@ -1826,7 +1859,7 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
             <Button
               size="sm"
               variant="destructive"
-              onClick={() => {
+              onClick={async () => {
                 if (!materialOverrideDialog) return;
                 const prod = projectProductions.find(
                   (pp) => pp.projectId === materialOverrideDialog.projectId,
@@ -1837,10 +1870,14 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                     ? { ...s, status: materialOverrideDialog.newStatus }
                     : s,
                 );
-                updateProjectStagesV2(
+                const ok = await updateProjectStagesV2(
                   materialOverrideDialog.projectId,
                   updated,
                 );
+                if (!ok) {
+                  toast.error("Could not save override - please try again");
+                  return;
+                }
                 setMaterialOverrideDialog(null);
                 toast.success("Stage started (admin override)");
               }}
@@ -1885,7 +1922,14 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                 ? { ...s, status: "Completed" as ProjectStageStatus }
                 : s,
             );
-            updateProjectStagesV2(gateOverrideDialog.projectId, updated);
+            const ok = await updateProjectStagesV2(
+              gateOverrideDialog.projectId,
+              updated,
+            );
+            if (!ok) {
+              toast.error("Could not save stage completion - please try again");
+              return false;
+            }
             toast.success(
               "Stage marked complete (supervisor override recorded)",
             );

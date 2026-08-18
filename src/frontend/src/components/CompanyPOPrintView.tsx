@@ -325,7 +325,7 @@ export function CompanyPOPrintView({ po, open, onClose }: Props) {
                     {po.deliveryAddress}
                   </div>
                 ) : (
-                  <span style={{ color: "#aaa" }}>\u2014</span>
+                  <span style={{ color: "#aaa" }}>—</span>
                 )}
               </div>
             </div>

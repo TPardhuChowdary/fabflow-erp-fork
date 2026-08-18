@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import {
   Select,
   SelectContent,
@@ -211,13 +212,12 @@ function VendorSelect({
   vendors,
   addVendor,
   vendorId,
-  vendorName,
   onChange,
 }: {
   vendors: Vendor[];
   addVendor: (v: Vendor) => void;
   vendorId: string;
-  vendorName: string;
+  vendorName?: string;
   onChange: (id: string, name: string) => void;
 }) {
   const { currentUser } = useAuth();
@@ -295,38 +295,29 @@ function VendorSelect({
 
   return (
     <>
-      <Select value={vendorId || "__none__"} onValueChange={handleSelect}>
-        <SelectTrigger
-          className="col-span-2 w-full"
-          data-ocid="petty-expenses.settle.vendor_select"
-        >
-          <SelectValue placeholder="Vendor (optional)">
-            {vendorId ? (
-              vendorName
-            ) : (
-              <span className="text-muted-foreground">Vendor (optional)</span>
-            )}
-          </SelectValue>
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="__none__">— No vendor —</SelectItem>
-          {vendors.map((v) => (
-            <SelectItem key={v.id} value={v.id}>
-              {v.name}
-            </SelectItem>
-          ))}
-          {canCreateVendor && (
-            <div className="border-t border-border mt-1 pt-1">
-              <SelectItem
-                value="__add_new__"
-                className="text-primary font-medium"
-              >
-                + Add New Vendor
-              </SelectItem>
-            </div>
-          )}
-        </SelectContent>
-      </Select>
+      <SearchableSelect
+        value={vendorId || "__none__"}
+        onChange={handleSelect}
+        options={[
+          { value: "__none__", label: "— No vendor —" },
+          ...vendors.map((v) => ({ value: v.id, label: v.name })),
+          ...(canCreateVendor
+            ? [{ value: "__add_new__", label: "+ Add New Vendor" }]
+            : []),
+        ]}
+        placeholder="Vendor (optional)"
+        searchPlaceholder="Search vendors…"
+        emptyText="No vendors found."
+        className="col-span-2 w-full"
+        data-ocid="petty-expenses.settle.vendor_select"
+        renderOption={(o) =>
+          o.value === "__add_new__" ? (
+            <span className="text-primary font-medium">{o.label}</span>
+          ) : (
+            <span className="flex-1 truncate">{o.label}</span>
+          )
+        }
+      />
 
       <Dialog open={addModalOpen} onOpenChange={setAddModalOpen}>
         <DialogContent>
@@ -1001,7 +992,12 @@ function PettyExpensesInner({
               addInventoryPurchase(result.data);
             }
           } else if (item.expenseType === "Machine Service" && item.machineId) {
-            addServiceRecord({
+            // Phase 35 — addServiceRecord is now remote-first for the
+            // machine-side effect (see store.ts); a failure here does not
+            // block the rest of the settlement (the expense record and
+            // any other fan-out items are already committed) but must be
+            // surfaced, not silently swallowed.
+            const svcOk = await addServiceRecord({
               id: `svc-${record.id}`,
               machineId: item.machineId,
               serviceNumber: `PE-${record.id}`,
@@ -1021,6 +1017,11 @@ function PettyExpensesInner({
               createdBy: currentUser?.username ?? "system",
               createdAt: Date.now(),
             });
+            if (!svcOk) {
+              toast.error(
+                `Expense saved, but the machine service record for "${item.itemName}" could not be synced.`,
+              );
+            }
           }
         }
       }
@@ -1183,29 +1184,23 @@ function PettyExpensesInner({
           </div>
           <div className="space-y-1">
             <Label className="text-xs">Employee</Label>
-            <Select
+            <SearchableSelect
               value={historyEmployeeId || "__all__"}
-              onValueChange={(v) =>
-                setHistoryEmployeeId(v === "__all__" ? "" : v)
-              }
-            >
-              <SelectTrigger
-                className="h-8 text-sm"
-                data-ocid="petty-expenses.history.filter.employee.select"
-              >
-                <SelectValue placeholder="All Employees" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__all__" className="text-sm">
-                  All Employees
-                </SelectItem>
-                {(employees || []).map((emp) => (
-                  <SelectItem key={emp.id} value={emp.id} className="text-sm">
-                    {emp.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              onChange={(v) => setHistoryEmployeeId(v === "__all__" ? "" : v)}
+              options={[
+                { value: "__all__", label: "All Employees" },
+                ...(employees || []).map((emp) => ({
+                  value: emp.id,
+                  label: emp.name,
+                  searchText: `${emp.designation ?? ""} ${emp.employeeCode ?? ""}`,
+                })),
+              ]}
+              placeholder="All Employees"
+              searchPlaceholder="Search employees…"
+              emptyText="No employees found."
+              className="h-8 text-sm w-full"
+              data-ocid="petty-expenses.history.filter.employee.select"
+            />
           </div>
           <div className="space-y-1">
             <Label className="text-xs">Category</Label>
@@ -1235,51 +1230,41 @@ function PettyExpensesInner({
           </div>
           <div className="space-y-1">
             <Label className="text-xs">Vendor</Label>
-            <Select
+            <SearchableSelect
               value={historyVendor || "__all__"}
-              onValueChange={(v) => setHistoryVendor(v === "__all__" ? "" : v)}
-            >
-              <SelectTrigger
-                className="h-8 text-sm"
-                data-ocid="petty-expenses.history.filter.vendor.select"
-              >
-                <SelectValue placeholder="All Vendors" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__all__" className="text-sm">
-                  All Vendors
-                </SelectItem>
-                {(vendors || []).map((v) => (
-                  <SelectItem key={v.id} value={v.name} className="text-sm">
-                    {v.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              onChange={(v) => setHistoryVendor(v === "__all__" ? "" : v)}
+              options={[
+                { value: "__all__", label: "All Vendors" },
+                ...(vendors || []).map((v) => ({
+                  value: v.name,
+                  label: v.name,
+                })),
+              ]}
+              placeholder="All Vendors"
+              searchPlaceholder="Search vendors…"
+              emptyText="No vendors found."
+              className="h-8 text-sm w-full"
+              data-ocid="petty-expenses.history.filter.vendor.select"
+            />
           </div>
           <div className="space-y-1">
             <Label className="text-xs">Project</Label>
-            <Select
+            <SearchableSelect
               value={historyProject || "__all__"}
-              onValueChange={(v) => setHistoryProject(v === "__all__" ? "" : v)}
-            >
-              <SelectTrigger
-                className="h-8 text-sm"
-                data-ocid="petty-expenses.history.filter.project.select"
-              >
-                <SelectValue placeholder="All Projects" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__all__" className="text-sm">
-                  All Projects
-                </SelectItem>
-                {(projects || []).map((p) => (
-                  <SelectItem key={p.id} value={p.id} className="text-sm">
-                    {p.projectName}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              onChange={(v) => setHistoryProject(v === "__all__" ? "" : v)}
+              options={[
+                { value: "__all__", label: "All Projects" },
+                ...(projects || []).map((p) => ({
+                  value: p.id,
+                  label: p.projectName,
+                })),
+              ]}
+              placeholder="All Projects"
+              searchPlaceholder="Search projects…"
+              emptyText="No projects found."
+              className="h-8 text-sm w-full"
+              data-ocid="petty-expenses.history.filter.project.select"
+            />
           </div>
           <div className="space-y-1">
             <Label className="text-xs">Related Module</Label>
@@ -2007,23 +1992,19 @@ function PettyExpensesInner({
           <div className="space-y-4 py-2">
             <div className="space-y-1.5">
               <Label>Employee *</Label>
-              <Select
+              <SearchableSelect
                 value={floatForm.employeeId}
-                onValueChange={(v) =>
-                  setFloatForm((f) => ({ ...f, employeeId: v }))
-                }
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Select employee" />
-                </SelectTrigger>
-                <SelectContent>
-                  {(employees || []).map((e) => (
-                    <SelectItem key={e.id} value={e.id}>
-                      {e.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                onChange={(v) => setFloatForm((f) => ({ ...f, employeeId: v }))}
+                options={(employees || []).map((e) => ({
+                  value: e.id,
+                  label: e.name,
+                  searchText: `${e.designation ?? ""} ${e.employeeCode ?? ""}`,
+                }))}
+                placeholder="Select employee"
+                searchPlaceholder="Search employees…"
+                emptyText="No employees found."
+                className="w-full"
+              />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
@@ -2064,27 +2045,26 @@ function PettyExpensesInner({
             </div>
             <div className="space-y-1.5">
               <Label>Project (optional)</Label>
-              <Select
+              <SearchableSelect
                 value={floatForm.projectId || "__none__"}
-                onValueChange={(v) =>
+                onChange={(v) =>
                   setFloatForm((f) => ({
                     ...f,
                     projectId: v === "__none__" ? "" : v,
                   }))
                 }
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="None" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__none__">None</SelectItem>
-                  {(projects || []).map((p) => (
-                    <SelectItem key={p.id} value={p.id}>
-                      {p.projectName}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                options={[
+                  { value: "__none__", label: "None" },
+                  ...(projects || []).map((p) => ({
+                    value: p.id,
+                    label: p.projectName,
+                  })),
+                ]}
+                placeholder="None"
+                searchPlaceholder="Search projects…"
+                emptyText="No projects found."
+                className="w-full"
+              />
             </div>
             <div className="space-y-1.5">
               <Label>Notes</Label>
@@ -2261,29 +2241,29 @@ function PettyExpensesInner({
                           ))}
                         </SelectContent>
                       </Select>
-                      <Select
+                      <SearchableSelect
                         value={itemForm.projectId || "__none__"}
-                        onValueChange={(v) =>
+                        onChange={(v) =>
                           setItemForm((s) => ({
                             ...s,
                             projectId: v === "__none__" ? "" : v,
                           }))
                         }
-                      >
-                        <SelectTrigger className="col-span-2">
-                          <SelectValue placeholder="Project (optional)" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="__none__">
-                            No project — not costed to a job
-                          </SelectItem>
-                          {(projects || []).map((p) => (
-                            <SelectItem key={p.id} value={p.id}>
-                              {p.projectName}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                        options={[
+                          {
+                            value: "__none__",
+                            label: "No project — not costed to a job",
+                          },
+                          ...(projects || []).map((p) => ({
+                            value: p.id,
+                            label: p.projectName,
+                          })),
+                        ]}
+                        placeholder="Project (optional)"
+                        searchPlaceholder="Search projects…"
+                        emptyText="No projects found."
+                        className="col-span-2 w-full"
+                      />
                       <VendorSelect
                         vendors={vendors || []}
                         addVendor={addVendor}
@@ -2396,29 +2376,30 @@ function PettyExpensesInner({
 
                       {CATEGORY_FIELDS[itemForm.expenseType].showMachine && (
                         <>
-                          <Select
+                          <SearchableSelect
                             value={itemForm.machineId || "__none__"}
-                            onValueChange={(v) =>
+                            onChange={(v) =>
                               setItemForm((s) => ({
                                 ...s,
                                 machineId: v === "__none__" ? "" : v,
                               }))
                             }
-                          >
-                            <SelectTrigger className="col-span-2 w-full">
-                              <SelectValue placeholder="Machine *" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="__none__" disabled>
-                                Select a machine
-                              </SelectItem>
-                              {(machines || []).map((m) => (
-                                <SelectItem key={m.id} value={m.id}>
-                                  {m.name} ({m.machineCode})
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
+                            options={[
+                              {
+                                value: "__none__",
+                                label: "Select a machine",
+                              },
+                              ...(machines || []).map((m) => ({
+                                value: m.id,
+                                label: `${m.name} (${m.machineCode})`,
+                                searchText: `${m.machineCode ?? ""} ${m.type ?? ""}`,
+                              })),
+                            ]}
+                            placeholder="Machine *"
+                            searchPlaceholder="Search by name, code, or type…"
+                            emptyText="No machines found."
+                            className="col-span-2 w-full"
+                          />
                           <Select
                             value={itemForm.serviceType}
                             onValueChange={(v) =>
@@ -2866,23 +2847,22 @@ function PettyExpensesInner({
                   <Label>
                     Employee <span className="text-destructive">*</span>
                   </Label>
-                  <Select
+                  <SearchableSelect
                     value={form.employeeId || ""}
-                    onValueChange={(v) =>
+                    onChange={(v) =>
                       setForm((f) => ({ ...f, employeeId: v, floatId: "" }))
                     }
-                  >
-                    <SelectTrigger data-ocid="petty-expenses.select">
-                      <SelectValue placeholder="Select employee" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {(employees || []).map((emp) => (
-                        <SelectItem key={emp.id} value={emp.id}>
-                          {emp.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                    options={(employees || []).map((emp) => ({
+                      value: emp.id,
+                      label: emp.name,
+                      searchText: `${emp.designation ?? ""} ${emp.employeeCode ?? ""}`,
+                    }))}
+                    placeholder="Select employee"
+                    searchPlaceholder="Search employees…"
+                    emptyText="No employees found."
+                    className="w-full"
+                    data-ocid="petty-expenses.select"
+                  />
                   {errors.employeeId && (
                     <p
                       className="text-xs text-destructive"
@@ -3002,27 +2982,27 @@ function PettyExpensesInner({
                 <div className="space-y-1.5">
                   <Label>Project (optional)</Label>
                   {/* Fix 3: sentinel value __none__ instead of empty string */}
-                  <Select
+                  <SearchableSelect
                     value={form.projectId || "__none__"}
-                    onValueChange={(v) =>
+                    onChange={(v) =>
                       setForm((f) => ({
                         ...f,
                         projectId: v === "__none__" ? "" : v,
                       }))
                     }
-                  >
-                    <SelectTrigger data-ocid="petty-expenses.select">
-                      <SelectValue placeholder="Select project (optional)" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__none__">None</SelectItem>
-                      {(projects || []).map((p) => (
-                        <SelectItem key={p.id} value={p.id}>
-                          {p.projectName}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                    options={[
+                      { value: "__none__", label: "None" },
+                      ...(projects || []).map((p) => ({
+                        value: p.id,
+                        label: p.projectName,
+                      })),
+                    ]}
+                    placeholder="Select project (optional)"
+                    searchPlaceholder="Search projects…"
+                    emptyText="No projects found."
+                    className="w-full"
+                    data-ocid="petty-expenses.select"
+                  />
                 </div>
 
                 <div className="space-y-1.5">

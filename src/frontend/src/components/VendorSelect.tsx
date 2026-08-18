@@ -8,13 +8,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Plus } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -29,6 +23,7 @@ interface Props {
   value: string | undefined;
   onChange: (vendorId: string, vendorName: string) => void;
   placeholder?: string;
+  className?: string;
   "data-ocid"?: string;
 }
 
@@ -36,6 +31,7 @@ export function VendorSelect({
   value,
   onChange,
   placeholder = "Select vendor",
+  className,
   "data-ocid": dataOcid,
 }: Props) {
   const { vendors, addVendor } = useStore();
@@ -49,8 +45,6 @@ export function VendorSelect({
     address: "",
     gstNumber: "",
   });
-
-  const selected = vendors.find((v) => v.id === value);
 
   const handleSelect = (val: string) => {
     if (val === ADD_NEW_SENTINEL) {
@@ -117,35 +111,38 @@ export function VendorSelect({
     }
   };
 
+  const options = [
+    ...vendors.map((v) => ({
+      value: v.id,
+      label: v.name,
+      searchText: `${v.phone ?? ""} ${v.gstNumber ?? ""} ${v.address ?? ""}`,
+    })),
+    ...(pCreate
+      ? [{ value: ADD_NEW_SENTINEL, label: "+ Add New Vendor" }]
+      : []),
+  ];
+
   return (
     <>
-      <Select value={value ?? ""} onValueChange={handleSelect}>
-        <SelectTrigger data-ocid={dataOcid}>
-          <SelectValue placeholder={placeholder}>
-            {selected ? (
-              selected.name
-            ) : (
-              <span className="text-muted-foreground">{placeholder}</span>
-            )}
-          </SelectValue>
-        </SelectTrigger>
-        <SelectContent>
-          {vendors.map((v) => (
-            <SelectItem key={v.id} value={v.id}>
-              {v.name}
-            </SelectItem>
-          ))}
-          {pCreate && (
-            <div className="border-t border-border mt-1 pt-1">
-              <SelectItem value={ADD_NEW_SENTINEL}>
-                <span className="flex items-center gap-1.5 text-primary font-medium">
-                  <Plus className="w-3.5 h-3.5" /> Add New Vendor
-                </span>
-              </SelectItem>
-            </div>
-          )}
-        </SelectContent>
-      </Select>
+      <SearchableSelect
+        value={value ?? ""}
+        onChange={handleSelect}
+        options={options}
+        placeholder={placeholder}
+        className={className}
+        searchPlaceholder="Search by name, phone, or GST…"
+        emptyText="No vendors found."
+        data-ocid={dataOcid}
+        renderOption={(o) =>
+          o.value === ADD_NEW_SENTINEL ? (
+            <span className="flex items-center gap-1.5 text-primary font-medium">
+              <Plus className="w-3.5 h-3.5" /> {o.label}
+            </span>
+          ) : (
+            <span className="flex-1 truncate">{o.label}</span>
+          )
+        }
+      />
 
       <Dialog open={modalOpen} onOpenChange={setModalOpen}>
         <DialogContent data-ocid="vendor_select.dialog">

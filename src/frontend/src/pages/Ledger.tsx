@@ -24,8 +24,11 @@ import { useMemo, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { useAuth } from "../AuthContext";
+import { CustomerSelect } from "../components/CustomerSelect";
 import { LedgerDocContent } from "../components/LedgerDocContent";
 import { StatusBadge } from "../components/StatusBadge";
+import { VendorSelect } from "../components/VendorSelect";
+import { SearchableSelect } from "../components/ui/searchable-select";
 import {
   printDocument,
   handleDownload as triggerDownload,
@@ -321,37 +324,21 @@ export function Ledger() {
               {accountType === "customer" ? "Customer" : "Vendor"}
             </Label>
             {accountType === "customer" ? (
-              <Select value={customerId} onValueChange={setCustomerId}>
-                <SelectTrigger
-                  data-ocid="ledger.filter.customer.select"
-                  className="h-8 text-sm"
-                >
-                  <SelectValue placeholder="Select customer" />
-                </SelectTrigger>
-                <SelectContent>
-                  {customers.map((c) => (
-                    <SelectItem key={c.id} value={c.id} className="text-sm">
-                      {c.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <CustomerSelect
+                value={customerId}
+                onChange={setCustomerId}
+                placeholder="Select customer"
+                className="w-full"
+                data-ocid="ledger.filter.customer.select"
+              />
             ) : (
-              <Select value={vendorId} onValueChange={setVendorId}>
-                <SelectTrigger
-                  data-ocid="ledger.filter.vendor.select"
-                  className="h-8 text-sm"
-                >
-                  <SelectValue placeholder="Select vendor" />
-                </SelectTrigger>
-                <SelectContent>
-                  {vendors.map((v) => (
-                    <SelectItem key={v.id} value={v.id} className="text-sm">
-                      {v.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <VendorSelect
+                value={vendorId}
+                onChange={setVendorId}
+                placeholder="Select vendor"
+                className="w-full"
+                data-ocid="ledger.filter.vendor.select"
+              />
             )}
           </div>
 
@@ -379,27 +366,22 @@ export function Ledger() {
 
           <div className="space-y-1">
             <Label className="text-xs">Project</Label>
-            <Select
+            <SearchableSelect
               value={projectFilter || "__all__"}
-              onValueChange={(v) => setProjectFilter(v === "__all__" ? "" : v)}
-            >
-              <SelectTrigger
-                data-ocid="ledger.filter.project.select"
-                className="h-8 text-sm"
-              >
-                <SelectValue placeholder="All Projects" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__all__" className="text-sm">
-                  All Projects
-                </SelectItem>
-                {projects.map((p) => (
-                  <SelectItem key={p.id} value={p.id} className="text-sm">
-                    {p.projectNo} — {getCustomerVisibleName(p)}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+              onChange={(v) => setProjectFilter(v === "__all__" ? "" : v)}
+              options={[
+                { value: "__all__", label: "All Projects" },
+                ...projects.map((p) => ({
+                  value: p.id,
+                  label: `${p.projectNo} — ${getCustomerVisibleName(p)}`,
+                })),
+              ]}
+              placeholder="All Projects"
+              searchPlaceholder="Search by project no. or customer…"
+              emptyText="No projects found."
+              className="w-full"
+              data-ocid="ledger.filter.project.select"
+            />
           </div>
 
           <div className="space-y-1">

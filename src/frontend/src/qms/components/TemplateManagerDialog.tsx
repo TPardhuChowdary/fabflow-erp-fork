@@ -11,6 +11,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Trash2, X } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
+import { ConfirmDeleteDialog } from "../../components/ConfirmDeleteDialog";
 import type { QmsTemplate, QualityCharacteristic } from "../types";
 
 interface Props {
@@ -37,6 +38,7 @@ export function TemplateManagerDialog({
 }: Props) {
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [renameDrafts, setRenameDrafts] = useState<Record<string, string>>({});
+  const [deleteTarget, setDeleteTarget] = useState<QmsTemplate | null>(null);
 
   const nameOf = (id: string) =>
     characteristics.find((c) => c.id === id)?.name ??
@@ -102,11 +104,7 @@ export function TemplateManagerDialog({
                   size="sm"
                   variant="ghost"
                   className="h-7 w-7 p-0 text-destructive"
-                  onClick={async () => {
-                    if (!window.confirm(`Delete template "${t.name}"?`)) return;
-                    await onDelete(t.id);
-                    toast.success("Template deleted");
-                  }}
+                  onClick={() => setDeleteTarget(t)}
                   data-ocid={`qms.templates.delete.${t.id}`}
                 >
                   <Trash2 className="w-3.5 h-3.5" />
@@ -144,6 +142,20 @@ export function TemplateManagerDialog({
           ))}
         </div>
       </DialogContent>
+
+      <ConfirmDeleteDialog
+        open={!!deleteTarget}
+        onOpenChange={(o) => !o && setDeleteTarget(null)}
+        title="Delete template?"
+        description={`Template "${deleteTarget?.name}" will be permanently deleted.`}
+        onConfirm={async () => {
+          if (deleteTarget) {
+            await onDelete(deleteTarget.id);
+            toast.success("Template deleted");
+          }
+          setDeleteTarget(null);
+        }}
+      />
     </Dialog>
   );
 }

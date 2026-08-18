@@ -97,7 +97,11 @@ export function QuotationPrintView({
   if (!quotation)
     return (
       <Dialog open={open} onOpenChange={onClose}>
-        <DialogContent />
+        <DialogContent data-ocid="quotation-print.dialog.loading">
+          <DialogHeader>
+            <DialogTitle>Quotation Preview</DialogTitle>
+          </DialogHeader>
+        </DialogContent>
       </Dialog>
     );
 

@@ -6,6 +6,11 @@ import { persist } from "zustand/middleware";
 // items/costing/production stages - none of those domains migrated) is
 // tightly coupled to store.ts's own synchronous local-state reads, so
 // the remote call is made from here instead of relocating that logic.
+import { updateMachineRemote } from "./lib/machinesApi";
+import {
+  recordStageTransactionRemote,
+  upsertProjectionStagesRemote,
+} from "./lib/productionStagesApi";
 import { createProjectRemote, updateProjectRemote } from "./lib/projectsApi";
 import type {
   AdvanceRecord,
@@ -13,6 +18,7 @@ import type {
   AttendanceRecord,
   AuditLogEntry,
   AuthUser,
+  BillableService,
   BomItem,
   BomRequisition,
   BomRequisitionStatus,
@@ -20,6 +26,7 @@ import type {
   Customer,
   DeliveryChallan,
   DesignFile,
+  Die,
   Employee,
   EmployeeDocument,
   ExpenseFloat,
@@ -31,7 +38,11 @@ import type {
   Invoice,
   Machine,
   MachineCondition,
+  MachineDie,
   MachineDocument,
+  MachineServiceRate,
+  MachineServiceUsage,
+  MachineSparePart,
   MachineUsageLog,
   MasterPO,
   MaterialPurchase,
@@ -65,6 +76,8 @@ import type {
   ServiceRecord,
   StageTransaction,
   StockReservation,
+  Tool,
+  ToolAssignmentHistory,
   Vendor,
 } from "./types";
 
@@ -413,6 +426,8 @@ interface DocCounters {
   MCH: number;
   SVC: number;
   EMP: number;
+  TL: number;
+  DIE: number;
 }
 
 const sampleMachines: Machine[] = [
@@ -626,6 +641,23 @@ interface Store {
   materialPurchases: MaterialPurchase[];
   outsourcedWorks: OutsourcedWork[];
   projectProductions: ProjectProduction[];
+  // Phase 45 — same rationale/mechanics as preMigrationMachinesSnapshot
+  // above: captured exactly once, on this browser's first boot after this
+  // field was introduced, from whatever `projectProductions` held in
+  // localStorage BEFORE that boot's Supabase hydration could overwrite
+  // it. The Settings.tsx "Migrate Local Production Stages to Supabase"
+  // button reads THIS field, not `projectProductions`, for the same
+  // reason machines does.
+  preMigrationProjectProductionsSnapshot: ProjectProduction[] | null;
+  projectProductionsHydration: {
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated";
+    error?: string;
+  };
+  setProjectProductionsHydrationStatus: (
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated",
+    error?: string,
+  ) => void;
+  setProjectProductionsFromServer: (productions: ProjectProduction[]) => void;
   projectDeliveries: ProjectDelivery[];
 
   addCustomer: (c: Customer) => void;
@@ -682,16 +714,23 @@ interface Store {
   addOutsourcedWork: (o: OutsourcedWork) => void;
   updateOutsourcedWork: (o: OutsourcedWork) => void;
   deleteOutsourcedWork: (id: string) => void;
-  upsertProjectProduction: (p: ProjectProduction) => void;
+  // Phase 45 — remote-first: the Supabase write (via the atomic
+  // upsert_project_production_stages RPC / production_stage_transactions
+  // insert) happens BEFORE local state is touched, and local state is
+  // only updated on confirmed success — same rigor as updateMachineRemote's
+  // call sites below. Returns false (with local state left untouched) on
+  // any failure so the caller can show an error instead of silently
+  // pretending the save worked.
+  upsertProjectProduction: (p: ProjectProduction) => Promise<boolean>;
   addStageTransaction: (
     projectId: string,
     stageIdx: number,
     tx: StageTransaction,
-  ) => void;
+  ) => Promise<boolean>;
   updateProjectStagesV2: (
     projectId: string,
     stages: ProjectProductionStage[],
-  ) => void;
+  ) => Promise<boolean>;
   upsertProjectDelivery: (d: ProjectDelivery) => void;
 
   // Auth & HR
@@ -866,6 +905,26 @@ interface Store {
   ) => void;
   setProjectEmployeesFromServer: (
     pairs: { projectId: string; employeeId: string }[],
+  ) => void;
+
+  // project_machinery / project_dies (Phase 39) — same "no dedicated
+  // array, feeds Project.assignedMachineIds/assignedDieIds" shape as
+  // project_employees above.
+  projectMachineryHydration: { status: HydrationStatusValue; error?: string };
+  setProjectMachineryHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setProjectMachineryFromServer: (
+    pairs: { projectId: string; machineId: string }[],
+  ) => void;
+  projectDiesHydration: { status: HydrationStatusValue; error?: string };
+  setProjectDiesHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setProjectDiesFromServer: (
+    pairs: { projectId: string; dieId: string }[],
   ) => void;
 
   // Phase 27 Batch 2 — quotations, quotation_revisions, master_pos,
@@ -1099,7 +1158,38 @@ interface Store {
   deleteScrapRecord: (id: string) => void;
 
   // Machinery Management
+  // Phase 35 — Supabase-backed (see database/phase-35). serviceRecords/
+  // serviceParts/machineDocuments/machineUsageLogs deliberately stay
+  // local-only (see phase35_machines_table.sql header) - but every action
+  // below that mutates a *machines* field as a side effect of one of
+  // those local-only records (service completion, usage logging,
+  // breakdown/resolve) is remote-first for that side effect, exactly like
+  // addProjectActivity's activityLog sync, so the change survives the
+  // next hydration instead of being silently reverted by it.
   machines: Machine[];
+  // Phase 35 — captured exactly once, on this browser's first-ever boot
+  // after this field was introduced, from whatever `machines` held in
+  // localStorage BEFORE that boot's hydration had a chance to run (see
+  // the persist() `merge` function below). Never overwritten again after
+  // that first capture. This exists because `machines` itself is NOT a
+  // safe migration source: the moment Supabase hydration succeeds (which
+  // happens automatically, every login), setMachinesFromServer replaces
+  // `machines` wholesale - including in the persisted localStorage copy -
+  // so by the time a user opens Settings and clicks "Migrate", the
+  // original local data is already gone. The Migrate button in
+  // Settings.tsx reads THIS field, not `machines`, for exactly that
+  // reason - it is the one place pre-Supabase local machine data survives
+  // long enough to actually be migrated.
+  preMigrationMachinesSnapshot: Machine[] | null;
+  machinesHydration: {
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated";
+    error?: string;
+  };
+  setMachinesHydrationStatus: (
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated",
+    error?: string,
+  ) => void;
+  setMachinesFromServer: (machines: Machine[]) => void;
   serviceRecords: ServiceRecord[];
   serviceParts: ServicePart[];
   machineDocuments: MachineDocument[];
@@ -1107,28 +1197,152 @@ interface Store {
   addMachine: (m: Machine) => void;
   updateMachine: (m: Machine) => void;
   deleteMachine: (id: string) => void;
-  addServiceRecord: (r: ServiceRecord) => void;
-  updateServiceRecord: (r: ServiceRecord) => void;
+  addServiceRecord: (r: ServiceRecord) => Promise<boolean>;
+  updateServiceRecord: (r: ServiceRecord) => Promise<boolean>;
   deleteServiceRecord: (id: string) => void;
   addServicePart: (p: ServicePart) => void;
   updateServicePart: (p: ServicePart) => void;
   deleteServicePart: (id: string) => void;
   addMachineDocument: (d: MachineDocument) => void;
   deleteMachineDocument: (id: string) => void;
-  addMachineUsageLog: (l: MachineUsageLog) => void;
-  deleteMachineUsageLog: (id: string) => void;
+  addMachineUsageLog: (l: MachineUsageLog) => Promise<boolean>;
+  deleteMachineUsageLog: (id: string) => Promise<boolean>;
   reportBreakdown: (
     machineId: string,
     cause: string,
     createdBy: string,
-  ) => void;
+  ) => Promise<boolean>;
   resolveBreakdown: (
     machineId: string,
     serviceRecordId: string,
     condition: MachineCondition,
-  ) => void;
+  ) => Promise<boolean>;
   generateMachineCode: () => string;
   generateServiceNumber: (machineId: string) => string;
+
+  // Tool Register (Phase 37) — net-new Supabase-backed module, no local
+  // migration needed. Same shape as the Machinery domain above: plain
+  // synchronous local setters here, remote-first writes happen at the
+  // page level (Tools.tsx), mirroring Machinery.tsx/Employees.tsx.
+  tools: Tool[];
+  toolsHydration: {
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated";
+    error?: string;
+  };
+  setToolsHydrationStatus: (
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated",
+    error?: string,
+  ) => void;
+  setToolsFromServer: (tools: Tool[]) => void;
+  addTool: (t: Tool) => void;
+  updateTool: (t: Tool) => void;
+  deleteTool: (id: string) => void;
+  generateToolCode: () => string;
+
+  // Tool Assignment History (Phase 43) — insert-only, mirrors
+  // machineServiceRates' add-only shape exactly (see lib/toolsApi.ts).
+  toolAssignmentHistory: ToolAssignmentHistory[];
+  toolAssignmentHistoryHydration: {
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated";
+    error?: string;
+  };
+  setToolAssignmentHistoryHydrationStatus: (
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated",
+    error?: string,
+  ) => void;
+  setToolAssignmentHistoryFromServer: (rows: ToolAssignmentHistory[]) => void;
+  addToolAssignmentHistoryLocal: (r: ToolAssignmentHistory) => void;
+
+  // Tooling/Dies Register (Phase 38) — same shape as Tools above, plus
+  // the two compatibility junctions (Machine<->Spare Part, Machine<->
+  // Die). Junctions are wholesale-replaced on hydration (no local-only
+  // predecessor to merge with) and toggled one pair at a time from the
+  // UI, mirroring project_employees/assignedEmployeeIds.
+  dies: Die[];
+  diesHydration: {
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated";
+    error?: string;
+  };
+  setDiesHydrationStatus: (
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated",
+    error?: string,
+  ) => void;
+  setDiesFromServer: (dies: Die[]) => void;
+  addDie: (d: Die) => void;
+  updateDie: (d: Die) => void;
+  deleteDie: (id: string) => void;
+  generateDieCode: () => string;
+
+  machineSpareParts: MachineSparePart[];
+  machineSparePartsHydration: { status: HydrationStatusValue; error?: string };
+  setMachineSparePartsHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setMachineSparePartsFromServer: (rows: MachineSparePart[]) => void;
+  addMachineSparePartLocal: (
+    machineId: string,
+    inventoryItemId: string,
+  ) => void;
+  removeMachineSparePartLocal: (
+    machineId: string,
+    inventoryItemId: string,
+  ) => void;
+
+  machineDies: MachineDie[];
+  machineDiesHydration: { status: HydrationStatusValue; error?: string };
+  setMachineDiesHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setMachineDiesFromServer: (rows: MachineDie[]) => void;
+  addMachineDieLocal: (machineId: string, dieId: string) => void;
+  removeMachineDieLocal: (machineId: string, dieId: string) => void;
+
+  // Machine/Service Revenue (Phase 40) — billableServices mirrors
+  // dies/tools' wholesale-replace shape. machineServiceRates is
+  // insert-only (no update/delete action exists - see
+  // lib/machineRevenueApi.ts), so its local action is add-only.
+  // machineServiceUsage gets full CRUD like a normal domain, but
+  // revenueAmount/rateApplied are never recomputed locally from a
+  // "current" rate - callers must pass the exact frozen values the
+  // remote write already returned/accepted.
+  billableServices: BillableService[];
+  billableServicesHydration: { status: HydrationStatusValue; error?: string };
+  setBillableServicesHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setBillableServicesFromServer: (services: BillableService[]) => void;
+  addBillableServiceLocal: (s: BillableService) => void;
+  updateBillableServiceLocal: (s: BillableService) => void;
+  deleteBillableServiceLocal: (id: string) => void;
+
+  machineServiceRates: MachineServiceRate[];
+  machineServiceRatesHydration: {
+    status: HydrationStatusValue;
+    error?: string;
+  };
+  setMachineServiceRatesHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setMachineServiceRatesFromServer: (rates: MachineServiceRate[]) => void;
+  addMachineServiceRateLocal: (r: MachineServiceRate) => void;
+
+  machineServiceUsage: MachineServiceUsage[];
+  machineServiceUsageHydration: {
+    status: HydrationStatusValue;
+    error?: string;
+  };
+  setMachineServiceUsageHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setMachineServiceUsageFromServer: (usage: MachineServiceUsage[]) => void;
+  addMachineServiceUsageLocal: (u: MachineServiceUsage) => void;
+  updateMachineServiceUsageLocal: (u: MachineServiceUsage) => void;
+  deleteMachineServiceUsageLocal: (id: string) => void;
 
   // Export Engine
   exportJobs: ExportJob[];
@@ -1206,8 +1420,14 @@ function migrateQuotationsToRevisions(
         q.quotationDate || new Date(q.createdAt).toISOString().split("T")[0],
       lineItems: q.lineItems,
       subtotal: q.subtotal,
-      gstRate: q.gstRate,
-      gstAmount: q.gstAmount,
+      applyGST: q.applyGST,
+      applyIGST: q.applyIGST,
+      cgstRate: q.cgstRate,
+      sgstRate: q.sgstRate,
+      igstRate: q.igstRate,
+      cgstAmt: q.cgstAmt,
+      sgstAmt: q.sgstAmt,
+      igstAmt: q.igstAmt,
       totalAmount: q.totalAmount,
       validUntil: q.validUntil,
       terms: q.terms,
@@ -1428,6 +1648,8 @@ export const useStore = create<Store>()(
         MCH: 3,
         SVC: 2,
         EMP: 0,
+        TL: 0,
+        DIE: 0,
       },
 
       // Project tracking initial state
@@ -1437,6 +1659,8 @@ export const useStore = create<Store>()(
       materialPurchases: sampleMaterialPurchases,
       outsourcedWorks: sampleOutsourcedWorks,
       projectProductions: sampleProjectProductions,
+      preMigrationProjectProductionsSnapshot: null,
+      projectProductionsHydration: { status: "idle" },
       projectDeliveries: sampleProjectDeliveries,
 
       // Auth & HR initial state
@@ -1458,6 +1682,8 @@ export const useStore = create<Store>()(
       bomItemsHydration: { status: "idle" },
       bomRequisitionsHydration: { status: "idle" },
       projectEmployeesHydration: { status: "idle" },
+      projectMachineryHydration: { status: "idle" },
+      projectDiesHydration: { status: "idle" },
       quotationsHydration: { status: "idle" },
       quotationRevisionsHydration: { status: "idle" },
       masterPOsHydration: { status: "idle" },
@@ -1512,10 +1738,41 @@ export const useStore = create<Store>()(
 
       // Machinery initial state
       machines: sampleMachines,
+      // Real capture happens in persist()'s merge() below, on first boot
+      // with real localStorage. This default only applies to a browser
+      // that has genuinely never had ANY fabflow-erp-store localStorage
+      // key at all (a brand new browser/device) - there is nothing to
+      // migrate in that case, so null (treated as empty) is correct.
+      preMigrationMachinesSnapshot: null,
+      machinesHydration: { status: "idle" },
       serviceRecords: sampleServiceRecords,
       serviceParts: [],
       machineDocuments: [],
       machineUsageLogs: [],
+
+      // Tool Register initial state (Phase 37) — net-new, starts empty.
+      tools: [],
+      toolsHydration: { status: "idle" },
+
+      // Tool Assignment History initial state (Phase 43) — net-new, starts empty.
+      toolAssignmentHistory: [],
+      toolAssignmentHistoryHydration: { status: "idle" },
+
+      // Tooling/Dies Register initial state (Phase 38) — net-new, starts empty.
+      dies: [],
+      diesHydration: { status: "idle" },
+      machineSpareParts: [],
+      machineSparePartsHydration: { status: "idle" },
+      machineDies: [],
+      machineDiesHydration: { status: "idle" },
+
+      // Machine/Service Revenue initial state (Phase 40) — net-new, starts empty.
+      billableServices: [],
+      billableServicesHydration: { status: "idle" },
+      machineServiceRates: [],
+      machineServiceRatesHydration: { status: "idle" },
+      machineServiceUsage: [],
+      machineServiceUsageHydration: { status: "idle" },
 
       // Export Engine initial state
       exportJobs: [],
@@ -1871,7 +2128,26 @@ export const useStore = create<Store>()(
           outsourcedWorks: (s.outsourcedWorks || []).filter((x) => x.id !== id),
         })),
 
-      upsertProjectProduction: (p) =>
+      // Remote-first: upsertProjectionStagesRemote (the atomic RPC) must
+      // succeed before local state changes at all. On success, local
+      // state is set to the REQUESTED stages/production as-sent, not the
+      // RPC's returned rows - the RPC's response only carries
+      // project_production_stages columns (transactions:[] always, per
+      // rowToProjectProductionStage), so using it directly here would
+      // silently wipe every stage's local `transactions` array. What was
+      // sent is deterministically what's now persisted, so reusing it
+      // avoids that data loss without a second round-trip.
+      upsertProjectProduction: async (p) => {
+        const result = await upsertProjectionStagesRemote(
+          p.projectId,
+          p.stages || [],
+        );
+        if (result.status !== "success") {
+          console.error(
+            `[upsertProjectProduction] Supabase write failed: ${result.error ?? result.status}`,
+          );
+          return false;
+        }
         set((s) => {
           const exists = s.projectProductions.find(
             (x) => x.projectId === p.projectId,
@@ -1883,15 +2159,34 @@ export const useStore = create<Store>()(
                 )
               : [...s.projectProductions, p],
           };
-        }),
+        });
+        return true;
+      },
 
-      addStageTransaction: (projectId, stageIdx, tx) =>
+      addStageTransaction: async (projectId, stageIdx, tx) => {
+        const stage = get().projectProductions.find(
+          (pp) => pp.projectId === projectId,
+        )?.stages?.[stageIdx];
+        if (!stage?.stageId) {
+          console.error(
+            `[addStageTransaction] stage at index ${stageIdx} for project ${projectId} has no stageId - cannot persist to Supabase.`,
+          );
+          return false;
+        }
+        const result = await recordStageTransactionRemote(stage.stageId, tx);
+        if (result.status !== "success" || !result.data) {
+          console.error(
+            `[addStageTransaction] Supabase write failed: ${result.error ?? result.status}`,
+          );
+          return false;
+        }
+        const savedTx = result.data;
         set((s) => ({
           projectProductions: s.projectProductions.map((pp) => {
             if (pp.projectId !== projectId) return pp;
-            const stages = (pp.stages || []).map((stage, i) => {
-              if (i !== stageIdx) return stage;
-              const newTxs = [...(stage.transactions || []), tx];
+            const stages = (pp.stages || []).map((st, i) => {
+              if (i !== stageIdx) return st;
+              const newTxs = [...(st.transactions || []), savedTx];
               const totalSent = newTxs
                 .filter((t) => t.type === "send")
                 .reduce((a, t) => a + t.quantity, 0);
@@ -1899,7 +2194,7 @@ export const useStore = create<Store>()(
                 .filter((t) => t.type === "receive")
                 .reduce((a, t) => a + t.quantity, 0);
               return {
-                ...stage,
+                ...st,
                 transactions: newTxs,
                 quantitySent: totalSent,
                 receivedQuantity: totalReceived,
@@ -1907,14 +2202,25 @@ export const useStore = create<Store>()(
             });
             return { ...pp, stages };
           }),
-        })),
+        }));
+        return true;
+      },
 
-      updateProjectStagesV2: (projectId, stages) =>
+      updateProjectStagesV2: async (projectId, stages) => {
+        const result = await upsertProjectionStagesRemote(projectId, stages);
+        if (result.status !== "success") {
+          console.error(
+            `[updateProjectStagesV2] Supabase write failed: ${result.error ?? result.status}`,
+          );
+          return false;
+        }
         set((s) => ({
           projectProductions: s.projectProductions.map((pp) =>
             pp.projectId === projectId ? { ...pp, stages } : pp,
           ),
-        })),
+        }));
+        return true;
+      },
 
       upsertProjectDelivery: (d) =>
         set((s) => {
@@ -2095,6 +2401,46 @@ export const useStore = create<Store>()(
               assignedEmployeeIds: byProject.get(p.id) ?? [],
             })),
             projectEmployeesHydration: { status: "success" },
+          };
+        }),
+
+      // project_machinery / project_dies (Phase 39) — same
+      // group-pairs-by-projectId shape as setProjectEmployeesFromServer
+      // above, applied to assignedMachineIds/assignedDieIds instead.
+      setProjectMachineryHydrationStatus: (status, error) =>
+        set({ projectMachineryHydration: { status, error } }),
+      setProjectMachineryFromServer: (pairs) =>
+        set((s) => {
+          const byProject = new Map<string, string[]>();
+          for (const { projectId, machineId } of pairs) {
+            const arr = byProject.get(projectId) ?? [];
+            arr.push(machineId);
+            byProject.set(projectId, arr);
+          }
+          return {
+            projects: s.projects.map((p) => ({
+              ...p,
+              assignedMachineIds: byProject.get(p.id) ?? [],
+            })),
+            projectMachineryHydration: { status: "success" },
+          };
+        }),
+      setProjectDiesHydrationStatus: (status, error) =>
+        set({ projectDiesHydration: { status, error } }),
+      setProjectDiesFromServer: (pairs) =>
+        set((s) => {
+          const byProject = new Map<string, string[]>();
+          for (const { projectId, dieId } of pairs) {
+            const arr = byProject.get(projectId) ?? [];
+            arr.push(dieId);
+            byProject.set(projectId, arr);
+          }
+          return {
+            projects: s.projects.map((p) => ({
+              ...p,
+              assignedDieIds: byProject.get(p.id) ?? [],
+            })),
+            projectDiesHydration: { status: "success" },
           };
         }),
 
@@ -2808,53 +3154,97 @@ export const useStore = create<Store>()(
         }));
       },
 
-      addServiceRecord: (r) =>
-        set((s) => {
-          const updatedMachines = (s.machines || []).map((m) => {
-            if (m.id !== r.machineId) return m;
-            const updates: Partial<Machine> = { updatedAt: Date.now() };
-            if (r.status === "Completed") {
-              updates.lastServiceDate = r.serviceDate;
-              if (r.nextServiceDue) updates.nextServiceDue = r.nextServiceDue;
-              if (r.machineCondition) {
-                // restore operational status after completed service
-                if (
-                  m.currentStatus === "Under Maintenance" ||
-                  m.currentStatus === "Breakdown"
-                ) {
-                  updates.currentStatus = "Operational";
-                }
-              }
-            } else if (r.status === "In Progress") {
-              updates.currentStatus = "Under Maintenance";
-            }
-            return { ...m, ...updates };
-          });
-          return {
-            serviceRecords: [...(s.serviceRecords || []), r],
-            machines: updatedMachines,
-          };
+      setMachinesHydrationStatus: (status, error) =>
+        set({ machinesHydration: { status, error } }),
+      setMachinesFromServer: (machines) =>
+        set({ machines, machinesHydration: { status: "success" } }),
+      setProjectProductionsHydrationStatus: (status, error) =>
+        set({ projectProductionsHydration: { status, error } }),
+      setProjectProductionsFromServer: (productions) =>
+        set({
+          projectProductions: productions,
+          projectProductionsHydration: { status: "success" },
         }),
 
-      updateServiceRecord: (r) =>
-        set((s) => {
-          const updatedMachines = (s.machines || []).map((m) => {
-            if (m.id !== r.machineId) return m;
-            const updates: Partial<Machine> = { updatedAt: Date.now() };
-            if (r.status === "Completed") {
-              updates.lastServiceDate = r.serviceDate;
-              if (r.nextServiceDue) updates.nextServiceDue = r.nextServiceDue;
-              updates.currentStatus = "Operational";
-            }
-            return { ...m, ...updates };
-          });
-          return {
-            serviceRecords: (s.serviceRecords || []).map((x) =>
+      // Phase 35 — addServiceRecord/updateServiceRecord/addMachineUsageLog/
+      // deleteMachineUsageLog/reportBreakdown/resolveBreakdown all mutate a
+      // *machines* row as a side effect of a local-only record. Each is now
+      // remote-first for that side effect only (same discipline as
+      // addProjectActivity above): the Machine-field update is pushed to
+      // Supabase first, and the local-only record (ServiceRecord/
+      // MachineUsageLog) is only written locally once that succeeds - so a
+      // reload/re-hydration can never show a service record that says
+      // "Completed" next to a machine whose status silently reverted
+      // because the field never actually reached the server. Returns false
+      // (nothing written, local or remote) on any non-success result so
+      // the caller can surface it instead of assuming success.
+      addServiceRecord: async (r) => {
+        const s = get();
+        const machine = (s.machines || []).find((m) => m.id === r.machineId);
+        if (!machine) {
+          // No matching machine to update (shouldn't happen in practice) -
+          // still record the service entry itself.
+          set((st) => ({ serviceRecords: [...(st.serviceRecords || []), r] }));
+          return true;
+        }
+        const updates: Partial<Machine> = { updatedAt: Date.now() };
+        if (r.status === "Completed") {
+          updates.lastServiceDate = r.serviceDate;
+          if (r.nextServiceDue) updates.nextServiceDue = r.nextServiceDue;
+          if (
+            r.machineCondition &&
+            (machine.currentStatus === "Under Maintenance" ||
+              machine.currentStatus === "Breakdown")
+          ) {
+            updates.currentStatus = "Operational";
+          }
+        } else if (r.status === "In Progress") {
+          updates.currentStatus = "Under Maintenance";
+        }
+        const updatedMachine: Machine = { ...machine, ...updates };
+        const result = await updateMachineRemote(updatedMachine);
+        if (result.status !== "success" || !result.data) return false;
+        const savedMachine = result.data;
+        set((st) => ({
+          serviceRecords: [...(st.serviceRecords || []), r],
+          machines: (st.machines || []).map((m) =>
+            m.id === savedMachine.id ? savedMachine : m,
+          ),
+        }));
+        return true;
+      },
+
+      updateServiceRecord: async (r) => {
+        const s = get();
+        const machine = (s.machines || []).find((m) => m.id === r.machineId);
+        if (!machine) {
+          set((st) => ({
+            serviceRecords: (st.serviceRecords || []).map((x) =>
               x.id === r.id ? r : x,
             ),
-            machines: updatedMachines,
-          };
-        }),
+          }));
+          return true;
+        }
+        const updates: Partial<Machine> = { updatedAt: Date.now() };
+        if (r.status === "Completed") {
+          updates.lastServiceDate = r.serviceDate;
+          if (r.nextServiceDue) updates.nextServiceDue = r.nextServiceDue;
+          updates.currentStatus = "Operational";
+        }
+        const updatedMachine: Machine = { ...machine, ...updates };
+        const result = await updateMachineRemote(updatedMachine);
+        if (result.status !== "success" || !result.data) return false;
+        const savedMachine = result.data;
+        set((st) => ({
+          serviceRecords: (st.serviceRecords || []).map((x) =>
+            x.id === r.id ? r : x,
+          ),
+          machines: (st.machines || []).map((m) =>
+            m.id === savedMachine.id ? savedMachine : m,
+          ),
+        }));
+        return true;
+      },
 
       deleteServiceRecord: (id) =>
         set((s) => ({
@@ -2889,49 +3279,71 @@ export const useStore = create<Store>()(
           ),
         })),
 
-      addMachineUsageLog: (l) =>
-        set((s) => {
-          const updatedMachines = (s.machines || []).map((m) => {
-            if (m.id !== l.machineId) return m;
-            return {
-              ...m,
-              totalRunningHours: m.totalRunningHours + l.hoursUsed,
-              updatedAt: Date.now(),
-            };
-          });
-          return {
-            machineUsageLogs: [...(s.machineUsageLogs || []), l],
-            machines: updatedMachines,
-          };
-        }),
+      addMachineUsageLog: async (l) => {
+        const s = get();
+        const machine = (s.machines || []).find((m) => m.id === l.machineId);
+        if (!machine) {
+          set((st) => ({
+            machineUsageLogs: [...(st.machineUsageLogs || []), l],
+          }));
+          return true;
+        }
+        const updatedMachine: Machine = {
+          ...machine,
+          totalRunningHours: machine.totalRunningHours + l.hoursUsed,
+          updatedAt: Date.now(),
+        };
+        const result = await updateMachineRemote(updatedMachine);
+        if (result.status !== "success" || !result.data) return false;
+        const savedMachine = result.data;
+        set((st) => ({
+          machineUsageLogs: [...(st.machineUsageLogs || []), l],
+          machines: (st.machines || []).map((m) =>
+            m.id === savedMachine.id ? savedMachine : m,
+          ),
+        }));
+        return true;
+      },
 
-      deleteMachineUsageLog: (id) => {
+      deleteMachineUsageLog: async (id) => {
         const s = get();
         const log = (s.machineUsageLogs || []).find((l) => l.id === id);
-        if (!log) return;
+        if (!log) return true;
+        const machine = (s.machines || []).find((m) => m.id === log.machineId);
+        if (!machine) {
+          set((st) => ({
+            machineUsageLogs: (st.machineUsageLogs || []).filter(
+              (x) => x.id !== id,
+            ),
+          }));
+          return true;
+        }
+        const updatedMachine: Machine = {
+          ...machine,
+          totalRunningHours: Math.max(
+            0,
+            machine.totalRunningHours - log.hoursUsed,
+          ),
+          updatedAt: Date.now(),
+        };
+        const result = await updateMachineRemote(updatedMachine);
+        if (result.status !== "success" || !result.data) return false;
+        const savedMachine = result.data;
         set((st) => ({
           machineUsageLogs: (st.machineUsageLogs || []).filter(
             (x) => x.id !== id,
           ),
           machines: (st.machines || []).map((m) =>
-            m.id === log.machineId
-              ? {
-                  ...m,
-                  totalRunningHours: Math.max(
-                    0,
-                    m.totalRunningHours - log.hoursUsed,
-                  ),
-                  updatedAt: Date.now(),
-                }
-              : m,
+            m.id === savedMachine.id ? savedMachine : m,
           ),
         }));
+        return true;
       },
 
-      reportBreakdown: (machineId, cause, createdBy) => {
+      reportBreakdown: async (machineId, cause, createdBy) => {
         const s = get();
         const machine = (s.machines || []).find((m) => m.id === machineId);
-        if (!machine) return;
+        if (!machine) return false;
         const svcNumber = get().generateServiceNumber(machineId);
         const svcRecord: ServiceRecord = {
           id: crypto.randomUUID(),
@@ -2949,27 +3361,207 @@ export const useStore = create<Store>()(
           createdBy,
           createdAt: Date.now(),
         };
+        const updatedMachine: Machine = {
+          ...machine,
+          currentStatus: "Breakdown",
+          updatedAt: Date.now(),
+        };
+        const result = await updateMachineRemote(updatedMachine);
+        if (result.status !== "success" || !result.data) return false;
+        const savedMachine = result.data;
         set((st) => ({
           machines: (st.machines || []).map((m) =>
-            m.id === machineId
-              ? { ...m, currentStatus: "Breakdown", updatedAt: Date.now() }
-              : m,
+            m.id === savedMachine.id ? savedMachine : m,
           ),
           serviceRecords: [...(st.serviceRecords || []), svcRecord],
         }));
+        return true;
       },
 
-      resolveBreakdown: (machineId, serviceRecordId, condition) =>
-        set((s) => ({
-          machines: (s.machines || []).map((m) =>
-            m.id === machineId
-              ? { ...m, currentStatus: "Operational", updatedAt: Date.now() }
-              : m,
+      resolveBreakdown: async (machineId, serviceRecordId, condition) => {
+        const s = get();
+        const machine = (s.machines || []).find((m) => m.id === machineId);
+        if (!machine) return false;
+        const updatedMachine: Machine = {
+          ...machine,
+          currentStatus: "Operational",
+          updatedAt: Date.now(),
+        };
+        const result = await updateMachineRemote(updatedMachine);
+        if (result.status !== "success" || !result.data) return false;
+        const savedMachine = result.data;
+        set((st) => ({
+          machines: (st.machines || []).map((m) =>
+            m.id === savedMachine.id ? savedMachine : m,
           ),
-          serviceRecords: (s.serviceRecords || []).map((r) =>
+          serviceRecords: (st.serviceRecords || []).map((r) =>
             r.id === serviceRecordId
               ? { ...r, status: "Completed", machineCondition: condition }
               : r,
+          ),
+        }));
+        return true;
+      },
+
+      // ── Tool Register actions (Phase 37) ────────────────────────
+      // Plain local setters, same shape as addMachine/updateMachine/
+      // deleteMachine above - remote-first writes happen at the page
+      // level (Tools.tsx calls createToolRemote/updateToolRemote/
+      // deleteToolRemote first, then these only on a confirmed success).
+      setToolsHydrationStatus: (status, error) =>
+        set({ toolsHydration: { status, error } }),
+      setToolsFromServer: (tools) =>
+        set({ tools, toolsHydration: { status: "success" } }),
+      addTool: (t) => set((s) => ({ tools: [...(s.tools || []), t] })),
+      updateTool: (t) =>
+        set((s) => ({
+          tools: (s.tools || []).map((x) => (x.id === t.id ? t : x)),
+        })),
+      deleteTool: (id) =>
+        set((s) => ({ tools: (s.tools || []).filter((x) => x.id !== id) })),
+      generateToolCode: () => {
+        const next = get().counters.TL + 1;
+        set((s) => ({ counters: { ...s.counters, TL: next } }));
+        return `TL-${String(next).padStart(3, "0")}`;
+      },
+
+      // ── Tool Assignment History actions (Phase 43) ──────────────
+      // Insert-only, same shape as addMachineServiceRateLocal below - no
+      // update/delete action exists because none should (see schema
+      // header on tool_assignment_history).
+      setToolAssignmentHistoryHydrationStatus: (status, error) =>
+        set({ toolAssignmentHistoryHydration: { status, error } }),
+      setToolAssignmentHistoryFromServer: (rows) =>
+        set({
+          toolAssignmentHistory: rows,
+          toolAssignmentHistoryHydration: { status: "success" },
+        }),
+      addToolAssignmentHistoryLocal: (r) =>
+        set((s) => ({
+          toolAssignmentHistory: [r, ...(s.toolAssignmentHistory || [])],
+        })),
+
+      // ── Tooling/Dies Register actions (Phase 38) ────────────────
+      setDiesHydrationStatus: (status, error) =>
+        set({ diesHydration: { status, error } }),
+      setDiesFromServer: (dies) =>
+        set({ dies, diesHydration: { status: "success" } }),
+      addDie: (d) => set((s) => ({ dies: [...(s.dies || []), d] })),
+      updateDie: (d) =>
+        set((s) => ({
+          dies: (s.dies || []).map((x) => (x.id === d.id ? d : x)),
+        })),
+      deleteDie: (id) =>
+        set((s) => ({ dies: (s.dies || []).filter((x) => x.id !== id) })),
+      generateDieCode: () => {
+        const next = get().counters.DIE + 1;
+        set((s) => ({ counters: { ...s.counters, DIE: next } }));
+        return `DIE-${String(next).padStart(3, "0")}`;
+      },
+
+      setMachineSparePartsHydrationStatus: (status, error) =>
+        set({ machineSparePartsHydration: { status, error } }),
+      setMachineSparePartsFromServer: (rows) =>
+        set({
+          machineSpareParts: rows,
+          machineSparePartsHydration: { status: "success" },
+        }),
+      addMachineSparePartLocal: (machineId, inventoryItemId) =>
+        set((s) => ({
+          machineSpareParts: [
+            ...(s.machineSpareParts || []),
+            { machineId, inventoryItemId, createdAt: Date.now() },
+          ],
+        })),
+      removeMachineSparePartLocal: (machineId, inventoryItemId) =>
+        set((s) => ({
+          machineSpareParts: (s.machineSpareParts || []).filter(
+            (x) =>
+              !(
+                x.machineId === machineId &&
+                x.inventoryItemId === inventoryItemId
+              ),
+          ),
+        })),
+
+      setMachineDiesHydrationStatus: (status, error) =>
+        set({ machineDiesHydration: { status, error } }),
+      setMachineDiesFromServer: (rows) =>
+        set({ machineDies: rows, machineDiesHydration: { status: "success" } }),
+      addMachineDieLocal: (machineId, dieId) =>
+        set((s) => ({
+          machineDies: [
+            ...(s.machineDies || []),
+            { machineId, dieId, createdAt: Date.now() },
+          ],
+        })),
+      removeMachineDieLocal: (machineId, dieId) =>
+        set((s) => ({
+          machineDies: (s.machineDies || []).filter(
+            (x) => !(x.machineId === machineId && x.dieId === dieId),
+          ),
+        })),
+
+      // ── Machine/Service Revenue actions (Phase 40) ─────────────
+      setBillableServicesHydrationStatus: (status, error) =>
+        set({ billableServicesHydration: { status, error } }),
+      setBillableServicesFromServer: (services) =>
+        set({
+          billableServices: services,
+          billableServicesHydration: { status: "success" },
+        }),
+      addBillableServiceLocal: (s) =>
+        set((st) => ({
+          billableServices: [...(st.billableServices || []), s],
+        })),
+      updateBillableServiceLocal: (s) =>
+        set((st) => ({
+          billableServices: (st.billableServices || []).map((x) =>
+            x.id === s.id ? s : x,
+          ),
+        })),
+      deleteBillableServiceLocal: (id) =>
+        set((st) => ({
+          billableServices: (st.billableServices || []).filter(
+            (x) => x.id !== id,
+          ),
+        })),
+
+      setMachineServiceRatesHydrationStatus: (status, error) =>
+        set({ machineServiceRatesHydration: { status, error } }),
+      setMachineServiceRatesFromServer: (rates) =>
+        set({
+          machineServiceRates: rates,
+          machineServiceRatesHydration: { status: "success" },
+        }),
+      // Insert-only, mirroring the DB table itself (see
+      // lib/machineRevenueApi.ts) - no update/delete counterpart.
+      addMachineServiceRateLocal: (r) =>
+        set((st) => ({
+          machineServiceRates: [...(st.machineServiceRates || []), r],
+        })),
+
+      setMachineServiceUsageHydrationStatus: (status, error) =>
+        set({ machineServiceUsageHydration: { status, error } }),
+      setMachineServiceUsageFromServer: (usage) =>
+        set({
+          machineServiceUsage: usage,
+          machineServiceUsageHydration: { status: "success" },
+        }),
+      addMachineServiceUsageLocal: (u) =>
+        set((st) => ({
+          machineServiceUsage: [...(st.machineServiceUsage || []), u],
+        })),
+      updateMachineServiceUsageLocal: (u) =>
+        set((st) => ({
+          machineServiceUsage: (st.machineServiceUsage || []).map((x) =>
+            x.id === u.id ? u : x,
+          ),
+        })),
+      deleteMachineServiceUsageLocal: (id) =>
+        set((st) => ({
+          machineServiceUsage: (st.machineServiceUsage || []).filter(
+            (x) => x.id !== id,
           ),
         })),
 
@@ -3329,9 +3921,34 @@ export const useStore = create<Store>()(
             ps.salaryAdvances || currentState.salaryAdvances || [],
             ps.advanceRecords || currentState.advanceRecords || [],
           );
+        // Phase 35 — capture the pre-Supabase-hydration `machines` array
+        // exactly once, from whatever this specific browser's localStorage
+        // held BEFORE this boot. Guarded so it only ever happens on the
+        // first boot after this field was introduced (ps itself has no
+        // preMigrationMachinesSnapshot yet) - every later boot's `ps`
+        // already carries forward whatever was captured then, unchanged,
+        // even after `machines` itself has since been overwritten by a
+        // successful Supabase hydration. See the field's own comment on
+        // the Store interface for why this can't just read `machines`.
+        const preMigrationMachinesSnapshot =
+          ps.preMigrationMachinesSnapshot !== undefined
+            ? ps.preMigrationMachinesSnapshot
+            : (ps.machines ?? currentState.machines ?? null);
+        // Phase 45 — same capture-once mechanics as
+        // preMigrationMachinesSnapshot immediately above, for
+        // projectProductions (see the field's own comment on the Store
+        // interface).
+        const preMigrationProjectProductionsSnapshot =
+          ps.preMigrationProjectProductionsSnapshot !== undefined
+            ? ps.preMigrationProjectProductionsSnapshot
+            : (ps.projectProductions ??
+              currentState.projectProductions ??
+              null);
         return {
           ...currentState,
           ...ps,
+          preMigrationMachinesSnapshot,
+          preMigrationProjectProductionsSnapshot,
           pettyExpenses: pettyExpensesWithLegacySpend,
           companyPOs: ps.companyPOs || currentState.companyPOs || [],
           vendors: ps.vendors || currentState.vendors || [],

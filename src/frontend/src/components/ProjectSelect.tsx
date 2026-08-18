@@ -14,8 +14,8 @@ import {
 } from "@/components/ui/popover";
 import { Check, ChevronsUpDown } from "lucide-react";
 import { useState } from "react";
-import { useStore } from "../store";
 import { cn, getCustomerVisibleName, getProjectSearchText } from "../lib/utils";
+import { useStore } from "../store";
 
 interface Props {
   value: string;
@@ -24,7 +24,12 @@ interface Props {
   className?: string;
 }
 
-export function ProjectSelect({ value, onChange, placeholder = "Select project", className }: Props) {
+export function ProjectSelect({
+  value,
+  onChange,
+  placeholder = "Select project",
+  className,
+}: Props) {
   const { projects } = useStore();
   const [open, setOpen] = useState(false);
   const selected = projects.find((p) => p.id === value);
@@ -49,7 +54,9 @@ export function ProjectSelect({ value, onChange, placeholder = "Select project",
                   </span>
                 )}
               </>
-            ) : placeholder}
+            ) : (
+              placeholder
+            )}
           </span>
           <ChevronsUpDown className="w-3.5 h-3.5 ml-2 shrink-0 opacity-50" />
         </Button>
@@ -63,9 +70,14 @@ export function ProjectSelect({ value, onChange, placeholder = "Select project",
             return text.includes(search.toLowerCase()) ? 1 : 0;
           }}
         >
-          <CommandInput placeholder="Search by name, code, or ORD-..." className="h-8 text-xs" />
+          <CommandInput
+            placeholder="Search by name, code, or ORD-..."
+            className="h-8 text-xs"
+          />
           <CommandList>
-            <CommandEmpty className="py-4 text-center text-xs text-muted-foreground">No projects found.</CommandEmpty>
+            <CommandEmpty className="py-4 text-center text-xs text-muted-foreground">
+              No projects found.
+            </CommandEmpty>
             <CommandGroup>
               {(projects || []).map((p) => (
                 <CommandItem
@@ -77,9 +89,18 @@ export function ProjectSelect({ value, onChange, placeholder = "Select project",
                   }}
                   className="text-xs"
                 >
-                  <Check className={cn("w-3.5 h-3.5 mr-2 shrink-0", value === p.id ? "opacity-100" : "opacity-0")} />
-                  <span className="font-mono text-muted-foreground mr-2 shrink-0">{p.projectNo}</span>
-                  <span className="flex-1 truncate">{getCustomerVisibleName(p)}</span>
+                  <Check
+                    className={cn(
+                      "w-3.5 h-3.5 mr-2 shrink-0",
+                      value === p.id ? "opacity-100" : "opacity-0",
+                    )}
+                  />
+                  <span className="font-mono text-muted-foreground mr-2 shrink-0">
+                    {p.projectNo}
+                  </span>
+                  <span className="flex-1 truncate">
+                    {getCustomerVisibleName(p)}
+                  </span>
                   {p.internalOrderCode && (
                     <span className="ml-1.5 font-mono text-[10px] text-amber-600 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded shrink-0">
                       {p.internalOrderCode}

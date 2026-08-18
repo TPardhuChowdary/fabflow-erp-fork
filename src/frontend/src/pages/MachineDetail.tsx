@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import {
   Select,
   SelectContent,
@@ -40,11 +41,13 @@ import {
   Trash2,
   TrendingUp,
   Wrench,
+  X,
   XCircle,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import { VendorSelect } from "../components/VendorSelect";
 import { WorkDrawingPreviewDialog } from "../components/WorkDrawingPreviewDialog";
 import { getChildDrawings } from "../drawingEditor/api/drawings";
@@ -57,11 +60,26 @@ import {
 import { loadPdf } from "../drawingEditor/lib/pdfRenderer";
 import { printLatestView } from "../drawingEditor/lib/workOrderPreview";
 import { useDrawingEditorStore } from "../drawingEditor/store/useDrawingEditorStore";
-import type { DrawingDocument } from "../drawingEditor/types";
+import type { DrawingDocument, DrawingLink } from "../drawingEditor/types";
+import {
+  addMachineDieRemote,
+  addMachineSparePartRemote,
+  removeMachineDieRemote,
+  removeMachineSparePartRemote,
+} from "../lib/machineCompatibilityApi";
+import { addServiceRateRemote } from "../lib/machineRevenueApi";
+import { updateMachineRemote } from "../lib/machinesApi";
 import { getCustomerVisibleName } from "../lib/utils";
-import { canCreate, canDelete, canEdit, canView } from "../permissions";
+import {
+  canCreate,
+  canDelete,
+  canEdit,
+  canView,
+  hasPermission,
+} from "../permissions";
 import { useStore } from "../store";
 import type {
+  BillableService,
   MachineCondition,
   MachineDocument,
   MachineUsageLog,
@@ -156,6 +174,17 @@ export function MachineDetail({
     generateServiceNumber,
     addAuditLog,
     settings,
+    inventoryItems,
+    dies,
+    machineSpareParts,
+    machineDies,
+    addMachineSparePartLocal,
+    removeMachineSparePartLocal,
+    addMachineDieLocal,
+    removeMachineDieLocal,
+    billableServices,
+    machineServiceRates,
+    addMachineServiceRateLocal,
   } = useStore();
 
   const machine = machines.find((m) => m.id === machineId);
@@ -163,6 +192,11 @@ export function MachineDetail({
   const dView = canView(currentUser, "drawing_editor");
   const dEdit = canEdit(currentUser, "drawing_editor");
   const dDelete = canDelete(currentUser, "drawing_editor");
+  const revView = canView(currentUser, "machine_revenue");
+  const revManageRates = hasPermission(
+    currentUser,
+    "machine_revenue.manage_rates",
+  );
   const {
     drawings: allDrawings,
     loaded: drawingsLoaded,
@@ -246,6 +280,65 @@ export function MachineDetail({
     toast.success(`${drawing.fileName} uploaded`);
   };
 
+  const [deleteDrawingTarget, setDeleteDrawingTarget] = useState<
+    (typeof allDrawings)[number] | null
+  >(null);
+  const [deleteServiceRecordTarget, setDeleteServiceRecordTarget] = useState<
+    string | null
+  >(null);
+
+  // Billable Services (Phase 40) — Change Rate dialog. Services and
+  // usage themselves are managed on the Machine Revenue page; this tab
+  // is a read-mostly view scoped to this one machine, plus the same
+  // insert-only rate-history write the main page uses.
+  const [rateTarget, setRateTarget] = useState<BillableService | null>(null);
+  const [newRate, setNewRate] = useState("");
+  const [isSavingRate, setIsSavingRate] = useState(false);
+  const myBillableServices = useMemo(
+    () =>
+      (billableServices || []).filter(
+        (s) => s.machineId === machineId && s.isActive !== false,
+      ),
+    [billableServices, machineId],
+  );
+  const currentServiceRate = (serviceId: string): number => {
+    const rates = (machineServiceRates || [])
+      .filter((r) => r.billableServiceId === serviceId)
+      .sort((a, b) => b.effectiveFrom - a.effectiveFrom);
+    return rates[0]?.rate ?? 0;
+  };
+  async function handleSaveRate() {
+    if (!rateTarget || isSavingRate) return;
+    const rateNum = Number(newRate);
+    if (!newRate.trim() || Number.isNaN(rateNum) || rateNum < 0) {
+      toast.error("Enter a valid rate");
+      return;
+    }
+    setIsSavingRate(true);
+    try {
+      const result = await addServiceRateRemote(rateTarget.id, rateNum);
+      if (result.status === "unauthenticated") {
+        toast.error("Not signed in to Supabase - rate was not saved.");
+        return;
+      }
+      if (
+        result.status === "error" ||
+        result.status === "denied" ||
+        !result.data
+      ) {
+        toast.error(`Could not save rate: ${result.error ?? "unknown error"}`);
+        return;
+      }
+      addMachineServiceRateLocal(result.data);
+      toast.success(
+        `New rate set for "${rateTarget.name}" — past revenue is unaffected`,
+      );
+      setRateTarget(null);
+    } finally {
+      setIsSavingRate(false);
+    }
+  }
+
   const handleDrawingDelete = async (drawing: (typeof allDrawings)[number]) => {
     const children = await getChildDrawings(drawing.id);
     if (children.length > 0) {
@@ -254,10 +347,12 @@ export function MachineDetail({
       );
       return;
     }
-    if (
-      !window.confirm(`Delete "${drawing.fileName}" and all its saved views?`)
-    )
-      return;
+    setDeleteDrawingTarget(drawing);
+  };
+
+  const handleConfirmDrawingDelete = async () => {
+    const drawing = deleteDrawingTarget;
+    if (!drawing) return;
     await deleteDrawingDoc(drawing.id);
     addAuditLog({
       module: "drawing_editor",
@@ -267,6 +362,7 @@ export function MachineDetail({
       changedBy: drawingUserName,
     });
     toast.success("Drawing deleted");
+    setDeleteDrawingTarget(null);
   };
 
   const handleDrawingRename = async (
@@ -321,7 +417,7 @@ export function MachineDetail({
 
   const handleDrawingAddLink = async (
     drawing: (typeof allDrawings)[number],
-    linkedType: "project" | "machine" | "vendor" | "customer",
+    linkedType: DrawingLink["linkedType"],
     linkedId: string,
   ) => {
     await addLink(drawing.id, linkedType, linkedId);
@@ -374,6 +470,47 @@ export function MachineDetail({
             new Date(b.logDate).getTime() - new Date(a.logDate).getTime(),
         ),
     [machineUsageLogs, machineId],
+  );
+
+  // Phase 38 — Compatible Spare Parts / Compatible Tooling.
+  const compatibleSparePartIds = useMemo(
+    () =>
+      new Set(
+        (machineSpareParts || [])
+          .filter((x) => x.machineId === machineId)
+          .map((x) => x.inventoryItemId),
+      ),
+    [machineSpareParts, machineId],
+  );
+  const myCompatibleSpareParts = useMemo(
+    () =>
+      (inventoryItems || []).filter((i) => compatibleSparePartIds.has(i.id)),
+    [inventoryItems, compatibleSparePartIds],
+  );
+  const availableSpareParts = useMemo(
+    () =>
+      (inventoryItems || []).filter(
+        (i) => i.category === "spare_part" && !compatibleSparePartIds.has(i.id),
+      ),
+    [inventoryItems, compatibleSparePartIds],
+  );
+
+  const compatibleDieIds = useMemo(
+    () =>
+      new Set(
+        (machineDies || [])
+          .filter((x) => x.machineId === machineId)
+          .map((x) => x.dieId),
+      ),
+    [machineDies, machineId],
+  );
+  const myCompatibleDies = useMemo(
+    () => (dies || []).filter((d) => compatibleDieIds.has(d.id)),
+    [dies, compatibleDieIds],
+  );
+  const availableDies = useMemo(
+    () => (dies || []).filter((d) => !compatibleDieIds.has(d.id)),
+    [dies, compatibleDieIds],
   );
 
   // Aggregated cost totals
@@ -464,7 +601,7 @@ export function MachineDetail({
     setShowSvcForm(true);
   }
 
-  function saveSvcRecord() {
+  async function saveSvcRecord() {
     if (!svcForm.serviceDate) {
       toast.error("Service date required");
       return;
@@ -479,7 +616,16 @@ export function MachineDetail({
     }
 
     if (editingSvc) {
-      updateServiceRecord({ ...editingSvc, ...svcForm } as ServiceRecord);
+      const ok = await updateServiceRecord({
+        ...editingSvc,
+        ...svcForm,
+      } as ServiceRecord);
+      if (!ok) {
+        toast.error(
+          "Could not save service record — machine sync to Supabase failed.",
+        );
+        return;
+      }
       toast.success("Service record updated");
     } else {
       const svcNo = generateServiceNumber(machineId);
@@ -509,7 +655,13 @@ export function MachineDetail({
         createdBy: currentUser?.username || "admin",
         createdAt: Date.now(),
       };
-      addServiceRecord(newRecord);
+      const ok = await addServiceRecord(newRecord);
+      if (!ok) {
+        toast.error(
+          "Could not log service record — machine sync to Supabase failed.",
+        );
+        return;
+      }
 
       // Add parts if any
       svcParts.forEach((p) => {
@@ -526,7 +678,7 @@ export function MachineDetail({
     setShowSvcForm(false);
   }
 
-  function saveUsageLog() {
+  async function saveUsageLog() {
     if (!machine) return;
     if (!usageForm.logDate) {
       toast.error("Date required");
@@ -552,26 +704,102 @@ export function MachineDetail({
       loggedBy: currentUser?.username || "admin",
       createdAt: Date.now(),
     };
-    addMachineUsageLog(log);
+    const ok = await addMachineUsageLog(log);
+    if (!ok) {
+      toast.error("Could not log usage — machine sync to Supabase failed.");
+      return;
+    }
     toast.success(`${log.hoursUsed}h logged for ${machine.name}`);
     setShowUsageForm(false);
     setUsageForm({});
   }
 
-  function handleBreakdown() {
+  async function handleBreakdown() {
     if (!machine) return;
     if (!breakdownCause.trim()) {
       toast.error("Describe the breakdown cause");
       return;
     }
-    reportBreakdown(
+    const ok = await reportBreakdown(
       machineId,
       breakdownCause,
       currentUser?.username || "admin",
     );
+    if (!ok) {
+      toast.error(
+        "Could not report breakdown — machine sync to Supabase failed.",
+      );
+      return;
+    }
     toast.error(`⚠ Breakdown reported for ${machine.name}`);
     setShowBreakdownForm(false);
     setBreakdownCause("");
+  }
+
+  // Phase 38 — Compatible Spare Parts / Compatible Tooling. Remote-first,
+  // same discipline as the rest of this file: the local pair is only
+  // added/removed after the remote call confirms success.
+  async function handleAddCompatibleSparePart(inventoryItemId: string) {
+    const result = await addMachineSparePartRemote(machineId, inventoryItemId);
+    if (result.status === "unauthenticated") {
+      toast.error("Not signed in to Supabase - spare part was not linked.");
+      return;
+    }
+    if (result.status === "error" || result.status === "denied") {
+      toast.error(
+        `Could not link spare part: ${result.error ?? "unknown error"}`,
+      );
+      return;
+    }
+    addMachineSparePartLocal(machineId, inventoryItemId);
+    toast.success("Spare part linked");
+  }
+
+  async function handleRemoveCompatibleSparePart(inventoryItemId: string) {
+    const result = await removeMachineSparePartRemote(
+      machineId,
+      inventoryItemId,
+    );
+    if (result.status === "unauthenticated") {
+      toast.error("Not signed in to Supabase - spare part was not unlinked.");
+      return;
+    }
+    if (result.status === "error" || result.status === "denied") {
+      toast.error(
+        `Could not unlink spare part: ${result.error ?? "unknown error"}`,
+      );
+      return;
+    }
+    removeMachineSparePartLocal(machineId, inventoryItemId);
+    toast.success("Spare part unlinked");
+  }
+
+  async function handleAddCompatibleDie(dieId: string) {
+    const result = await addMachineDieRemote(machineId, dieId);
+    if (result.status === "unauthenticated") {
+      toast.error("Not signed in to Supabase - die was not linked.");
+      return;
+    }
+    if (result.status === "error" || result.status === "denied") {
+      toast.error(`Could not link die: ${result.error ?? "unknown error"}`);
+      return;
+    }
+    addMachineDieLocal(machineId, dieId);
+    toast.success("Die linked");
+  }
+
+  async function handleRemoveCompatibleDie(dieId: string) {
+    const result = await removeMachineDieRemote(machineId, dieId);
+    if (result.status === "unauthenticated") {
+      toast.error("Not signed in to Supabase - die was not unlinked.");
+      return;
+    }
+    if (result.status === "error" || result.status === "denied") {
+      toast.error(`Could not unlink die: ${result.error ?? "unknown error"}`);
+      return;
+    }
+    removeMachineDieLocal(machineId, dieId);
+    toast.success("Die unlinked");
   }
 
   async function handleDocUpload(e: React.ChangeEvent<HTMLInputElement>) {
@@ -603,7 +831,7 @@ export function MachineDetail({
     reader.onload = (ev) => {
       // Compress: draw to canvas then export as JPEG
       const img = new window.Image();
-      img.onload = () => {
+      img.onload = async () => {
         const canvas = document.createElement("canvas");
         const MAX = 800;
         const ratio = Math.min(MAX / img.width, MAX / img.height, 1);
@@ -612,11 +840,27 @@ export function MachineDetail({
         const ctx = canvas.getContext("2d")!;
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
         const compressed = canvas.toDataURL("image/jpeg", 0.75);
-        updateMachine({
+        // Phase 35 — remote-first, same discipline as Machinery.tsx.
+        const result = await updateMachineRemote({
           ...machine,
           primaryImageData: compressed,
           updatedAt: Date.now(),
         });
+        if (result.status === "unauthenticated") {
+          toast.error("Not signed in to Supabase - photo was not saved.");
+          return;
+        }
+        if (
+          result.status === "error" ||
+          result.status === "denied" ||
+          !result.data
+        ) {
+          toast.error(
+            `Could not save photo: ${result.error ?? "unknown error"}`,
+          );
+          return;
+        }
+        updateMachine(result.data);
         toast.success("Photo updated");
       };
       img.src = ev.target?.result as string;
@@ -718,7 +962,7 @@ export function MachineDetail({
               variant="outline"
               size="sm"
               className="gap-1.5 border-green-300 text-green-700 hover:bg-green-50"
-              onClick={() => {
+              onClick={async () => {
                 const openSvc = (serviceRecords || []).find(
                   (r) =>
                     r.machineId === machineId &&
@@ -726,7 +970,17 @@ export function MachineDetail({
                     r.serviceType === "Breakdown",
                 );
                 if (openSvc) {
-                  resolveBreakdown(machineId, openSvc.id, "Good");
+                  const ok = await resolveBreakdown(
+                    machineId,
+                    openSvc.id,
+                    "Good",
+                  );
+                  if (!ok) {
+                    toast.error(
+                      "Could not resolve breakdown — machine sync to Supabase failed.",
+                    );
+                    return;
+                  }
                   toast.success("Breakdown resolved — machine Operational");
                 }
               }}
@@ -874,6 +1128,20 @@ export function MachineDetail({
           <TabsTrigger value="parts">Parts Replaced</TabsTrigger>
           <TabsTrigger value="usage">Usage Log</TabsTrigger>
           <TabsTrigger value="documents">Documents</TabsTrigger>
+          <TabsTrigger
+            value="compatibility"
+            data-ocid="machine-detail.compatibility.tab"
+          >
+            Compatibility
+          </TabsTrigger>
+          {revView && (
+            <TabsTrigger
+              value="billable-services"
+              data-ocid="machine-detail.billable_services.tab"
+            >
+              Billable Services
+            </TabsTrigger>
+          )}
           {dView && (
             <TabsTrigger
               value="drawings"
@@ -1079,12 +1347,7 @@ export function MachineDetail({
                             size="sm"
                             variant="ghost"
                             className="h-7 px-2 text-xs text-destructive hover:text-destructive"
-                            onClick={() => {
-                              if (confirm("Delete this service record?")) {
-                                deleteServiceRecord(r.id);
-                                toast.success("Deleted");
-                              }
-                            }}
+                            onClick={() => setDeleteServiceRecordTarget(r.id)}
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </Button>
@@ -1323,8 +1586,14 @@ export function MachineDetail({
                         <TableCell>
                           <button
                             type="button"
-                            onClick={() => {
-                              deleteMachineUsageLog(l.id);
+                            onClick={async () => {
+                              const ok = await deleteMachineUsageLog(l.id);
+                              if (!ok) {
+                                toast.error(
+                                  "Could not remove log — machine sync to Supabase failed.",
+                                );
+                                return;
+                              }
                               toast.success("Log removed");
                             }}
                             className="text-muted-foreground hover:text-destructive"
@@ -1419,6 +1688,164 @@ export function MachineDetail({
             </div>
           )}
         </TabsContent>
+
+        {/* ── COMPATIBILITY TAB (Phase 38) ── */}
+        <TabsContent value="compatibility" className="pt-4 space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Compatible Spare Parts */}
+            <div className="rounded-lg border bg-card p-4 space-y-3">
+              <h3 className="font-semibold text-sm">Compatible Spare Parts</h3>
+              {pEdit && availableSpareParts.length > 0 && (
+                <Select
+                  value=""
+                  onValueChange={(v) => handleAddCompatibleSparePart(v)}
+                >
+                  <SelectTrigger data-ocid="machine-detail.spare_part.add.select">
+                    <SelectValue placeholder="+ Link a spare part..." />
+                  </SelectTrigger>
+                  <SelectContent className="max-h-64">
+                    {availableSpareParts.map((i) => (
+                      <SelectItem key={i.id} value={i.id}>
+                        {i.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+              {myCompatibleSpareParts.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  No spare parts linked yet.
+                </p>
+              ) : (
+                <div className="space-y-1.5">
+                  {myCompatibleSpareParts.map((i) => (
+                    <div
+                      key={i.id}
+                      className="flex items-center justify-between text-sm bg-muted/30 rounded px-3 py-1.5"
+                    >
+                      <span>{i.name}</span>
+                      {pEdit && (
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveCompatibleSparePart(i.id)}
+                          className="text-muted-foreground hover:text-destructive"
+                          data-ocid="machine-detail.spare_part.remove_button"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Compatible Tooling (Dies) */}
+            <div className="rounded-lg border bg-card p-4 space-y-3">
+              <h3 className="font-semibold text-sm">Compatible Tooling</h3>
+              {pEdit && availableDies.length > 0 && (
+                <Select
+                  value=""
+                  onValueChange={(v) => handleAddCompatibleDie(v)}
+                >
+                  <SelectTrigger data-ocid="machine-detail.die.add.select">
+                    <SelectValue placeholder="+ Link a die..." />
+                  </SelectTrigger>
+                  <SelectContent className="max-h-64">
+                    {availableDies.map((d) => (
+                      <SelectItem key={d.id} value={d.id}>
+                        {d.name} ({d.dieCode})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+              {myCompatibleDies.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  No tooling/dies linked yet.
+                </p>
+              ) : (
+                <div className="space-y-1.5">
+                  {myCompatibleDies.map((d) => (
+                    <div
+                      key={d.id}
+                      className="flex items-center justify-between text-sm bg-muted/30 rounded px-3 py-1.5"
+                    >
+                      <span>
+                        {d.name} ({d.dieCode})
+                      </span>
+                      {pEdit && (
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveCompatibleDie(d.id)}
+                          className="text-muted-foreground hover:text-destructive"
+                          data-ocid="machine-detail.die.remove_button"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </TabsContent>
+
+        {revView && (
+          <TabsContent value="billable-services" className="pt-4 space-y-4">
+            <div className="rounded-lg border bg-card p-4 space-y-3">
+              <div>
+                <h3 className="font-semibold text-sm">Billable Services</h3>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Revenue services billed on this machine — distinct from the
+                  machine record itself. Add or remove services and record usage
+                  from the Machine Revenue page.
+                </p>
+              </div>
+              {myBillableServices.length === 0 ? (
+                <p className="text-sm text-muted-foreground py-4 text-center">
+                  No billable services configured for this machine.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {myBillableServices.map((s) => (
+                    <div
+                      key={s.id}
+                      className="flex items-center justify-between rounded-md border p-3"
+                      data-ocid={`machine-detail.billable_service.${s.id}`}
+                    >
+                      <div>
+                        <div className="font-medium text-sm">{s.name}</div>
+                        <div className="text-xs text-muted-foreground">
+                          {s.chargingMethod} — current rate: ₹
+                          {currentServiceRate(s.id).toLocaleString("en-IN", {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}
+                          {s.unitLabel ? ` / ${s.unitLabel}` : ""}
+                        </div>
+                      </div>
+                      {revManageRates && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            setRateTarget(s);
+                            setNewRate(String(currentServiceRate(s.id) || ""));
+                          }}
+                          data-ocid={`machine-detail.change_rate_button.${s.id}`}
+                        >
+                          Change Rate
+                        </Button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </TabsContent>
+        )}
 
         {dView && (
           <TabsContent value="drawings" className="pt-4 space-y-4">
@@ -1828,27 +2255,26 @@ export function MachineDetail({
             </div>
             <div>
               <Label>Project (optional)</Label>
-              <Select
+              <SearchableSelect
                 value={usageForm.projectId || "__none__"}
-                onValueChange={(v) =>
+                onChange={(v) =>
                   setUsageForm({
                     ...usageForm,
                     projectId: v === "__none__" ? "" : v,
                   })
                 }
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder="Select project" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__none__">— No project —</SelectItem>
-                  {(projects || []).map((p) => (
-                    <SelectItem key={p.id} value={p.id}>
-                      {p.projectNo} · {p.projectName}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                options={[
+                  { value: "__none__", label: "— No project —" },
+                  ...(projects || []).map((p) => ({
+                    value: p.id,
+                    label: `${p.projectNo} · ${p.projectName}`,
+                  })),
+                ]}
+                placeholder="Select project"
+                searchPlaceholder="Search projects…"
+                emptyText="No projects found."
+                className="w-full"
+              />
             </div>
             <div>
               <Label>Operator</Label>
@@ -2040,6 +2466,80 @@ export function MachineDetail({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Billable Service — Change Rate Dialog (Phase 40) */}
+      <Dialog
+        open={!!rateTarget}
+        onOpenChange={(o) => !o && setRateTarget(null)}
+      >
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Change Rate — {rateTarget?.name}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <p className="text-xs text-muted-foreground">
+              Current rate: ₹
+              {rateTarget
+                ? currentServiceRate(rateTarget.id).toLocaleString("en-IN", {
+                    minimumFractionDigits: 2,
+                    maximumFractionDigits: 2,
+                  })
+                : "0.00"}
+              . Setting a new rate does not change any past usage revenue — it
+              only applies going forward.
+            </p>
+            <div className="space-y-1.5">
+              <Label className="text-xs">New Rate (₹) *</Label>
+              <Input
+                type="number"
+                min="0"
+                step="0.01"
+                value={newRate}
+                onChange={(e) => setNewRate(e.target.value)}
+                data-ocid="machine-detail.rate_dialog.rate.input"
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setRateTarget(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              disabled={isSavingRate}
+              onClick={handleSaveRate}
+              data-ocid="machine-detail.rate_dialog.save_button"
+            >
+              {isSavingRate ? "Saving..." : "Set Rate"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <ConfirmDeleteDialog
+        open={!!deleteDrawingTarget}
+        onOpenChange={(o) => !o && setDeleteDrawingTarget(null)}
+        title="Delete drawing?"
+        description={`"${deleteDrawingTarget?.fileName}" and all its saved views will be permanently deleted.`}
+        onConfirm={handleConfirmDrawingDelete}
+      />
+      <ConfirmDeleteDialog
+        open={!!deleteServiceRecordTarget}
+        onOpenChange={(o) => !o && setDeleteServiceRecordTarget(null)}
+        title="Delete service record?"
+        description="This service record will be permanently deleted."
+        onConfirm={() => {
+          if (deleteServiceRecordTarget) {
+            deleteServiceRecord(deleteServiceRecordTarget);
+            toast.success("Deleted");
+          }
+          setDeleteServiceRecordTarget(null);
+        }}
+      />
     </div>
   );
 }

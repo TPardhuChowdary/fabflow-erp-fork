@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import {
   Select,
   SelectContent,
@@ -44,9 +45,10 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import { DesignFilePreviewDialog } from "../components/DesignFilePreviewDialog";
 import { ProductionStageInspectionControl } from "../components/ProductionStageInspectionControl";
 import { ProjectItemsTab } from "../components/ProjectItemsTab";
@@ -78,9 +80,17 @@ import {
   updateOutsourcedWorkRemote,
 } from "../lib/outsourcedWorksApi";
 import {
+  addProjectDieRemote,
+  removeProjectDieRemote,
+} from "../lib/projectDiesApi";
+import {
   addProjectEmployeeRemote,
   removeProjectEmployeeRemote,
 } from "../lib/projectEmployeesApi";
+import {
+  addProjectMachineRemote,
+  removeProjectMachineRemote,
+} from "../lib/projectMachineryApi";
 import { updateProjectPurchaseOrderStatusRemote } from "../lib/purchaseOrdersApi";
 import { getCustomerVisibleName } from "../lib/utils";
 import { createVendorRemote } from "../lib/vendorsApi";
@@ -253,42 +263,33 @@ function SentToSelect({
 
   return (
     <>
-      <Select value={displayValue} onValueChange={handleSelect}>
-        <SelectTrigger
-          className="h-8 text-xs"
-          data-ocid={`project-detail.production.sent_to.${stageIdx + 1}`}
-        >
-          <SelectValue placeholder="Select...">
-            {vendorId === "inhouse" ? (
-              "In-house"
-            ) : vendorName ? (
-              vendorName
-            ) : (
-              <span className="text-muted-foreground">Select...</span>
-            )}
-          </SelectValue>
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="inhouse" className="text-xs font-medium">
-            🏭 In-house
-          </SelectItem>
-          {vendors.map((v) => (
-            <SelectItem key={v.id} value={v.id} className="text-xs">
-              {v.name}
-            </SelectItem>
-          ))}
-          {pCreateVendor && (
-            <div className="border-t border-border mt-1 pt-1">
-              <SelectItem
-                value="__add_new__"
-                className="text-xs text-primary font-medium"
-              >
-                + Add New Vendor
-              </SelectItem>
-            </div>
-          )}
-        </SelectContent>
-      </Select>
+      <SearchableSelect
+        value={displayValue}
+        onChange={handleSelect}
+        options={[
+          { value: "inhouse", label: "🏭 In-house" },
+          ...vendors.map((v) => ({
+            value: v.id,
+            label: v.name,
+            searchText: `${v.phone ?? ""} ${v.gstNumber ?? ""}`,
+          })),
+          ...(pCreateVendor
+            ? [{ value: "__add_new__", label: "+ Add New Vendor" }]
+            : []),
+        ]}
+        placeholder="Select..."
+        searchPlaceholder="Search vendors…"
+        emptyText="No vendors found."
+        className="h-8 text-xs"
+        data-ocid={`project-detail.production.sent_to.${stageIdx + 1}`}
+        renderOption={(o) =>
+          o.value === "__add_new__" ? (
+            <span className="text-primary font-medium">{o.label}</span>
+          ) : (
+            <span className="flex-1 truncate">{o.label}</span>
+          )
+        }
+      />
 
       <Dialog open={addModalOpen} onOpenChange={setAddModalOpen}>
         <DialogContent>
@@ -356,6 +357,10 @@ export function ProjectDetail({
     updateProject,
     updateProjectPO,
     employees,
+    machines,
+    dies,
+    billableServices,
+    machineServiceUsage,
     inventoryItems,
     materialUsages,
     addMaterialUsage,
@@ -399,6 +404,45 @@ export function ProjectDetail({
   const dView = canView(currentUser, "drawing_editor");
   const dEdit = canEdit(currentUser, "drawing_editor");
   const dDelete = canDelete(currentUser, "drawing_editor");
+  const revView = canView(currentUser, "machine_revenue");
+  // Machine/Service Revenue (Phase 40) — readonly, grouped and labeled
+  // by billable *service* name only, never by machine asset name (§17,
+  // §25). Reads machine_service_usage directly; never derived from or
+  // written by Assigned Machinery (§11, §22 — assignment != revenue).
+  const projectServiceRevenue = useMemo(() => {
+    const rows = (machineServiceUsage || []).filter(
+      (u) => u.projectId === projectId,
+    );
+    const byService = new Map<
+      string,
+      {
+        serviceName: string;
+        unit?: string;
+        totalQty: number;
+        totalRevenue: number;
+      }
+    >();
+    for (const u of rows) {
+      const svc = (billableServices || []).find(
+        (s) => s.id === u.billableServiceId,
+      );
+      const key = u.billableServiceId;
+      const existing = byService.get(key) ?? {
+        serviceName: svc?.name ?? "Unknown Service",
+        unit: svc?.unitLabel,
+        totalQty: 0,
+        totalRevenue: 0,
+      };
+      existing.totalQty += u.quantity;
+      existing.totalRevenue += u.revenueAmount;
+      byService.set(key, existing);
+    }
+    return Array.from(byService.values());
+  }, [machineServiceUsage, billableServices, projectId]);
+  const projectServiceRevenueTotal = projectServiceRevenue.reduce(
+    (sum, r) => sum + r.totalRevenue,
+    0,
+  );
   const {
     drawings: allDrawings,
     loaded: drawingsLoaded,
@@ -490,6 +534,16 @@ export function ProjectDetail({
   const userId = currentUser?.id ?? "";
   const userName = currentUser?.username ?? "unknown";
 
+  const [deleteDrawingTarget, setDeleteDrawingTarget] = useState<
+    (typeof allDrawings)[number] | null
+  >(null);
+  const [deleteOutsourcedTarget, setDeleteOutsourcedTarget] = useState<
+    string | null
+  >(null);
+  const [deletePurchaseTarget, setDeletePurchaseTarget] = useState<
+    string | null
+  >(null);
+
   const handleDrawingDelete = async (drawing: (typeof allDrawings)[number]) => {
     const children = await getChildDrawings(drawing.id);
     if (children.length > 0) {
@@ -498,10 +552,12 @@ export function ProjectDetail({
       );
       return;
     }
-    if (
-      !window.confirm(`Delete "${drawing.fileName}" and all its saved views?`)
-    )
-      return;
+    setDeleteDrawingTarget(drawing);
+  };
+
+  const handleConfirmDrawingDelete = async () => {
+    const drawing = deleteDrawingTarget;
+    if (!drawing) return;
     await deleteDrawingDoc(drawing.id);
     addAuditLog({
       module: "drawing_editor",
@@ -511,6 +567,7 @@ export function ProjectDetail({
       changedBy: userName,
     });
     toast.success("Drawing deleted");
+    setDeleteDrawingTarget(null);
   };
 
   // Legacy role aliases (kept for backward compat) - now derived from permissions
@@ -1095,29 +1152,52 @@ export function ProjectDetail({
   /** "Edit" on a Design File — the original upload is never touched.
    * Resolves the file's existing Master Drawing (if this is a repeat
    * click) or promotes it into a new one, then opens the Engineering
-   * Drawing Editor in Context Mode already pointed at it. */
+   * Drawing Editor in Context Mode already pointed at it.
+   *
+   * Phase 34 (Universal Edit) — PDF, DXF, and PNG/JPG/JPEG all route
+   * through this exact same Master Drawing + Drawing Editor pipeline;
+   * `sourceKind` only changes how the editor's loading step interprets
+   * the blob (see drawingEditor/pages/DrawingEditorPage.tsx's
+   * openDrawing/loadPage). Every other format (DOCX, XLSX/XLS, CSV, TXT,
+   * and anything else) has no editing surface at all — per the approved
+   * scope, Edit simply opens the same existing Preview those types
+   * already use, with a toast explaining why, rather than doing nothing. */
   const handleEditDesignFile = async (f: DesignFile) => {
-    if (
-      f.fileType !== "application/pdf" &&
-      !f.fileName.toLowerCase().endsWith(".pdf")
-    ) {
+    const lowerName = f.fileName.toLowerCase();
+    const isPdf =
+      f.fileType === "application/pdf" || lowerName.endsWith(".pdf");
+    const isDxf = lowerName.endsWith(".dxf");
+    const isImage =
+      f.fileType.startsWith("image/") ||
+      lowerName.endsWith(".png") ||
+      lowerName.endsWith(".jpg") ||
+      lowerName.endsWith(".jpeg");
+
+    if (!isPdf && !isDxf && !isImage) {
       toast.error(
-        "Only PDF design files can be opened in the Engineering Drawing Editor.",
+        "Editing isn't available for this file type — opening Preview instead.",
       );
+      setPreviewFile(f);
       return;
     }
+
     try {
       const blob = await (await fetch(f.fileData)).blob();
-      const pdf = await loadPdf(blob);
+      let numPages = 1;
+      if (isPdf) {
+        const pdf = await loadPdf(blob);
+        numPages = pdf.numPages;
+      }
       const master = await findOrCreateMasterDrawing({
         sourceDesignFileId: f.id,
         fileName: f.fileName,
         pdfBlob: blob,
-        numPages: pdf.numPages,
+        numPages,
         uploadedBy: userId,
         uploadedByName: userName,
         ownerType: "project",
         ownerId: projectId,
+        sourceKind: isPdf ? "pdf" : isDxf ? "dxf" : "image",
       });
       onOpenDrawingEditor?.({ projectId, drawingId: master.id });
     } catch {
@@ -1324,38 +1404,50 @@ export function ProjectDetail({
     }
   };
 
-  const handleDeleteOutsourced = async (id: string) => {
+  const handleDeleteOutsourced = (id: string) => {
     if (!pDelete) {
       alert("Access restricted");
       return;
     }
-    if (!confirm("Delete this outsourced work entry?")) return;
+    setDeleteOutsourcedTarget(id);
+  };
+
+  const handleConfirmDeleteOutsourced = async () => {
+    const id = deleteOutsourcedTarget;
+    if (!id) return;
     const result = await deleteOutsourcedWorkRemote(id);
     if (result.status === "unauthenticated") {
       toast.error(
         "Not signed in to the server - outsourced work was not deleted",
       );
+      setDeleteOutsourcedTarget(null);
       return;
     }
     if (result.status === "denied" || result.status === "error") {
       toast.error(result.error ?? "Could not delete outsourced work");
+      setDeleteOutsourcedTarget(null);
       return;
     }
     deleteOutsourcedWork(id);
     toast.success("Outsourced work deleted");
+    setDeleteOutsourcedTarget(null);
   };
 
-  const _handleSaveProduction = () => {
+  const _handleSaveProduction = async () => {
     const prod: ProjectProduction = {
       id: existingProduction?.id ?? `pp-${Date.now()}`,
       projectId,
       stages,
     };
-    upsertProjectProduction(prod);
-    toast.success("Production status saved");
+    const ok = await upsertProjectProduction(prod);
+    if (ok) {
+      toast.success("Production status saved");
+    } else {
+      toast.error("Could not save production status - please try again");
+    }
   };
 
-  const handleSendMaterial = () => {
+  const handleSendMaterial = async () => {
     if (!sendMaterialDialog) return;
     if (sendForm.quantity <= 0) {
       toast.error("Enter a valid quantity");
@@ -1369,13 +1461,21 @@ export function ProjectDetail({
       sentToVendorId: sendForm.vendorId,
       sentToVendorName: sendForm.vendorName,
     };
-    addStageTransaction(projectId, sendMaterialDialog.stageIdx, tx);
+    const ok = await addStageTransaction(
+      projectId,
+      sendMaterialDialog.stageIdx,
+      tx,
+    );
+    if (!ok) {
+      toast.error("Could not record material sent - please try again");
+      return;
+    }
     setSendMaterialDialog(null);
     setSendForm({ quantity: 0, dateTime: "", vendorId: "", vendorName: "" });
     toast.success("Material sent recorded");
   };
 
-  const handleReceiveMaterial = () => {
+  const handleReceiveMaterial = async () => {
     if (!receiveMaterialDialog) return;
     if (receiveForm.quantity <= 0) {
       toast.error("Enter a valid quantity");
@@ -1398,13 +1498,21 @@ export function ProjectDetail({
       quantity: receiveForm.quantity,
       dateTime: receiveForm.dateTime || new Date().toISOString(),
     };
-    addStageTransaction(projectId, receiveMaterialDialog.stageIdx, tx);
+    const ok = await addStageTransaction(
+      projectId,
+      receiveMaterialDialog.stageIdx,
+      tx,
+    );
+    if (!ok) {
+      toast.error("Could not record material received - please try again");
+      return;
+    }
     setReceiveMaterialDialog(null);
     setReceiveForm({ quantity: 0, dateTime: "" });
     toast.success("Material received recorded");
   };
 
-  const handleAddStage = () => {
+  const handleAddStage = async () => {
     if (!newStageName.trim()) {
       toast.error("Enter a stage name");
       return;
@@ -1427,17 +1535,25 @@ export function ProjectDetail({
       // touched by reorder/edit/remove.
       stageId: crypto.randomUUID(),
     };
-    updateProjectStagesV2(projectId, [...v2Stages, newStage]);
+    const ok = await updateProjectStagesV2(projectId, [...v2Stages, newStage]);
+    if (!ok) {
+      toast.error("Could not add stage - please try again");
+      return;
+    }
     setAddStageDialog(false);
     setNewStageName("");
     setNewStageRequiresMaterial(false);
     toast.success("Stage added");
   };
 
-  const handleRemoveStage = (idx: number) => {
+  const handleRemoveStage = async (idx: number) => {
     const removedStage = v2Stages[idx];
     const updated = v2Stages.filter((_, i) => i !== idx);
-    updateProjectStagesV2(projectId, updated);
+    const ok = await updateProjectStagesV2(projectId, updated);
+    if (!ok) {
+      toast.error("Could not remove stage - please try again");
+      return;
+    }
     toast.success("Stage removed");
 
     // Phase 32 (Task #174) - approved rule: deleting a Production Stage
@@ -1457,15 +1573,16 @@ export function ProjectDetail({
     }
   };
 
-  const handleMoveStage = (idx: number, dir: "up" | "down") => {
+  const handleMoveStage = async (idx: number, dir: "up" | "down") => {
     const updated = [...v2Stages];
     const target = dir === "up" ? idx - 1 : idx + 1;
     if (target < 0 || target >= updated.length) return;
     [updated[idx], updated[target]] = [updated[target], updated[idx]];
-    updateProjectStagesV2(projectId, updated);
+    const ok = await updateProjectStagesV2(projectId, updated);
+    if (!ok) toast.error("Could not reorder stages - please try again");
   };
 
-  const handleCompleteStage = (idx: number) => {
+  const handleCompleteStage = async (idx: number) => {
     const stage = v2Stages[idx];
     // Phase 32 (Task #176) - QMS inspection gate: an additional condition
     // alongside whatever validation already applies to this stage. Follows
@@ -1494,8 +1611,12 @@ export function ProjectDetail({
     const updated = v2Stages.map((s, i) =>
       i === idx ? { ...s, status: "Completed" as ProjectStageStatus } : s,
     );
-    updateProjectStagesV2(projectId, updated);
-    toast.success("Stage marked complete");
+    const ok = await updateProjectStagesV2(projectId, updated);
+    if (ok) {
+      toast.success("Stage marked complete");
+    } else {
+      toast.error("Could not save stage completion - please try again");
+    }
   };
 
   const handleSaveDelivery = () => {
@@ -2269,8 +2390,189 @@ export function ProjectDetail({
                   </div>
                 </div>
               )}
+              {isAdmin && (
+                <div className="sm:col-span-2 pt-2 border-t border-border">
+                  <p className="text-xs text-muted-foreground uppercase tracking-wide mb-2">
+                    Assigned Machinery
+                  </p>
+                  <p className="text-[11px] text-muted-foreground mb-2">
+                    Planning only — assigning a machine here does not create
+                    usage or revenue.
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {machines.map((m) => {
+                      const isAssigned =
+                        project.assignedMachineIds?.includes(m.id) ?? false;
+                      return (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={async () => {
+                            // Diff-based single-pair write, never a
+                            // wholesale replace of the join table (see
+                            // lib/projectMachineryApi.ts).
+                            const result = isAssigned
+                              ? await removeProjectMachineRemote(
+                                  project.id,
+                                  m.id,
+                                )
+                              : await addProjectMachineRemote(project.id, m.id);
+                            if (result.status === "unauthenticated") {
+                              toast.error(
+                                "Not signed in to the server - assignment was not saved",
+                              );
+                              return;
+                            }
+                            if (
+                              result.status === "denied" ||
+                              result.status === "error"
+                            ) {
+                              toast.error(
+                                result.error ??
+                                  "Could not save machine assignment",
+                              );
+                              return;
+                            }
+                            const current = project.assignedMachineIds ?? [];
+                            const updated = isAssigned
+                              ? current.filter((id) => id !== m.id)
+                              : [...current, m.id];
+                            updateProject({
+                              ...project,
+                              assignedMachineIds: updated,
+                            });
+                          }}
+                          className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                            isAssigned
+                              ? "bg-primary text-primary-foreground border-primary"
+                              : "bg-background text-muted-foreground border-border hover:border-primary hover:text-primary"
+                          }`}
+                          data-ocid="project-detail.assign-machine.toggle"
+                        >
+                          {m.name} ({m.machineCode})
+                        </button>
+                      );
+                    })}
+                    {machines.length === 0 && (
+                      <p className="text-xs text-muted-foreground">
+                        No machines registered
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+              {isAdmin && (
+                <div className="sm:col-span-2 pt-2 border-t border-border">
+                  <p className="text-xs text-muted-foreground uppercase tracking-wide mb-2">
+                    Assigned Dies/Tooling
+                  </p>
+                  <p className="text-[11px] text-muted-foreground mb-2">
+                    Dies are reusable — assigning here is a planning reference
+                    only, not ownership.
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {dies.map((d) => {
+                      const isAssigned =
+                        project.assignedDieIds?.includes(d.id) ?? false;
+                      return (
+                        <button
+                          key={d.id}
+                          type="button"
+                          onClick={async () => {
+                            // Diff-based single-pair write, never a
+                            // wholesale replace of the join table (see
+                            // lib/projectDiesApi.ts).
+                            const result = isAssigned
+                              ? await removeProjectDieRemote(project.id, d.id)
+                              : await addProjectDieRemote(project.id, d.id);
+                            if (result.status === "unauthenticated") {
+                              toast.error(
+                                "Not signed in to the server - assignment was not saved",
+                              );
+                              return;
+                            }
+                            if (
+                              result.status === "denied" ||
+                              result.status === "error"
+                            ) {
+                              toast.error(
+                                result.error ?? "Could not save die assignment",
+                              );
+                              return;
+                            }
+                            const current = project.assignedDieIds ?? [];
+                            const updated = isAssigned
+                              ? current.filter((id) => id !== d.id)
+                              : [...current, d.id];
+                            updateProject({
+                              ...project,
+                              assignedDieIds: updated,
+                            });
+                          }}
+                          className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                            isAssigned
+                              ? "bg-primary text-primary-foreground border-primary"
+                              : "bg-background text-muted-foreground border-border hover:border-primary hover:text-primary"
+                          }`}
+                          data-ocid="project-detail.assign-die.toggle"
+                        >
+                          {d.name} ({d.dieCode})
+                        </button>
+                      );
+                    })}
+                    {dies.length === 0 && (
+                      <p className="text-xs text-muted-foreground">
+                        No dies registered
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
             </CardContent>
           </Card>
+
+          {revView && projectServiceRevenue.length > 0 && (
+            <Card data-ocid="project-detail.service_revenue.card">
+              <CardContent className="pt-6">
+                <p className="text-xs text-muted-foreground uppercase tracking-wide mb-1">
+                  Machine / Service Revenue
+                </p>
+                <p className="text-[11px] text-muted-foreground mb-3">
+                  Revenue only — separate from Profit &amp; Costing. Labeled by
+                  billable service, never by machine asset.
+                </p>
+                <div className="space-y-2">
+                  {projectServiceRevenue.map((r) => (
+                    <div
+                      key={r.serviceName}
+                      className="flex items-center justify-between text-sm border-b border-border/60 pb-1.5 last:border-0"
+                    >
+                      <span>
+                        {r.serviceName} — {r.totalQty} {r.unit || ""}
+                      </span>
+                      <span className="font-medium text-green-700">
+                        ₹
+                        {r.totalRevenue.toLocaleString("en-IN", {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        })}
+                      </span>
+                    </div>
+                  ))}
+                  <div className="flex items-center justify-between text-sm font-semibold pt-1">
+                    <span>Total</span>
+                    <span className="text-green-700">
+                      ₹
+                      {projectServiceRevenueTotal.toLocaleString("en-IN", {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
+                      })}
+                    </span>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
         </TabsContent>
 
         {/* Tab 2 — Design Files */}
@@ -2359,12 +2661,32 @@ export function ProjectDetail({
                               variant="ghost"
                               size="sm"
                               className="h-6 px-2"
-                              onClick={() => setPreviewFile(f)}
-                              title="Preview Original"
+                              onClick={() =>
+                                master
+                                  ? setPreviewWorkDrawing(master)
+                                  : setPreviewFile(f)
+                              }
+                              title={
+                                master
+                                  ? "Preview — latest saved edited version"
+                                  : "Preview Original"
+                              }
                               data-ocid={`project-detail.design.preview_button.${i + 1}`}
                             >
                               <Eye className="w-3.5 h-3.5" />
                             </Button>
+                            {master && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-6 px-2"
+                                onClick={() => setPreviewFile(f)}
+                                title="Preview Original — untouched uploaded file"
+                                data-ocid={`project-detail.design.preview_original_button.${i + 1}`}
+                              >
+                                <FileText className="w-3.5 h-3.5" />
+                              </Button>
+                            )}
                             {dEdit && (
                               <Button
                                 variant="ghost"
@@ -2778,11 +3100,7 @@ export function ProjectDetail({
                                 variant="ghost"
                                 size="icon"
                                 className="h-7 w-7 text-destructive hover:text-destructive"
-                                onClick={() => {
-                                  if (confirm("Delete this purchase record?")) {
-                                    deleteMaterialPurchase(m.id);
-                                  }
-                                }}
+                                onClick={() => setDeletePurchaseTarget(m.id)}
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
                               </Button>
@@ -3254,19 +3572,13 @@ export function ProjectDetail({
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="space-y-1.5">
                     <Label>Vendor Name *</Label>
-                    <select
+                    <VendorSelect
                       value={outForm.vendorId || ""}
-                      onChange={(e) => handleVendorSelect(e.target.value)}
+                      onChange={(id) => handleVendorSelect(id)}
+                      placeholder="Select Vendor"
+                      className="w-full"
                       data-ocid="project-detail.outsourced.input"
-                      className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                    >
-                      <option value="">Select Vendor</option>
-                      {vendors.map((v) => (
-                        <option key={v.id} value={v.id}>
-                          {v.name}
-                        </option>
-                      ))}
-                    </select>
+                    />
                   </div>
                   <div className="space-y-1.5">
                     <Label>Material Sent</Label>
@@ -3698,7 +4010,7 @@ export function ProjectDetail({
                                 <Label className="text-xs">Status</Label>
                                 <Select
                                   value={stage.status}
-                                  onValueChange={(v) => {
+                                  onValueChange={async (v) => {
                                     // Phase 32 (Task #176) - "Completed" is
                                     // the one transition the QMS gate can
                                     // block, so route it through the same
@@ -3717,7 +4029,15 @@ export function ProjectDetail({
                                           }
                                         : s,
                                     );
-                                    updateProjectStagesV2(projectId, updated);
+                                    const ok = await updateProjectStagesV2(
+                                      projectId,
+                                      updated,
+                                    );
+                                    if (!ok) {
+                                      toast.error(
+                                        "Could not save stage status - please try again",
+                                      );
+                                    }
                                   }}
                                 >
                                   <SelectTrigger className="h-8 text-xs w-40">
@@ -3791,27 +4111,42 @@ export function ProjectDetail({
                                         {label}
                                       </p>
                                       <input
+                                        key={`${stage.stageId ?? idx}-${field}`}
                                         type="number"
                                         min={0}
                                         className="w-full bg-transparent text-sm font-bold border-none outline-none p-0"
-                                        value={stage[field] ?? 0}
-                                        onChange={(e) => {
+                                        defaultValue={stage[field] ?? 0}
+                                        // Fires on blur, not on every
+                                        // keystroke - now that this goes
+                                        // through the remote-first
+                                        // updateProjectStagesV2, awaiting a
+                                        // network round-trip per digit
+                                        // typed would make the field
+                                        // lag/drop keystrokes (same fix as
+                                        // the Notes textarea above).
+                                        onBlur={async (e) => {
+                                          const nextValue = Math.max(
+                                            0,
+                                            Number(e.target.value),
+                                          );
+                                          if ((stage[field] ?? 0) === nextValue)
+                                            return;
                                           const updated = v2Stages.map(
                                             (s, i) =>
                                               i === idx
-                                                ? {
-                                                    ...s,
-                                                    [field]: Math.max(
-                                                      0,
-                                                      Number(e.target.value),
-                                                    ),
-                                                  }
+                                                ? { ...s, [field]: nextValue }
                                                 : s,
                                           );
-                                          updateProjectStagesV2(
-                                            projectId,
-                                            updated,
-                                          );
+                                          const ok =
+                                            await updateProjectStagesV2(
+                                              projectId,
+                                              updated,
+                                            );
+                                          if (!ok) {
+                                            toast.error(
+                                              `Could not save ${label} - please try again`,
+                                            );
+                                          }
                                         }}
                                       />
                                     </div>
@@ -3902,17 +4237,29 @@ export function ProjectDetail({
                           <div className="space-y-1">
                             <Label className="text-xs">Notes</Label>
                             <Textarea
+                              key={stage.stageId ?? idx}
                               rows={2}
                               className="text-xs"
                               placeholder="Notes for this stage..."
-                              value={stage.notes}
-                              onChange={(e) => {
+                              defaultValue={stage.notes}
+                              // Fires on blur, not on every keystroke - see
+                              // the matching fix earlier in this file.
+                              onBlur={async (e) => {
+                                if (stage.notes === e.target.value) return;
                                 const updated = v2Stages.map((s, i) =>
                                   i === idx
                                     ? { ...s, notes: e.target.value }
                                     : s,
                                 );
-                                updateProjectStagesV2(projectId, updated);
+                                const ok = await updateProjectStagesV2(
+                                  projectId,
+                                  updated,
+                                );
+                                if (!ok) {
+                                  toast.error(
+                                    "Could not save notes - please try again",
+                                  );
+                                }
                               }}
                             />
                           </div>
@@ -4001,7 +4348,13 @@ export function ProjectDetail({
                         ? { ...s, status: "Completed" as ProjectStageStatus }
                         : s,
                     );
-                    updateProjectStagesV2(projectId, updated);
+                    const ok = await updateProjectStagesV2(projectId, updated);
+                    if (!ok) {
+                      toast.error(
+                        "Could not save stage completion - please try again",
+                      );
+                      return false;
+                    }
                     toast.success(
                       "Stage marked complete (supervisor override recorded)",
                     );
@@ -5935,6 +6288,32 @@ export function ProjectDetail({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={!!deleteDrawingTarget}
+        onOpenChange={(o) => !o && setDeleteDrawingTarget(null)}
+        title="Delete drawing?"
+        description={`"${deleteDrawingTarget?.fileName}" and all its saved views will be permanently deleted.`}
+        onConfirm={handleConfirmDrawingDelete}
+      />
+      <ConfirmDeleteDialog
+        open={!!deleteOutsourcedTarget}
+        onOpenChange={(o) => !o && setDeleteOutsourcedTarget(null)}
+        title="Delete outsourced work entry?"
+        description="This outsourced work record will be permanently deleted."
+        onConfirm={handleConfirmDeleteOutsourced}
+      />
+      <ConfirmDeleteDialog
+        open={!!deletePurchaseTarget}
+        onOpenChange={(o) => !o && setDeletePurchaseTarget(null)}
+        title="Delete purchase record?"
+        description="This material purchase record will be permanently deleted."
+        onConfirm={() => {
+          if (deletePurchaseTarget)
+            deleteMaterialPurchase(deletePurchaseTarget);
+          setDeletePurchaseTarget(null);
+        }}
+      />
     </div>
   );
 }

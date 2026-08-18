@@ -104,6 +104,7 @@ function toInvoiceItemFields(item: InvLineItem, invoiceId: string) {
     hsn: item.hsn,
     quantity: item.qty,
     price: item.rate,
+    project_id: item.projectId || null,
   };
 }
 

@@ -117,20 +117,81 @@ async function requireSession() {
   return { ok: true as const, client };
 }
 
+// Phase L.1 — die_code now carries a real UNIQUE (organization_id,
+// die_code) constraint (see database/phase-l1/), mirroring
+// uq_machines_org_code/uq_tools_org_code exactly. computeNextDieCode is
+// a pure calculation over supplied existing codes, matching store.ts's
+// generateDieCode() format (DIE-{n}, padded 3). store.ts's own
+// generator is left unchanged; this function is only used here, to
+// re-derive a fresh candidate from actual server state on a 23505
+// conflict.
+export function computeNextDieCode(existingCodes: string[]): string {
+  const nums = existingCodes.map((c) => {
+    const m = (c || "").match(/DIE-(\d+)/);
+    return m ? Number.parseInt(m[1], 10) : 0;
+  });
+  const next = nums.length > 0 ? Math.max(...nums) + 1 : 1;
+  return `DIE-${String(next).padStart(3, "0")}`;
+}
+
+async function fetchExistingDieCodes(
+  client: ReturnType<typeof getSupabase>,
+): Promise<string[] | null> {
+  const { data, error } = await client.from("dies").select("die_code");
+  if (error || !data) return null;
+  return (data as unknown as { die_code: string }[]).map((r) => r.die_code);
+}
+
+function isDieCodeConflict(error: { code?: string; message?: string }) {
+  return (
+    error.code === "23505" &&
+    (error.message?.includes("uq_dies_org_code") ||
+      error.message?.includes("die_code"))
+  );
+}
+
+const MAX_DIE_CODE_ATTEMPTS = 3;
+
 export async function createDieRemote(
   die: Omit<Die, "id">,
 ): Promise<WriteResult<Die>> {
   const gate = await requireSession();
   if (!gate.ok) return gate.result;
+  const { client } = gate;
 
-  const { data, error } = await gate.client
-    .from("dies")
-    .insert(toDieFields(die))
-    .select(SELECT_COLUMNS)
-    .single();
+  let candidate = die;
 
-  if (error) return { status: "error", error: error.message };
-  return { status: "success", data: rowToDie(data as unknown as DieRow) };
+  for (let attempt = 1; attempt <= MAX_DIE_CODE_ATTEMPTS; attempt++) {
+    const { data, error } = await client
+      .from("dies")
+      .insert(toDieFields(candidate))
+      .select(SELECT_COLUMNS)
+      .single();
+
+    if (!error) {
+      return { status: "success", data: rowToDie(data as unknown as DieRow) };
+    }
+
+    if (!isDieCodeConflict(error)) {
+      return { status: "error", error: error.message };
+    }
+
+    if (attempt === MAX_DIE_CODE_ATTEMPTS) {
+      break;
+    }
+
+    const freshCodes = await fetchExistingDieCodes(client);
+    if (freshCodes === null) {
+      break;
+    }
+    candidate = { ...candidate, dieCode: computeNextDieCode(freshCodes) };
+  }
+
+  return {
+    status: "error",
+    error:
+      "This die code was just used by another session. Please try saving again.",
+  };
 }
 
 export async function updateDieRemote(die: Die): Promise<WriteResult<Die>> {

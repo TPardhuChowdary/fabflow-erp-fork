@@ -16,7 +16,7 @@
 // permission), exposed here as updateBomRequisitionStatusRemote.
 
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
-import type { BomItem, BomRequisition } from "@/types";
+import type { BomItem, BomRequisition, PurchaseAttachment } from "@/types";
 import {
   BOM_ITEM_COLUMNS,
   BOM_REQUISITION_COLUMNS,
@@ -148,4 +148,43 @@ export async function updateBomRequisitionStatusRemote(
     };
   }
   return { status: "success", data: transformBomRequisitionRow(rows[0]) };
+}
+
+// Monster-1 — wires up record_material_purchase(), a complete,
+// permission-checked RPC that already existed in the database (find-or-
+// create the inventory item by name, record the purchase, increase
+// stock via the same trigger recordInventoryPurchase uses, and — its
+// one extra behavior — flip the matching Pending bom_requisitions row
+// for this exact project+item to "Ready to Complete" once the new stock
+// covers its shortage_qty) but had zero callers anywhere in the
+// frontend, so a requisition could never actually reach "Ready to
+// Complete" and the page's own "Mark as Completed" button could never
+// appear. Confirmed via full-repo grep before writing this — not
+// assumed missing.
+export async function recordMaterialPurchaseRemote(purchase: {
+  projectId: string;
+  materialType: string;
+  thickness?: string;
+  quantity: number;
+  unit: string;
+  supplierName?: string;
+  vendorId?: string;
+  purchaseDate: string;
+  attachments?: PurchaseAttachment[];
+}): Promise<WriteResult<{ purchaseId: string }>> {
+  const gate = await requireSession();
+  if (!gate.ok) return gate.result;
+  const { data, error } = await gate.client.rpc("record_material_purchase", {
+    p_project_id: purchase.projectId,
+    p_material_type: purchase.materialType,
+    p_thickness: purchase.thickness || null,
+    p_quantity: purchase.quantity,
+    p_unit: purchase.unit,
+    p_supplier_name: purchase.supplierName || null,
+    p_vendor_id: purchase.vendorId || null,
+    p_purchase_date: purchase.purchaseDate,
+    p_attachments: purchase.attachments || [],
+  });
+  if (error) return { status: "error", error: error.message };
+  return { status: "success", data: { purchaseId: data as string } };
 }

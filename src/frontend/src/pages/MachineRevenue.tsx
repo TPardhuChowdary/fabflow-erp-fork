@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { RowActions } from "@/components/ui/row-actions";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import {
   Select,
@@ -48,6 +49,7 @@ import {
   createServiceUsageRemote,
   deleteBillableServiceRemote,
   deleteServiceUsageRemote,
+  getCurrentServiceRate,
   updateBillableServiceRemote,
   updateServiceUsageRemote,
 } from "../lib/machineRevenueApi";
@@ -187,12 +189,8 @@ export function MachineRevenue() {
     [billableServices],
   );
 
-  const currentRate = (serviceId: string): number => {
-    const rates = (machineServiceRates || [])
-      .filter((r) => r.billableServiceId === serviceId)
-      .sort((a, b) => b.effectiveFrom - a.effectiveFrom);
-    return rates[0]?.rate ?? 0;
-  };
+  const currentRate = (serviceId: string): number =>
+    getCurrentServiceRate(serviceId, machineServiceRates || []);
 
   // Phase 43 — Rate History UX. Pure derivation over the already-loaded,
   // insert-only machineServiceRates: never a new fetch, never a new
@@ -548,6 +546,52 @@ export function MachineRevenue() {
     );
   }
 
+  const ServiceRowActions = ({
+    s,
+    i,
+  }: {
+    s: BillableService;
+    i: number;
+  }) => (
+    <RowActions
+      primary={[
+        ...(pManageRates
+          ? [
+              {
+                label: "Change Rate",
+                icon: SlidersHorizontal,
+                onClick: () => openChangeRate(s),
+                "data-ocid": `machine_revenue.change_rate_button.${i + 1}`,
+              },
+            ]
+          : []),
+        ...(pEdit
+          ? [
+              {
+                label: "Edit",
+                icon: Pencil,
+                onClick: () => openEditService(s),
+                "data-ocid": `machine_revenue.edit_service_button.${i + 1}`,
+              },
+            ]
+          : []),
+      ]}
+      overflow={[
+        ...(pDelete
+          ? [
+              {
+                label: "Delete",
+                icon: Trash2,
+                destructive: true,
+                onClick: () => setDeleteServiceTarget(s),
+                "data-ocid": `machine_revenue.delete_service_button.${i + 1}`,
+              },
+            ]
+          : []),
+      ]}
+    />
+  );
+
   return (
     <div className="p-6 space-y-6" data-ocid="machine_revenue.panel">
       <div className="flex items-center justify-between">
@@ -607,7 +651,7 @@ export function MachineRevenue() {
                 <div className="text-xs text-muted-foreground uppercase font-semibold">
                   Total Revenue
                 </div>
-                <div className="text-2xl font-bold mt-1 text-green-600">
+                <div className="text-2xl font-bold mt-1 text-success">
                   ₹{fmt(grandTotalRevenue)}
                 </div>
               </div>
@@ -701,7 +745,7 @@ export function MachineRevenue() {
                           <td className="p-2 text-muted-foreground">
                             {totalQty} {s.unitLabel} ({usageCount})
                           </td>
-                          <td className="p-2 font-semibold text-green-700">
+                          <td className="p-2 font-semibold text-success">
                             ₹{fmt(totalRevenue)}
                           </td>
                           <td className="p-2">
@@ -796,41 +840,7 @@ export function MachineRevenue() {
                         </td>
                         <td className="p-2">₹{fmt(currentRate(s.id))}</td>
                         <td className="p-2">
-                          <div className="flex items-center gap-1">
-                            {pManageRates && (
-                              <button
-                                type="button"
-                                className="p-1 rounded hover:bg-muted transition-colors"
-                                onClick={() => openChangeRate(s)}
-                                title="Change rate"
-                                data-ocid={`machine_revenue.change_rate_button.${i + 1}`}
-                              >
-                                <SlidersHorizontal className="w-3.5 h-3.5 text-muted-foreground hover:text-foreground" />
-                              </button>
-                            )}
-                            {pEdit && (
-                              <button
-                                type="button"
-                                className="p-1 rounded hover:bg-muted transition-colors"
-                                onClick={() => openEditService(s)}
-                                title="Edit service"
-                                data-ocid={`machine_revenue.edit_service_button.${i + 1}`}
-                              >
-                                <Pencil className="w-3.5 h-3.5 text-muted-foreground hover:text-foreground" />
-                              </button>
-                            )}
-                            {pDelete && (
-                              <button
-                                type="button"
-                                className="p-1 rounded hover:bg-muted transition-colors"
-                                onClick={() => setDeleteServiceTarget(s)}
-                                title="Delete service"
-                                data-ocid={`machine_revenue.delete_service_button.${i + 1}`}
-                              >
-                                <Trash2 className="w-3.5 h-3.5 text-muted-foreground hover:text-destructive" />
-                              </button>
-                            )}
-                          </div>
+                          <ServiceRowActions s={s} i={i} />
                         </td>
                       </tr>
                     ))}
@@ -1141,7 +1151,7 @@ export function MachineRevenue() {
               <div className="flex justify-between text-sm font-semibold">
                 <span>Revenue</span>
                 <span
-                  className="text-green-700"
+                  className="text-success"
                   data-ocid="machine_revenue.usage_form.revenue_preview"
                 >
                   ₹{fmt(usageRevenuePreview)}
@@ -1245,7 +1255,7 @@ export function MachineRevenue() {
                               {u.quantity} {u.unit}
                             </td>
                             <td className="p-2">₹{fmt(u.rateApplied)}</td>
-                            <td className="p-2 font-medium text-green-700">
+                            <td className="p-2 font-medium text-success">
                               ₹{fmt(u.revenueAmount)}
                             </td>
                             <td className="p-2">

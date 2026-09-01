@@ -1,12 +1,20 @@
 import { Toaster } from "@/components/ui/sonner";
 import { useEffect, useState } from "react";
 import { AuthProvider, useAuth } from "./AuthContext";
+import {
+  type WorkspaceRecordType,
+  useRecentWorkspaces,
+} from "./RecentWorkspacesContext";
+import type { LlmMessage } from "./agent/llm/client";
+import type { PendingToolCall } from "./agent/llm/orchestrator";
 import { ForcePasswordChangeScreen } from "./components/ForcePasswordChangeScreen";
 import { InvoicePrintView } from "./components/InvoicePrintView";
 import { Layout } from "./components/Layout";
 import { QuotationPrintView } from "./components/QuotationPrintView";
 import { DrawingEditorPage } from "./drawingEditor/pages/DrawingEditorPage";
 import { useSupabaseHydration } from "./hooks/useSupabaseHydration";
+import { AgentPage } from "./pages/AgentPage";
+import type { AiChatEntry } from "./pages/AgentPage";
 import CompanyPOs from "./pages/CompanyPOs";
 import { CustomerHistory } from "./pages/CustomerHistory";
 import { Customers } from "./pages/Customers";
@@ -18,6 +26,7 @@ import { Employees } from "./pages/Employees";
 import { ExportEngine } from "./pages/ExportEngine";
 import { Inventory } from "./pages/Inventory";
 import { Invoices } from "./pages/Invoices";
+import { JobCards } from "./pages/JobCards";
 import { Ledger } from "./pages/Ledger";
 import { LoginPage } from "./pages/LoginPage";
 import { MachineDetail } from "./pages/MachineDetail";
@@ -37,6 +46,15 @@ import { ScrapManagement } from "./pages/ScrapManagement";
 import { Settings } from "./pages/Settings";
 import { Tools } from "./pages/Tools";
 import { Vendors } from "./pages/Vendors";
+import { DesignShowcase } from "./pages/design-lab/DesignShowcase";
+import { DesignArchive } from "./pages/design-lab/archive/DesignArchive";
+import { StyleShowcase } from "./pages/design-lab/stylekit/StyleShowcase";
+import { FinalPrototype } from "./pages/design-lab/uxlab/FinalPrototype";
+import { UxLabShowcase } from "./pages/design-lab/uxlab/UxLabShowcase";
+import { UxDecisionLab } from "./pages/design-lab/uxlab/decisionlab/UxDecisionLab";
+import { UxImplementationLab } from "./pages/design-lab/uxlab/implementationlab/UxImplementationLab";
+import { VisualSystemLab } from "./pages/design-lab/uxlab/visuallab/VisualSystemLab";
+import { ExplorationShowcase } from "./pages/design-lab/v2/ExplorationShowcase";
 import { canView } from "./permissions";
 import { InspectionSheetsList } from "./qms/pages/InspectionSheetsList";
 import { InspectorDashboard } from "./qms/pages/InspectorDashboard";
@@ -79,6 +97,28 @@ function AppInner() {
     tab?: string;
     highlightId?: string;
   } | null>(null);
+  // Workspaces feature (see chat) — pushRecent is called from the one
+  // navigateToRecord chokepoint below. The visible sidebar Workspaces
+  // section reads the same shared context directly in Layout.tsx (no
+  // prop-drilling needed - it's a real React Context, not local state).
+  const { pushRecent } = useRecentWorkspaces();
+
+  // AI Agent redesign (see chat) — the AI panel's conversation state,
+  // lifted here (same pattern as selectedProjectId etc. above) so
+  // navigating away from and back to the Agent page keeps the
+  // conversation instead of losing it on unmount. See AgentPage.tsx's
+  // AgentAiState for the full rationale.
+  const [aiChat, setAiChat] = useState<AiChatEntry[]>([]);
+  const [aiMessages, setAiMessages] = useState<LlmMessage[]>([]);
+  const [aiPending, setAiPending] = useState<{
+    messages: LlmMessage[];
+    pendingCalls: PendingToolCall[];
+  } | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiInstruction, setAiInstruction] = useState("");
+  const [pendingFiles, setPendingFiles] = useState<
+    Array<{ id: string; file: File; rejected?: string }>
+  >([]);
 
   // Clear the carried-over project/drawing context as soon as the user
   // leaves the editor — otherwise clicking the plain global nav item after
@@ -183,6 +223,45 @@ function AppInner() {
     return <ForcePasswordChangeScreen />;
   }
 
+  // Workspaces feature (see chat) — the ONE real navigation chokepoint
+  // for every "open this real record" action in the whole app: every
+  // page component below reports "the user picked record X" up to this
+  // single function via its own onView*/onOpen* callback prop (already
+  // true before this pass - only what those callbacks DO changed), so
+  // this is the one place that needs to register a recent workspace,
+  // not every call site individually. Vendors has no id-driven route of
+  // its own (list+dialog screen) - it reuses the exact same
+  // moduleNavContext "land on this tab, highlight this row" mechanism
+  // Inventory/MachineDetail/EmployeeDetail already use, now also
+  // consumed by Vendors.tsx. Quotations still has no supported jump
+  // target - the palette's "Go to Quotations" module entry covers that
+  // list-level case.
+  const navigateToRecord = (type: WorkspaceRecordType, id: string) => {
+    switch (type) {
+      case "project":
+        setSelectedProjectId(id);
+        setPage("project-detail");
+        break;
+      case "customer":
+        setSelectedCustomerId(id);
+        setPage("customer-history");
+        break;
+      case "employee":
+        setSelectedEmployeeId(id);
+        setPage("employee-detail");
+        break;
+      case "machine":
+        setSelectedMachineId(id);
+        setPage("machine-detail");
+        break;
+      case "vendor":
+        setModuleNavContext({ highlightId: id });
+        setPage("vendors");
+        break;
+    }
+    pushRecent(type, id);
+  };
+
   const accessDenied = (
     <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
       <div className="flex items-center justify-center w-16 h-16 rounded-full bg-destructive/10">
@@ -203,12 +282,7 @@ function AppInner() {
         return <Dashboard onNavigate={setPage} />;
       case "customers":
         return (
-          <Customers
-            onViewHistory={(id) => {
-              setSelectedCustomerId(id);
-              setPage("customer-history");
-            }}
-          />
+          <Customers onViewHistory={(id) => navigateToRecord("customer", id)} />
         );
       case "customer-history":
         if (!canView(currentUser, "customers")) return accessDenied;
@@ -218,10 +292,7 @@ function AppInner() {
             onNavigate={setPage}
             onViewInvoice={setSelectedInvoice}
             onViewQuotation={setSelectedQuotation}
-            onViewProject={(id) => {
-              setSelectedProjectId(id);
-              setPage("project-detail");
-            }}
+            onViewProject={(id) => navigateToRecord("project", id)}
             onGenerateReport={(id, name) => {
               setExportContext({ type: "customer", id, name });
               setPage("export-engine");
@@ -230,12 +301,7 @@ function AppInner() {
         );
       case "projects":
         return (
-          <Projects
-            onViewProject={(id) => {
-              setSelectedProjectId(id);
-              setPage("project-detail");
-            }}
-          />
+          <Projects onViewProject={(id) => navigateToRecord("project", id)} />
         );
       case "project-detail":
         if (!canView(currentUser, "projects")) return accessDenied;
@@ -255,18 +321,17 @@ function AppInner() {
               });
               setPage("drawing-editor");
             }}
+            onViewInvoices={() => setPage("invoices")}
           />
         );
       case "employees":
         return (
           <Employees
-            onViewEmployee={(id) => {
-              setSelectedEmployeeId(id);
-              setPage("employee-detail");
-            }}
+            onViewEmployee={(id) => navigateToRecord("employee", id)}
           />
         );
       case "employee-detail":
+        if (!canView(currentUser, "employees")) return accessDenied;
         return (
           <EmployeeDetail
             employeeId={selectedEmployeeId}
@@ -295,13 +360,11 @@ function AppInner() {
         return <CompanyPOs />;
       case "production":
         return (
-          <Production
-            onOpenProject={(id) => {
-              setSelectedProjectId(id);
-              setPage("project-detail");
-            }}
-          />
+          <Production onOpenProject={(id) => navigateToRecord("project", id)} />
         );
+      case "job-cards":
+        if (!canView(currentUser, "job_cards")) return accessDenied;
+        return <JobCards />;
       case "material-requisitions":
         if (!canView(currentUser, "material_requisitions")) return accessDenied;
         return <MaterialRequisitions />;
@@ -343,16 +406,18 @@ function AppInner() {
           />
         );
       case "vendors":
-        return <Vendors onNavigate={setPage} />;
+        return (
+          <Vendors
+            onNavigate={setPage}
+            onViewProject={(id) => navigateToRecord("project", id)}
+            highlightVendorId={moduleNavContext?.highlightId}
+            onOpenVendor={(id) => pushRecent("vendor", id)}
+          />
+        );
       case "machinery":
         if (!canView(currentUser, "machinery")) return accessDenied;
         return (
-          <Machinery
-            onViewMachine={(id) => {
-              setSelectedMachineId(id);
-              setPage("machine-detail");
-            }}
-          />
+          <Machinery onViewMachine={(id) => navigateToRecord("machine", id)} />
         );
       case "machine-detail":
         if (!canView(currentUser, "machinery")) return accessDenied;
@@ -381,6 +446,102 @@ function AppInner() {
       case "machine-revenue":
         if (!canView(currentUser, "machine_revenue")) return accessDenied;
         return <MachineRevenue />;
+      case "agent":
+        // No page-level permission gate: every action the Agent can take is
+        // individually checked against the current user's real permissions
+        // at execution time (agent/actions.ts's runAction). A user with no
+        // permissions can open the page but every action will be blocked,
+        // same as it would be by hand.
+        return (
+          <AgentPage
+            onNavigate={setPage}
+            onNavigateToRecord={navigateToRecord}
+            aiState={{
+              aiChat,
+              setAiChat,
+              aiMessages,
+              setAiMessages,
+              aiPending,
+              setAiPending,
+              aiBusy,
+              setAiBusy,
+              aiInstruction,
+              setAiInstruction,
+              pendingFiles,
+              setPendingFiles,
+            }}
+          />
+        );
+      case "design-lab":
+        // Isolated design-presentation tool (see components/Layout.tsx's
+        // "Design Lab" group). Renders entirely inside its own scoped
+        // wrapper — never touches global tokens or shared components, so
+        // it can't affect the rest of the app. No permission gate, same
+        // policy as AI Agent above: it's a presentation surface, not a
+        // data-bearing module.
+        return <DesignShowcase />;
+      case "design-lab-v2":
+        // Second, separate isolated design-exploration surface (14 new
+        // concepts) — additive alongside "design-lab" above, does not
+        // touch or replace the original 6-style showcase. Same no-gate
+        // policy: presentation tool, not a data-bearing module.
+        return <ExplorationShowcase />;
+      case "style-lab":
+        // Third, separate isolated design-exploration surface (10
+        // aesthetic-movement concepts) — additive alongside "design-lab"
+        // and "design-lab-v2" above, does not touch either. Same no-gate
+        // policy: presentation tool, not a data-bearing module.
+        return <StyleShowcase />;
+      case "design-archive":
+        // Consolidates rounds 1–3 (design-lab, design-lab/v2,
+        // design-lab/stylekit) into one browsable gallery — reuses each
+        // round's own exported components directly, touches none of
+        // their files. Same no-gate policy as the other lab pages.
+        return <DesignArchive />;
+      case "ux-lab":
+        // 5 working UX prototypes with a real mutable mock store (see
+        // pages/design-lab/uxlab/store.tsx) — fully additive alongside
+        // the other 3 lab pages, no shared state or files with any of
+        // them. Same no-gate policy: presentation/prototype tool.
+        return <UxLabShowcase />;
+      case "ux-final":
+        // The final unified prototype (see pages/design-lab/uxlab/
+        // FinalPrototype.tsx) — Model 05's shell with the Role/
+        // Attention/Relationship/Command/Briefing/Pipeline layers
+        // merged in. Reuses the same store/ModuleRouter as ux-lab;
+        // fully additive, no shared files with any other page.
+        return <FinalPrototype />;
+      case "ux-decision-lab":
+        // UX Consolidation / Decision Lab (see pages/design-lab/uxlab/
+        // decisionlab/UxDecisionLab.tsx) — a UX ARCHITECTURE DECISION
+        // phase, not implementation. Compares production vs. the Final
+        // UX Prototype module-by-module (KEEP/ADOPT/HYBRID/REJECT),
+        // reuses the same store/ModuleRouter as ux-final rather than
+        // duplicating it; fully additive, no shared files with any
+        // other page. Same no-gate policy as every other lab entry.
+        return <UxDecisionLab />;
+      case "ux-visual-lab":
+        // Visual System Lab (see pages/design-lab/uxlab/visuallab/
+        // VisualSystemLab.tsx) — Phase 3: determines the VISUAL system
+        // for the UX architecture approved in ux-decision-lab. Reuses
+        // the existing 6-style Design Lab harness (ShowcaseTemplate.tsx/
+        // themes.ts) for the comparison rather than duplicating it; adds
+        // two new "Instrument" palettes (light+dark) as the
+        // recommendation. Fully additive, no shared files with any
+        // other page. Same no-gate policy as every other lab entry.
+        return <VisualSystemLab />;
+      case "ux-implementation-lab":
+        // UX Implementation Lab (see pages/design-lab/uxlab/
+        // implementationlab/UxImplementationLab.tsx) — Phase 4: the
+        // FINAL UX IMPLEMENTATION BLUEPRINT's representative screens —
+        // real production functionality + approved UX architecture
+        // (ux-decision-lab) + approved Instrument visual system
+        // (ux-visual-lab), combined. Reuses decisionlab's real screens
+        // wrapped in the Instrument skin rather than duplicating them a
+        // third time. Design validation only — NOT a production
+        // implementation sign-off. Fully additive, no shared files with
+        // any other page. Same no-gate policy as every other lab entry.
+        return <UxImplementationLab />;
       case "export-engine":
         if (!canView(currentUser, "export_engine")) return accessDenied;
         return (
@@ -406,20 +567,14 @@ function AppInner() {
         if (!canView(currentUser, "inspection_sheets")) return accessDenied;
         return (
           <InspectionSheetsList
-            onViewProject={(id) => {
-              setSelectedProjectId(id);
-              setPage("project-detail");
-            }}
+            onViewProject={(id) => navigateToRecord("project", id)}
           />
         );
       case "qms-my-inspections":
         if (!canView(currentUser, "inspection_sheets")) return accessDenied;
         return (
           <InspectorDashboard
-            onOpenProject={(id) => {
-              setSelectedProjectId(id);
-              setPage("project-detail");
-            }}
+            onOpenProject={(id) => navigateToRecord("project", id)}
           />
         );
       case "drawing-editor":
@@ -446,9 +601,30 @@ function AppInner() {
     }
   };
 
+  // Workspaces feature (see chat) — which sidebar Workspaces entry (if
+  // any) matches the record actually being viewed right now, so it can
+  // be highlighted. Matches pushRecent's own `${type}-${id}` key shape.
+  const activeWorkspaceKey: string | undefined =
+    page === "project-detail" && selectedProjectId
+      ? `project-${selectedProjectId}`
+      : page === "customer-history" && selectedCustomerId
+        ? `customer-${selectedCustomerId}`
+        : page === "employee-detail" && selectedEmployeeId
+          ? `employee-${selectedEmployeeId}`
+          : page === "machine-detail" && selectedMachineId
+            ? `machine-${selectedMachineId}`
+            : page === "vendors" && moduleNavContext?.highlightId
+              ? `vendor-${moduleNavContext.highlightId}`
+              : undefined;
+
   return (
     <>
-      <Layout currentPage={page} onNavigate={setPage}>
+      <Layout
+        currentPage={page}
+        onNavigate={setPage}
+        onNavigateToRecord={navigateToRecord}
+        activeWorkspaceKey={activeWorkspaceKey}
+      >
         {renderPage()}
       </Layout>
       <Toaster richColors position="top-right" />

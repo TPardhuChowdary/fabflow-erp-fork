@@ -201,39 +201,56 @@ export async function updateExpenseFloatRemote(
   return { status: "success", data: transformExpenseFloatRow(rows[0]) };
 }
 
-// Settle Float — only ever touches returned_amount (as a new absolute
-// total, computed by the caller from the existing local value + the
-// newly-returned delta, same shape as store.ts's old local
-// settleExpenseFloat) and notes. Never touches issued_amount or any
-// trigger-owned field.
+// Settle Float — delegates to the settle_expense_float(p_float_id,
+// p_delta, p_notes) RPC (database/phase-04/phase4_petty_expenses_FINAL.sql
+// §6), which existed, was tested, and had zero callers anywhere in the
+// frontend (same defect class as Monster-1's record_material_purchase).
+// This function used to read returned_amount client-side and write back
+// an absolute new total — exactly the lost-update race the RPC's own
+// header comment calls out by name: two concurrent settlements of the
+// same float would silently clobber each other, since each writes an
+// absolute value computed from whatever it last hydrated, not the DB's
+// current value at write time. The RPC takes p_delta (the amount
+// returned in *this* action — already what callers had on hand, see
+// PettyExpenses.tsx's `returned` local) and applies it atomically under
+// a row-level FOR UPDATE lock, so this is a strict simplification for
+// callers too, not just a safety fix. The RPC returns void (it's a
+// side-effecting primitive, not a query), so the fresh row is read back
+// with a follow-up select — the same two-step shape a plain .update()
+// with .select() already was, just split across two round-trips instead
+// of one PostgREST call.
 export async function settleExpenseFloatRemote(
   id: string,
-  newReturnedAmount: number,
+  delta: number,
   notes?: string,
 ): Promise<WriteResult<ExpenseFloat>> {
   const gate = await requireSession();
   if (!gate.ok) return gate.result;
 
-  const fields: Record<string, unknown> = {
-    returned_amount: newReturnedAmount,
-  };
-  if (notes !== undefined) fields.notes = notes || null;
+  const { error: rpcError } = await gate.client.rpc("settle_expense_float", {
+    p_float_id: id,
+    p_delta: delta,
+    p_notes: notes || null,
+  });
+  if (rpcError) return { status: "error", error: rpcError.message };
 
   const { data, error } = await gate.client
     .from("expense_floats")
-    .update(fields)
+    .select(EXPENSE_FLOAT_COLUMNS)
     .eq("id", id)
-    .select(EXPENSE_FLOAT_COLUMNS);
-
+    .maybeSingle();
   if (error) return { status: "error", error: error.message };
-  const rows = (data as unknown as ExpenseFloatRow[]) ?? [];
-  if (rows.length === 0) {
+  if (!data) {
     return {
       status: "denied",
-      error: "No row was updated (blocked by RLS, or the row does not exist)",
+      error:
+        "Settlement recorded, but the updated float is not visible to you (blocked by RLS)",
     };
   }
-  return { status: "success", data: transformExpenseFloatRow(rows[0]) };
+  return {
+    status: "success",
+    data: transformExpenseFloatRow(data as unknown as ExpenseFloatRow),
+  };
 }
 
 export async function deleteExpenseFloatRemote(

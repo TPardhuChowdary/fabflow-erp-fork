@@ -22,8 +22,10 @@ import {
   CheckCircle2,
   Clock,
   Filter,
+  Pencil,
   Plus,
   Settings2,
+  Trash2,
   Wrench,
   XCircle,
   ZapOff,
@@ -32,12 +34,13 @@ import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
 import { VendorSelect } from "../components/VendorSelect";
+import { RowActions } from "../components/ui/row-actions";
 import {
   createMachineRemote,
   deleteMachineRemote,
   updateMachineRemote,
 } from "../lib/machinesApi";
-import { canCreate, canEdit, canView } from "../permissions";
+import { canCreate, canDelete, canEdit, canView } from "../permissions";
 import { useStore } from "../store";
 import type { Machine, MachineStatus, MachineType } from "../types";
 
@@ -67,27 +70,27 @@ const STATUS_CONFIG: Record<
 > = {
   Operational: {
     label: "Operational",
-    color: "bg-green-100 text-green-700 border-green-200",
+    color: "bg-success/10 text-success border-success/30",
     icon: CheckCircle2,
   },
   "Under Maintenance": {
     label: "Under Maintenance",
-    color: "bg-yellow-100 text-yellow-700 border-yellow-200",
+    color: "bg-warning/15 text-warning border-warning/30",
     icon: Settings2,
   },
   Breakdown: {
     label: "Breakdown",
-    color: "bg-red-100 text-red-700 border-red-200",
+    color: "bg-destructive/10 text-destructive border-destructive/30",
     icon: XCircle,
   },
   Idle: {
     label: "Idle",
-    color: "bg-gray-100 text-gray-600 border-gray-200",
+    color: "bg-muted text-muted-foreground border-border",
     icon: ZapOff,
   },
   Decommissioned: {
     label: "Decommissioned",
-    color: "bg-slate-100 text-slate-500 border-slate-200",
+    color: "bg-muted text-muted-foreground/70 border-border",
     icon: XCircle,
   },
 };
@@ -103,7 +106,7 @@ function ServiceDueBadge({ nextServiceDue }: { nextServiceDue?: string }) {
 
   if (diffDays < 0) {
     return (
-      <span className="flex items-center gap-1 text-xs text-red-600 font-medium">
+      <span className="flex items-center gap-1 text-xs text-destructive font-medium">
         <AlertTriangle className="w-3 h-3" />
         Service overdue {Math.abs(diffDays)}d
       </span>
@@ -111,7 +114,7 @@ function ServiceDueBadge({ nextServiceDue }: { nextServiceDue?: string }) {
   }
   if (diffDays <= 14) {
     return (
-      <span className="flex items-center gap-1 text-xs text-amber-600 font-medium">
+      <span className="flex items-center gap-1 text-xs text-warning font-medium">
         <Clock className="w-3 h-3" />
         Service in {diffDays}d
       </span>
@@ -132,6 +135,7 @@ export function Machinery({ onViewMachine }: Props) {
   const { currentUser } = useAuth();
   const pCreate = canCreate(currentUser, "machinery");
   const pEdit = canEdit(currentUser, "machinery");
+  const pDelete = canDelete(currentUser, "machinery");
 
   const {
     machines,
@@ -339,7 +343,7 @@ export function Machinery({ onViewMachine }: Props) {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="flex items-center justify-center w-9 h-9 rounded-lg bg-orange-100 text-orange-600">
+          <div className="flex items-center justify-center w-9 h-9 rounded-lg bg-primary/10 text-primary">
             <Wrench className="w-5 h-5" />
           </div>
           <div>
@@ -368,13 +372,17 @@ export function Machinery({ onViewMachine }: Props) {
           {
             label: "Operational",
             value: kpis.operational,
-            color: "text-green-600",
+            color: "text-success",
           },
-          { label: "Breakdown", value: kpis.breakdown, color: "text-red-600" },
+          {
+            label: "Breakdown",
+            value: kpis.breakdown,
+            color: "text-destructive",
+          },
           {
             label: "Service Overdue",
             value: kpis.serviceOverdue,
-            color: "text-amber-600",
+            color: "text-warning",
           },
         ].map((k) => (
           <div key={k.label} className="rounded-lg border bg-card p-4">
@@ -463,14 +471,10 @@ export function Machinery({ onViewMachine }: Props) {
                 className="rounded-xl border bg-card overflow-hidden hover:shadow-md transition-shadow group"
               >
                 {/* Machine image / placeholder */}
-                <div
-                  className="relative h-40 bg-gradient-to-br from-slate-100 to-slate-200 flex items-center justify-center cursor-pointer"
+                <button
+                  type="button"
+                  className="relative h-40 w-full bg-muted flex items-center justify-center cursor-pointer text-left"
                   onClick={() => onViewMachine(machine.id)}
-                  onKeyDown={(e) =>
-                    e.key === "Enter" && onViewMachine(machine.id)
-                  }
-                  role="button"
-                  tabIndex={0}
                 >
                   {machine.primaryImageData ? (
                     <img
@@ -479,7 +483,7 @@ export function Machinery({ onViewMachine }: Props) {
                       className="w-full h-full object-cover"
                     />
                   ) : (
-                    <div className="flex flex-col items-center gap-2 text-slate-400">
+                    <div className="flex flex-col items-center gap-2 text-muted-foreground">
                       <Wrench className="w-10 h-10" />
                       <span className="text-xs">{machine.type}</span>
                     </div>
@@ -491,21 +495,18 @@ export function Machinery({ onViewMachine }: Props) {
                     <StatusIcon className="w-3 h-3" />
                     {sc.label}
                   </div>
-                </div>
+                </button>
 
                 {/* Card body */}
                 <div className="p-3 space-y-2">
                   <div>
                     <div className="flex items-start justify-between gap-1">
-                      <h3
-                        className="font-semibold text-sm leading-tight cursor-pointer hover:text-primary"
-                        onClick={() => onViewMachine(machine.id)}
-                        onKeyDown={(e) =>
-                          e.key === "Enter" && onViewMachine(machine.id)
-                        }
-                        role="button"
-                        tabIndex={0}
-                      >
+                      {/* Static — the image button above and the explicit
+                          "View" button below already give this same real
+                          navigation two fully keyboard-accessible paths;
+                          a third click target on a heading, without its
+                          own keyboard handler, would be redundant. */}
+                      <h3 className="font-semibold text-sm leading-tight">
                         {machine.name}
                       </h3>
                     </div>
@@ -535,7 +536,7 @@ export function Machinery({ onViewMachine }: Props) {
                   </div>
 
                   {/* Actions */}
-                  <div className="flex gap-2 pt-1">
+                  <div className="flex items-center gap-2 pt-1">
                     <Button
                       size="sm"
                       variant="outline"
@@ -544,16 +545,33 @@ export function Machinery({ onViewMachine }: Props) {
                     >
                       View
                     </Button>
-                    {pEdit && (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="h-7 text-xs px-2"
-                        onClick={() => openEdit(machine)}
-                      >
-                        Edit
-                      </Button>
-                    )}
+                    <RowActions
+                      primary={
+                        pEdit
+                          ? [
+                              {
+                                label: "Edit",
+                                icon: Pencil,
+                                onClick: () => openEdit(machine),
+                                "data-ocid": `machinery.edit_button.${machine.id}`,
+                              },
+                            ]
+                          : []
+                      }
+                      overflow={
+                        pDelete
+                          ? [
+                              {
+                                label: "Delete",
+                                icon: Trash2,
+                                destructive: true,
+                                onClick: () => handleDelete(machine),
+                                "data-ocid": `machinery.delete_button.${machine.id}`,
+                              },
+                            ]
+                          : []
+                      }
+                    />
                   </div>
                 </div>
               </div>

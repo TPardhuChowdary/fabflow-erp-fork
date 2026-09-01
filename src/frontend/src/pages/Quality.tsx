@@ -223,7 +223,7 @@ export function Quality() {
                       <div className="flex items-center gap-2">
                         {project.projectName}
                         {hasReworkRequired && (
-                          <Badge className="text-[10px] h-4 px-1.5 bg-amber-100 text-amber-700 border-amber-300 hover:bg-amber-100">
+                          <Badge className="text-[10px] h-4 px-1.5 bg-warning/15 text-warning border-warning/30 hover:bg-warning/15">
                             Rework Required
                           </Badge>
                         )}
@@ -271,7 +271,7 @@ export function Quality() {
                           data-ocid={`quality.approved_qty.input.${i + 1}`}
                         />
                       ) : (
-                        <span className="text-green-700 font-medium">
+                        <span className="text-success font-medium">
                           {inspection?.approvedQty ?? 0}
                         </span>
                       )}

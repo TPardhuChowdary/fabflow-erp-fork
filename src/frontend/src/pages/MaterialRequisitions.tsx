@@ -14,7 +14,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
 import { updateBomRequisitionStatusRemote } from "../lib/bomItemsApi";
-import { canCreate, canDelete, canEdit, canView } from "../permissions";
+import { canApprove, canCreate, canDelete, canView } from "../permissions";
 import { useStore } from "../store";
 import type { BomRequisitionStatus } from "../types";
 
@@ -26,17 +26,17 @@ const STATUS_CONFIG: Record<
 > = {
   Pending: {
     label: "Pending",
-    className: "bg-amber-100 text-amber-800 border-amber-200",
+    className: "bg-warning/15 text-warning border-warning/30",
     icon: <Clock className="h-3 w-3" />,
   },
   "Ready to Complete": {
     label: "Ready to Complete",
-    className: "bg-blue-100 text-blue-800 border-blue-200",
+    className: "bg-info/10 text-info border-info/30",
     icon: <PackageCheck className="h-3 w-3" />,
   },
   Completed: {
     label: "Completed",
-    className: "bg-green-100 text-green-800 border-green-200",
+    className: "bg-success/10 text-success border-success/30",
     icon: <CheckCircle2 className="h-3 w-3" />,
   },
 };
@@ -45,8 +45,13 @@ export function MaterialRequisitions() {
   const { currentUser } = useAuth();
   const pView = canView(currentUser, "material_requisitions");
   const pCreate = canCreate(currentUser, "material_requisitions");
-  const pEdit = canEdit(currentUser, "material_requisitions");
   const pDelete = canDelete(currentUser, "material_requisitions");
+  // Monster-1 — bom_requisitions_approve's RLS policy gates this specific
+  // write on material_requisitions.approve, not .edit (see bomItemsApi.ts's
+  // header comment). Was gated on canEdit, which meant a user granted
+  // .edit but not .approve would see this button succeed the client-side
+  // check and then be silently denied by RLS with a generic error toast.
+  const pApprove = canApprove(currentUser, "material_requisitions");
   const { bomRequisitions, updateBomRequisition, projects } = useStore();
   const [activeTab, setActiveTab] = useState<FilterTab>("All");
 
@@ -72,8 +77,8 @@ export function MaterialRequisitions() {
   ];
 
   async function handleMarkCompleted(id: string) {
-    if (!pEdit) {
-      toast.error("Access restricted: edit permission required");
+    if (!pApprove) {
+      toast.error("Access restricted: approve permission required");
       return;
     }
     const result = await updateBomRequisitionStatusRemote(id, "Completed");
@@ -219,7 +224,7 @@ export function MaterialRequisitions() {
                         className={
                           req.availableQty === 0 ||
                           req.availableQty === undefined
-                            ? "text-red-500/70 text-sm"
+                            ? "text-destructive/70 text-sm"
                             : "text-sm"
                         }
                       >
@@ -253,7 +258,7 @@ export function MaterialRequisitions() {
                         })}
                       </TableCell>
                       <TableCell>
-                        {pEdit && req.status === "Ready to Complete" && (
+                        {pApprove && req.status === "Ready to Complete" && (
                           <Button
                             size="sm"
                             variant="default"
@@ -271,7 +276,7 @@ export function MaterialRequisitions() {
                           </span>
                         )}
                         {req.status === "Completed" && (
-                          <CheckCircle2 className="h-4 w-4 text-green-600" />
+                          <CheckCircle2 className="h-4 w-4 text-success" />
                         )}
                       </TableCell>
                     </TableRow>

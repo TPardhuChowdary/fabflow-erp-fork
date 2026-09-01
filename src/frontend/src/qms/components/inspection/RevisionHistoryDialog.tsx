@@ -159,8 +159,8 @@ export function RevisionHistoryDialog({ open, onOpenChange, sheet }: Props) {
                       {INSPECTION_SHEET_STATUS_LABELS[rev.status]}
                     </div>
                     <div>Stages: {rev.stageIds.length}</div>
-                    <div className="text-green-700">Pass: {summary.pass}</div>
-                    <div className="text-red-700">Fail: {summary.fail}</div>
+                    <div className="text-success">Pass: {summary.pass}</div>
+                    <div className="text-destructive">Fail: {summary.fail}</div>
                     <div className="text-muted-foreground">
                       N/A: {summary.na}
                     </div>

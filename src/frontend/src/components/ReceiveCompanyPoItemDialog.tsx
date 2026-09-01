@@ -346,14 +346,14 @@ export function ReceiveCompanyPoItemDialog({ po, open, onClose }: Props) {
     if (!item.resourceType) return null;
     if (item.receivedAt) {
       return (
-        <Badge className="bg-green-100 text-green-700">
+        <Badge className="bg-success/10 text-success">
           Received — {item.resourceType}
         </Badge>
       );
     }
     if (item.pendingGuidedCreation) {
       return (
-        <Badge className="bg-amber-100 text-amber-700">
+        <Badge className="bg-warning/15 text-warning">
           Pending {item.resourceType} details
         </Badge>
       );

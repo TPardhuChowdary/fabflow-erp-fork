@@ -543,11 +543,11 @@ export function DeliveryChallanPrintView({
         </div>
 
         {/* Mobile sticky bottom */}
-        <div className="fixed bottom-0 left-0 right-0 flex sm:hidden bg-white border-t border-gray-200 p-3 gap-2 z-50 no-print print:hidden justify-center">
+        <div className="fixed bottom-0 left-0 right-0 flex sm:hidden bg-background border-t border-border p-3 gap-2 z-50 no-print print:hidden justify-center">
           <button
             type="button"
             onClick={onClose}
-            className="flex items-center justify-center gap-2 px-4 py-3 rounded-lg border border-gray-300 text-sm font-medium min-h-[48px] text-gray-600"
+            className="flex items-center justify-center gap-2 px-4 py-3 rounded-lg border border-border text-sm font-medium min-h-[48px] text-muted-foreground"
             data-ocid="delivery-challan-print.mobile.close_button"
           >
             <X className="w-4 h-4" /> Close

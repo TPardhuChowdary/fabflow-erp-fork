@@ -19,7 +19,7 @@ import {
 } from "@/components/ui/table";
 import { Building2, Edit2, Plus, Trash2, X } from "lucide-react";
 import { ShieldOff } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
 import {
@@ -35,14 +35,24 @@ const fmt = (n: number) => `₹${n.toLocaleString("en-IN")}`;
 
 interface Props {
   onNavigate: (page: Page) => void;
+  onViewProject?: (id: string) => void;
+  /** Workspaces feature (see chat) — same "land on this tab, highlight
+   * this row" cross-module pattern Inventory/MachineDetail/EmployeeDetail
+   * already use (App.tsx's moduleNavContext), now also consumed here so
+   * a Vendor Workspace chip can jump straight to that vendor's real
+   * detail panel instead of only the bare Vendors list. */
+  highlightVendorId?: string;
+  /** Called once when a vendor's detail panel is actually opened (not on
+   * closing it again) — lets App.tsx register it as a recent workspace. */
+  onOpenVendor?: (id: string) => void;
 }
 
 function statusCls(status: string) {
   const map: Record<string, string> = {
-    Paid: "bg-green-100 text-green-800 border-green-200",
-    Partial: "bg-amber-100 text-amber-800 border-amber-200",
-    Pending: "bg-blue-100 text-blue-800 border-blue-200",
-    Overdue: "bg-red-100 text-red-800 border-red-200",
+    Paid: "bg-success/10 text-success border-success/30",
+    Partial: "bg-warning/15 text-warning border-warning/30",
+    Pending: "bg-info/10 text-info border-info/30",
+    Overdue: "bg-destructive/10 text-destructive border-destructive/30",
   };
   return map[status] ?? "bg-muted text-muted-foreground";
 }
@@ -61,7 +71,12 @@ function getPayableStatus(
 
 const emptyForm = { name: "", phone: "", address: "", gstNumber: "" };
 
-export function Vendors({ onNavigate: _onNavigate }: Props) {
+export function Vendors({
+  onNavigate: _onNavigate,
+  onViewProject,
+  highlightVendorId,
+  onOpenVendor,
+}: Props) {
   const {
     vendors,
     addVendor,
@@ -82,6 +97,19 @@ export function Vendors({ onNavigate: _onNavigate }: Props) {
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [selectedVendor, setSelectedVendor] = useState<Vendor | null>(null);
+
+  // Workspaces feature (see chat) — jump straight to the real vendor's
+  // detail panel when arriving here via a Workspace chip / recent
+  // navigation, instead of only landing on the bare list. Deliberately
+  // does NOT call onOpenVendor itself - that would re-push this same
+  // vendor to the front of "recent" every time this effect re-runs,
+  // which is wrong; onOpenVendor only fires from a real user click (see
+  // the row's onClick below).
+  useEffect(() => {
+    if (!highlightVendorId) return;
+    const match = vendors.find((v) => v.id === highlightVendorId);
+    if (match) setSelectedVendor(match);
+  }, [highlightVendorId, vendors]);
   const [form, setForm] = useState(emptyForm);
 
   const openAdd = () => {
@@ -215,6 +243,24 @@ export function Vendors({ onNavigate: _onNavigate }: Props) {
     );
     const totalPurchaseCount = vMatPurchases.length + vInvPurchases.length;
 
+    // Model 3 comparison (see chat) — "related projects" is a real
+    // relationship already in the data model (MaterialPurchase.projectId
+    // is a required field, not invented here), just never surfaced on the
+    // Vendor screen before. Payables also carry an optional projectId,
+    // included for the same reason. Deduped, most-recent material
+    // purchase first.
+    const relatedProjectIds = Array.from(
+      new Set(
+        [
+          ...vMatPurchases.map((p) => p.projectId),
+          ...vPayables.map((p) => p.projectId),
+        ].filter((id): id is string => !!id),
+      ),
+    );
+    const relatedProjects = relatedProjectIds
+      .map((id) => projects.find((pr) => pr.id === id))
+      .filter((pr): pr is (typeof projects)[number] => !!pr);
+
     return {
       vPayables,
       vMatPurchases,
@@ -222,6 +268,7 @@ export function Vendors({ onNavigate: _onNavigate }: Props) {
       totalPayablesAmt,
       pendingBalance,
       totalPurchaseCount,
+      relatedProjects,
     };
   };
 
@@ -344,9 +391,13 @@ export function Vendors({ onNavigate: _onNavigate }: Props) {
                     key={v.id}
                     data-ocid={`vendors.list.row.${i + 1}`}
                     className={`cursor-pointer transition-colors ${selectedVendor?.id === v.id ? "bg-muted/50" : "hover:bg-muted/30"}`}
-                    onClick={() =>
-                      setSelectedVendor(selectedVendor?.id === v.id ? null : v)
-                    }
+                    onClick={() => {
+                      const opening = selectedVendor?.id !== v.id;
+                      setSelectedVendor(opening ? v : null);
+                      // Workspaces feature (see chat) — only register on
+                      // open, never on closing the same row again.
+                      if (opening) onOpenVendor?.(v.id);
+                    }}
                   >
                     <TableCell className="font-medium text-sm">
                       <div className="flex items-center gap-2">
@@ -379,6 +430,8 @@ export function Vendors({ onNavigate: _onNavigate }: Props) {
                             size="sm"
                             className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground"
                             onClick={() => openEdit(v)}
+                            title="Edit"
+                            aria-label="Edit"
                             data-ocid={`vendors.list.edit_button.${i + 1}`}
                           >
                             <Edit2 className="w-3.5 h-3.5" />
@@ -388,8 +441,10 @@ export function Vendors({ onNavigate: _onNavigate }: Props) {
                           <Button
                             variant="ghost"
                             size="sm"
-                            className="h-6 w-6 p-0 text-muted-foreground hover:text-red-600"
+                            className="h-6 w-6 p-0 text-muted-foreground hover:text-destructive"
                             onClick={() => setDeleteId(v.id)}
+                            title="Delete"
+                            aria-label="Delete"
                             data-ocid={`vendors.list.delete_button.${i + 1}`}
                           >
                             <Trash2 className="w-3.5 h-3.5" />
@@ -415,6 +470,7 @@ export function Vendors({ onNavigate: _onNavigate }: Props) {
             totalPayablesAmt,
             pendingBalance,
             totalPurchaseCount,
+            relatedProjects,
           } = getVendorDetails(selectedVendor);
           return (
             <div
@@ -422,31 +478,42 @@ export function Vendors({ onNavigate: _onNavigate }: Props) {
               data-ocid="vendors.detail.panel"
             >
               <div className="flex items-start justify-between px-4 py-3 border-b border-border bg-muted/30">
-                <div>
-                  <div className="font-semibold text-sm">
-                    {selectedVendor.name}
+                <div className="flex items-start gap-2.5 min-w-0">
+                  {/* Model 3 Workspace comparison (see chat) — an icon
+                      avatar so this reads as "you're now looking at this
+                      vendor as a business entity," matching Model3's own
+                      Vendor header treatment. Purely presentational. */}
+                  <div className="flex items-center justify-center w-9 h-9 rounded-full bg-primary/10 text-primary shrink-0 mt-0.5">
+                    <Building2 className="w-4 h-4" />
                   </div>
-                  {selectedVendor.phone && (
-                    <div className="text-xs text-muted-foreground mt-0.5">
-                      {selectedVendor.phone}
+                  <div className="min-w-0">
+                    <div className="font-semibold text-base">
+                      {selectedVendor.name}
                     </div>
-                  )}
-                  {selectedVendor.address && (
-                    <div className="text-xs text-muted-foreground">
-                      {selectedVendor.address}
-                    </div>
-                  )}
-                  {selectedVendor.gstNumber && (
-                    <div className="text-xs font-mono text-muted-foreground mt-0.5">
-                      GST: {selectedVendor.gstNumber}
-                    </div>
-                  )}
+                    {selectedVendor.phone && (
+                      <div className="text-xs text-muted-foreground mt-0.5">
+                        {selectedVendor.phone}
+                      </div>
+                    )}
+                    {selectedVendor.address && (
+                      <div className="text-xs text-muted-foreground">
+                        {selectedVendor.address}
+                      </div>
+                    )}
+                    {selectedVendor.gstNumber && (
+                      <div className="text-xs font-mono text-muted-foreground mt-0.5">
+                        GST: {selectedVendor.gstNumber}
+                      </div>
+                    )}
+                  </div>
                 </div>
                 <Button
                   variant="ghost"
                   size="sm"
                   className="h-6 w-6 p-0"
                   onClick={() => setSelectedVendor(null)}
+                  title="Close"
+                  aria-label="Close"
                   data-ocid="vendors.detail.close_button"
                 >
                   <X className="w-4 h-4" />
@@ -472,11 +539,11 @@ export function Vendors({ onNavigate: _onNavigate }: Props) {
                       Payables
                     </div>
                   </div>
-                  <div className="rounded-md border p-2 text-center bg-amber-50 border-amber-200">
-                    <div className="text-sm font-bold text-amber-800">
+                  <div className="rounded-md border p-2 text-center bg-warning/15 border-warning/30">
+                    <div className="text-sm font-bold text-warning">
                       {fmt(pendingBalance)}
                     </div>
-                    <div className="text-[10px] text-amber-600 uppercase tracking-wide">
+                    <div className="text-[10px] text-warning/80 uppercase tracking-wide">
                       Pending
                     </div>
                   </div>
@@ -533,6 +600,51 @@ export function Vendors({ onNavigate: _onNavigate }: Props) {
                       ))}
                     </div>
                   )}
+                </div>
+
+                {/* Related Projects */}
+                {relatedProjects.length > 0 && (
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
+                      Related Projects
+                    </div>
+                    <div className="space-y-1">
+                      {relatedProjects.map((p) => (
+                        <button
+                          key={p.id}
+                          type="button"
+                          onClick={() => onViewProject?.(p.id)}
+                          disabled={!onViewProject}
+                          className="w-full flex items-center justify-between text-xs border rounded px-2 py-1.5 bg-muted/20 hover:bg-muted/40 text-left disabled:hover:bg-muted/20 disabled:cursor-default"
+                        >
+                          <span className="font-mono font-semibold text-primary">
+                            {p.projectNo}
+                          </span>
+                          <span className="text-muted-foreground truncate max-w-48">
+                            {p.projectName}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Model 3 Workspace comparison (see chat) — Model 3's
+                    reference Vendor view shows a "Purchase Orders"
+                    section. Production's real PurchaseOrder type is a
+                    customer sales order (customerId/quotationId), not a
+                    vendor-facing PO — there is no vendor-PO entity in the
+                    real data model, so this is a deliberate, explained
+                    omission rather than an invented one. Real vendor
+                    spend is already tracked via Purchase History above. */}
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
+                    Purchase Orders
+                  </div>
+                  <p className="text-xs text-muted-foreground italic">
+                    Not tracked at the vendor level — procurement uses direct
+                    Purchase entries (see Purchase History above).
+                  </p>
                 </div>
 
                 {/* Payables */}
@@ -593,7 +705,6 @@ export function Vendors({ onNavigate: _onNavigate }: Props) {
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              console.log("FORM SUBMITTED");
               handleSaveAdd();
             }}
           >
@@ -635,7 +746,6 @@ export function Vendors({ onNavigate: _onNavigate }: Props) {
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              console.log("FORM SUBMITTED");
               handleSaveEdit();
             }}
           >

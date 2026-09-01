@@ -33,6 +33,7 @@
 // "Edit Material" dialog already restricted itself to before this phase.
 
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
+import { normalizeBusinessName } from "@/lib/utils";
 import type { InventoryItem, InventoryItemCategory } from "@/types";
 
 export type WriteStatus = "success" | "denied" | "error" | "unauthenticated";
@@ -109,7 +110,7 @@ function toInventoryItemFields(
   >,
 ) {
   return {
-    name: item.name,
+    name: normalizeBusinessName(item.name),
     unit: item.unit || null,
     reorder_level: item.reorderLevel ?? null,
     cost_per_unit: item.unitCost ?? null,

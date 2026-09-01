@@ -99,7 +99,7 @@ export function ModeSelectionModal({
                 {recommended && (
                   <Badge
                     variant="outline"
-                    className="w-fit text-[10px] mb-2 bg-green-100 text-green-700 border-green-200"
+                    className="w-fit text-[10px] mb-2 bg-success/10 text-success border-success/30"
                   >
                     RECOMMENDED
                   </Badge>

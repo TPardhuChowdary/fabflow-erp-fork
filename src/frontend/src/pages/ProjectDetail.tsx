@@ -26,9 +26,9 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { printDocument } from "@/lib/documentUtils";
+import { cn } from "@/lib/utils";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -42,7 +42,6 @@ import {
   Plus,
   Save,
   Trash2,
-  Upload,
   X,
 } from "lucide-react";
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
@@ -52,6 +51,7 @@ import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import { DesignFilePreviewDialog } from "../components/DesignFilePreviewDialog";
 import { ProductionStageInspectionControl } from "../components/ProductionStageInspectionControl";
 import { ProjectItemsTab } from "../components/ProjectItemsTab";
+import { StatusBadge } from "../components/StatusBadge";
 import { VendorSelect } from "../components/VendorSelect";
 import { WorkDrawingPreviewDialog } from "../components/WorkDrawingPreviewDialog";
 import { getChildDrawings } from "../drawingEditor/api/drawings";
@@ -64,10 +64,18 @@ import type { DrawingDocument } from "../drawingEditor/types";
 import {
   createBomItemRemote,
   deleteBomItemRemote,
+  recordMaterialPurchaseRemote,
   updateBomItemRemote,
 } from "../lib/bomItemsApi";
-import { hydrateBomRequisitions } from "../lib/hydration";
+import {
+  hydrateBomRequisitions,
+  hydrateMaterialPurchases,
+} from "../lib/hydration";
 import { createInventoryItemRemote } from "../lib/inventoryApi";
+import {
+  deleteInventoryPurchaseRemote,
+  updateInventoryPurchaseRemote,
+} from "../lib/inventoryPurchasesApi";
 import {
   createInventoryUsageRemote,
   deleteInventoryUsageRemote,
@@ -79,6 +87,7 @@ import {
   deleteOutsourcedWorkRemote,
   updateOutsourcedWorkRemote,
 } from "../lib/outsourcedWorksApi";
+import { createPaymentRemote } from "../lib/paymentsApi";
 import {
   addProjectDieRemote,
   removeProjectDieRemote,
@@ -112,6 +121,7 @@ import type {
   DesignFile,
   InternalCosting,
   InventoryItem,
+  Invoice,
   ManualAdjustment,
   MaterialPurchase,
   MaterialUsage,
@@ -135,16 +145,17 @@ interface Props {
     projectId: string;
     drawingId?: string;
   }) => void;
+  onViewInvoices?: () => void;
 }
 
 const fmt = (n: number) => `₹${n.toLocaleString("en-IN")}`;
 
 const STAGE_STATUS_COLORS: Record<ProjectStageStatus, string> = {
-  NotStarted: "bg-gray-100 text-gray-500",
-  Sent: "bg-blue-100 text-blue-700",
-  InProgress: "bg-amber-100 text-amber-700",
-  Completed: "bg-green-100 text-green-700",
-  Received: "bg-emerald-100 text-emerald-700",
+  NotStarted: "bg-muted text-muted-foreground",
+  Sent: "bg-info/10 text-info",
+  InProgress: "bg-warning/15 text-warning",
+  Completed: "bg-success/10 text-success",
+  Received: "bg-success/10 text-success",
 };
 
 const STAGE_STATUS_LABELS: Record<ProjectStageStatus, string> = {
@@ -180,12 +191,10 @@ const DEFAULT_STAGES: ProjectProductionStage[] = [
 
 function SentToSelect({
   vendorId,
-  vendorName,
   onChange,
   stageIdx,
 }: {
   vendorId: string;
-  vendorName: string;
   onChange: (id: string, name: string) => void;
   stageIdx: number;
 }) {
@@ -326,11 +335,62 @@ function SentToSelect({
   );
 }
 
+// Phase 8 — Project Workspace hub anchor-chip primitives (blueprint §10.2,
+// §12's "section anchors as a horizontal chip row"). Plain scroll-to
+// navigation, not Radix Tabs — every section below is always mounted and
+// visible, these just jump the viewport to one.
+function SectionChipGroup({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-1">
+      <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground px-1 mr-1 select-none shrink-0">
+        {label}
+      </span>
+      {children}
+    </div>
+  );
+}
+
+function SectionChip({
+  id,
+  label,
+  active,
+  onClick,
+}: {
+  id: string;
+  label: string;
+  active: string;
+  onClick: (id: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      data-ocid={`project-detail.${id}.tab`}
+      aria-current={active === id ? "true" : undefined}
+      onClick={() => onClick(id)}
+      className={cn(
+        "inline-flex items-center rounded-md px-2.5 py-1 text-xs font-medium border transition-colors whitespace-nowrap",
+        active === id
+          ? "bg-primary text-primary-foreground border-primary"
+          : "bg-transparent text-muted-foreground border-transparent hover:bg-muted hover:text-foreground",
+      )}
+    >
+      {label}
+    </button>
+  );
+}
+
 export function ProjectDetail({
   projectId,
   onBack,
   onGenerateReport,
   onOpenDrawingEditor,
+  onViewInvoices,
 }: Props) {
   const {
     projects,
@@ -341,12 +401,10 @@ export function ProjectDetail({
     outsourcedWorks,
     projectProductions,
     projectDeliveries,
-    addDesignFile,
     deleteDesignFile,
     upsertInternalCosting,
-    addMaterialPurchase,
-    updateMaterialPurchase,
     deleteMaterialPurchase,
+    setMaterialPurchasesFromServer,
     addOutsourcedWork,
     updateOutsourcedWork,
     deleteOutsourcedWork,
@@ -380,6 +438,8 @@ export function ProjectDetail({
     deliveryChallans,
     addInventoryItem,
     invoices,
+    updateInvoice,
+    addPayment,
     pettyExpenses,
     vendors,
     addProjectActivity,
@@ -396,6 +456,40 @@ export function ProjectDetail({
   const pCreate = canCreate(currentUser, "projects");
   const pDelete = canDelete(currentUser, "projects");
   const pAddOutsourced = pCreate;
+  // Model 3 Workspace comparison (see chat) — the one adopted gap: the
+  // real Payment record system stays in Payments.tsx/pages/Invoices.tsx;
+  // this only gates the inline "Record Payment" quick action below,
+  // matching the same canCreate("payments") check Payments.tsx uses.
+  const pCreatePayment = canCreate(currentUser, "payments");
+  // The BOM tab writes to project_bom_items, whose RLS (database/phase-11/
+  // phase11_production_persistence_FINAL.sql) is keyed to
+  // material_requisitions.*, not projects.* — a different module than
+  // most of this page's other tabs (outsourced_works, project_machinery,
+  // project_dies, internal_costings all correctly use projects.* since
+  // that's what their own RLS actually checks). Using pEdit/pCreate/
+  // pDelete here would show BOM controls to any role with projects.edit
+  // (e.g. Sales) even without material_requisitions.edit, and hide them
+  // from roles that DO hold material_requisitions.edit but not
+  // projects.edit — the write would then silently fail RLS either way.
+  const bomCreate = canCreate(currentUser, "material_requisitions");
+  const bomEdit = canEdit(currentUser, "material_requisitions");
+  const bomDelete = canDelete(currentUser, "material_requisitions");
+  // Material Usage (inventory_usages) and editing/deleting an existing
+  // Material Purchase (inventory_purchases) are both keyed to
+  // inventory.*, not projects.* — same mismatch class as BOM above.
+  // Recording a NEW purchase is intentionally left on pCreate: that path
+  // goes through record_material_purchase(), whose own permission check
+  // accepts inventory.create OR production.create OR projects.create.
+  // (pCreateInventory below already covers the create case for Material
+  // Usage's own "Add Usage" button — same inventory.create permission.)
+  const inventoryEdit = canEdit(currentUser, "inventory");
+  const inventoryDelete = canDelete(currentUser, "inventory");
+  // Production Stage writes (add/reorder/remove/complete/notes/status)
+  // all funnel through updateProjectStagesV2 -> upsertProjectionStagesRemote
+  // -> the upsert_project_production_stages() RPC (database/phase-45/
+  // phase45_production_stages_activate.sql), whose own permission check
+  // is has_permission('production','edit') alone, not projects.edit.
+  const productionEdit = canEdit(currentUser, "production");
   // Phase 20 — the "Add New Material" quick-add below writes a real
   // inventory_items row via the same RLS as Inventory.tsx, so it needs
   // its own inventory.create check, not the projects-module one above.
@@ -544,6 +638,68 @@ export function ProjectDetail({
     string | null
   >(null);
 
+  // Model 3 Workspace comparison (see chat) — in-context "Record Payment"
+  // quick action, same reuse-boundary pattern as Production's "Advance"/
+  // QMS's inline actions elsewhere in this file: calls the exact same
+  // createPaymentRemote() + addPayment/updateInvoice real store path
+  // Payments.tsx uses (including its server-side trg_overpayment guard),
+  // never a second implementation of payment recording. The full editor
+  // (mode, reference no, notes, proof-of-payment upload) stays in
+  // Payments.tsx — this is deliberately just the one-field common case.
+  const [payAmountByInvoiceId, setPayAmountByInvoiceId] = useState<
+    Record<string, string>
+  >({});
+  const [payingInvoiceId, setPayingInvoiceId] = useState<string | null>(null);
+
+  const handleRecordPaymentInline = async (inv: Invoice) => {
+    if (!pCreatePayment) {
+      toast.error("Access restricted: create permission required");
+      return;
+    }
+    const raw = payAmountByInvoiceId[inv.id];
+    const amt = Number.parseFloat(raw ?? "");
+    const remaining = (inv.totalAmount ?? 0) - (inv.paidAmount ?? 0);
+    if (!raw || !amt || amt <= 0) {
+      toast.error("Enter a valid payment amount");
+      return;
+    }
+    if (amt > remaining + 0.001) {
+      toast.error(
+        `Amount exceeds remaining balance of ₹${remaining.toLocaleString("en-IN", { minimumFractionDigits: 2 })}`,
+      );
+      return;
+    }
+    setPayingInvoiceId(inv.id);
+    try {
+      const result = await createPaymentRemote({
+        invoiceId: inv.id,
+        amount: amt,
+        paymentDate: new Date().toISOString().split("T")[0],
+        mode: "Cash",
+        referenceNo: "",
+        notes: "Recorded from Project Workspace",
+      });
+      if (result.status === "unauthenticated") {
+        toast.error("You must be signed in to record a payment");
+        return;
+      }
+      if (result.status === "denied") {
+        toast.error("You do not have permission to record payments");
+        return;
+      }
+      if (result.status === "error" || !result.data) {
+        toast.error(result.error || "Failed to record payment");
+        return;
+      }
+      addPayment(result.data.payment);
+      updateInvoice(result.data.invoice);
+      toast.success("Payment recorded");
+      setPayAmountByInvoiceId((p) => ({ ...p, [inv.id]: "" }));
+    } finally {
+      setPayingInvoiceId(null);
+    }
+  };
+
   const handleDrawingDelete = async (drawing: (typeof allDrawings)[number]) => {
     const children = await getChildDrawings(drawing.id);
     if (children.length > 0) {
@@ -598,6 +754,27 @@ export function ProjectDetail({
     (d) => d.projectId === projectId,
   );
 
+  // Model 3 Workspace comparison (see chat) — every real invoice for this
+  // project, hoisted to component scope so both the Overview "At a
+  // Glance" strip and the full Profit & Costing list read the exact same
+  // single computation (no second source of truth). An invoice's
+  // top-level projectId is optional — a real invoice can also reach this
+  // project only through one "+ Add Projects" line item
+  // (InvLineItem.projectId, a real FK distinct from the invoice's own),
+  // for genuinely multi-project invoices. Both are checked so a real
+  // invoice never silently fails to show here.
+  const allProjectInvoices = (invoices || [])
+    .filter(
+      (inv) =>
+        inv.projectId === projectId ||
+        (inv.lineItems || []).some((li) => li.projectId === projectId),
+    )
+    .sort((a, b) => b.createdAt - a.createdAt);
+  const projectInvoiceBalanceDue = allProjectInvoices.reduce(
+    (sum, inv) => sum + ((inv.totalAmount ?? 0) - (inv.paidAmount ?? 0)),
+    0,
+  );
+
   // Internal costing state
   const [costing, setCosting] = useState<
     Omit<InternalCosting, "id" | "projectId">
@@ -647,10 +824,27 @@ export function ProjectDetail({
 
   const [expandedStage, setExpandedStage] = useState<number | null>(0);
 
-  // Phase 32 (Task #176) - controlled so the "Open Inspection" gate action
-  // can switch straight to the QMS tab; every other tab keeps its previous
-  // uncontrolled default ("overview" on first load).
+  // Phase 8 — Project Workspace hub (FINAL_UX_IMPLEMENTATION_BLUEPRINT.md
+  // §10): every section below now renders in one scroll instead of one-
+  // tab-at-a-time. `activeTab` is kept (renamed in spirit, not in code, to
+  // avoid touching every reference) purely to drive the anchor-chip row's
+  // "last clicked" highlight — real navigation is scrollIntoView, not a
+  // Radix Tabs mount/unmount switch anymore.
   const [activeTab, setActiveTab] = useState("overview");
+  const scrollToSection = (id: string) => {
+    setActiveTab(id);
+    // "smooth" confirmed live to never actually complete for this nested
+    // overflow-y-auto container (main-content) — it starts, then silently
+    // stalls. "instant" is synchronous and doesn't have that problem; the
+    // blueprint doesn't require the jump itself to be animated (only the
+    // Command Palette has an explicit zero-animation rule, but nothing
+    // here rules out instant for this one either, and it's the reliable
+    // choice). Section elements don't move based on activeTab, so no
+    // deferral is needed — same tick as the click is correct.
+    document
+      .getElementById(`section-${id}`)
+      ?.scrollIntoView({ behavior: "instant", block: "start" });
+  };
 
   // Phase 32 (Task #176) - supervisor/admin override dialog for a blocked
   // Production Stage gate. Set only when a gate-blocked "Mark Complete"
@@ -775,7 +969,7 @@ export function ProjectDetail({
   };
 
   const openEditBom = (item: BomItem) => {
-    if (!pEdit) {
+    if (!bomEdit) {
       toast.error("No permission to edit BOM");
       return;
     }
@@ -801,8 +995,12 @@ export function ProjectDetail({
   };
 
   const handleSaveBom = async () => {
-    if (!pEdit) {
-      toast.error("No permission to edit BOM");
+    if (editingBomId ? !bomEdit : !bomCreate) {
+      toast.error(
+        editingBomId
+          ? "No permission to edit BOM"
+          : "No permission to add BOM items",
+      );
       return;
     }
     if (!bomForm.inventoryItemId) {
@@ -937,6 +1135,7 @@ export function ProjectDetail({
 
   // Material purchase dialog
   const [matDialog, setMatDialog] = useState(false);
+  const [isSavingMaterial, setIsSavingMaterial] = useState(false);
   const [matForm, setMatForm] = useState({
     materialType: "",
     thickness: "",
@@ -979,8 +1178,6 @@ export function ProjectDetail({
     dateReceived: "",
     processCost: 0,
   });
-
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [adjForm, setAdjForm] = useState<{
     name: string;
@@ -1037,7 +1234,11 @@ export function ProjectDetail({
       toast.error("Project name is required");
       return;
     }
-    const newId = await repeatProject(project.id, repeatForm);
+    const newId = await repeatProject(project.id, {
+      ...repeatForm,
+      byUserId: userId,
+      byUserName: userName,
+    });
     if (newId) {
       toast.success(`Repeat order "${repeatForm.newName}" created`);
       setRepeatDialog(false);
@@ -1120,27 +1321,6 @@ export function ProjectDetail({
     (costing.labourCost || 0) +
     (costing.transportCost || 0) +
     extraCostsTotal;
-
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const fileData = (ev.target?.result as string) ?? "";
-      const designFile: DesignFile = {
-        id: `df-${Date.now()}`,
-        projectId,
-        fileName: file.name,
-        fileType: file.type || "application/octet-stream",
-        fileData,
-        uploadedAt: Date.now(),
-      };
-      addDesignFile(designFile);
-      toast.success(`${file.name} uploaded`);
-    };
-    reader.readAsDataURL(file);
-    e.target.value = "";
-  };
 
   const handleDownloadFile = (f: DesignFile) => {
     const a = document.createElement("a");
@@ -1229,15 +1409,22 @@ export function ProjectDetail({
     container.remove();
   };
 
-  const handleSaveCosting = () => {
-    upsertInternalCosting({
-      id: existingCosting?.id ?? `ic-${Date.now()}`,
+  const handleSaveCosting = async () => {
+    if (!pEdit) {
+      toast.error("Access restricted: edit permission required");
+      return;
+    }
+    const ok = await upsertInternalCosting({
       projectId,
       ...costing,
       labourCost: costing.labourCost ?? 0,
       transportCost: costing.transportCost ?? 0,
       extraCosts: costing.extraCosts ?? [],
     });
+    if (!ok) {
+      toast.error("Could not save costing — please try again");
+      return;
+    }
     toast.success("Costing saved");
   };
 
@@ -1262,24 +1449,52 @@ export function ProjectDetail({
     }));
   };
 
-  const handleAddMaterial = () => {
+  // Monster-1 — remote-first via record_material_purchase() (already
+  // built, already tested to match this exact local behavior — see
+  // database/phase-11/phase11_completion_report.md — it just had no
+  // caller). Re-hydrates the whole list afterward rather than
+  // reconstructing the row locally, since the RPC only returns the new
+  // row's id, not its full shape.
+  const handleAddMaterial = async () => {
+    if (isSavingMaterial) return;
     if (!matForm.materialType.trim()) {
       toast.error("Material type is required");
       return;
     }
-    const mat: MaterialPurchase = {
-      id: `mp-${Date.now()}`,
-      projectId,
-      ...matForm,
-      attachments:
-        matPendingAttachments.length > 0
-          ? [...matPendingAttachments]
-          : undefined,
-    };
-    addMaterialPurchase(mat);
-    toast.success(
-      "Material purchase recorded — inventory updated automatically",
-    );
+    setIsSavingMaterial(true);
+    try {
+      const result = await recordMaterialPurchaseRemote({
+        projectId,
+        materialType: matForm.materialType,
+        thickness: matForm.thickness || undefined,
+        quantity: matForm.quantity,
+        unit: matForm.unit,
+        supplierName: matForm.supplierName || undefined,
+        vendorId: matForm.vendorId || undefined,
+        purchaseDate: matForm.purchaseDate,
+        attachments:
+          matPendingAttachments.length > 0
+            ? [...matPendingAttachments]
+            : undefined,
+      });
+      if (result.status === "unauthenticated") {
+        toast.error("Not signed in to the server - purchase was not saved");
+        return;
+      }
+      if (result.status === "denied" || result.status === "error") {
+        toast.error(result.error ?? "Could not record material purchase");
+        return;
+      }
+      const refreshed = await hydrateMaterialPurchases();
+      if (refreshed.status === "success" && refreshed.data) {
+        setMaterialPurchasesFromServer(refreshed.data);
+      }
+      toast.success(
+        "Material purchase recorded — inventory updated automatically",
+      );
+    } finally {
+      setIsSavingMaterial(false);
+    }
     setMatDialog(false);
     setMatPendingAttachments([]);
     setMatForm({
@@ -1666,7 +1881,7 @@ export function ProjectDetail({
               {getCustomerVisibleName(project)}
             </h1>
             {project.internalOrderCode && (
-              <span className="text-xs font-mono text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full shrink-0">
+              <span className="text-xs font-mono text-info bg-info/10 border border-info/30 px-2 py-0.5 rounded-full shrink-0">
                 {project.internalOrderCode}
               </span>
             )}
@@ -1701,19 +1916,19 @@ export function ProjectDetail({
                 !hasRejected &&
                 dispQty < (project.totalQty || 0);
               let statusLabel = "Material Waiting";
-              let statusClass = "bg-gray-100 text-gray-600 border-gray-200";
+              let statusClass = "bg-muted text-muted-foreground border-border";
               if (isReadyForDispatch) {
                 statusLabel = "Ready for Dispatch";
-                statusClass = "bg-green-100 text-green-700 border-green-200";
+                statusClass = "bg-success/10 text-success border-success/30";
               } else if (hasRejected) {
                 statusLabel = "Quality Pending";
-                statusClass = "bg-yellow-100 text-yellow-700 border-yellow-200";
+                statusClass = "bg-warning/15 text-warning border-warning/30";
               } else if (hasRework) {
                 statusLabel = "Rework";
-                statusClass = "bg-amber-100 text-amber-700 border-amber-200";
+                statusClass = "bg-warning/15 text-warning border-warning/30";
               } else if (pStages.some((s) => s.status === "InProgress")) {
                 statusLabel = "In Production";
-                statusClass = "bg-blue-100 text-blue-700 border-blue-200";
+                statusClass = "bg-info/10 text-info border-info/30";
               }
               return (
                 <span
@@ -1754,6 +1969,7 @@ export function ProjectDetail({
               fill="none"
               stroke="currentColor"
               strokeWidth="2"
+              aria-hidden="true"
             >
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
               <polyline points="14,2 14,8 20,8" />
@@ -1766,197 +1982,243 @@ export function ProjectDetail({
         )}
       </div>
 
-      <Tabs
-        value={activeTab}
-        onValueChange={setActiveTab}
-        data-ocid="project-detail.panel"
-      >
-        <div className="space-y-1">
-          {/* Planning group */}
-          <div className="flex flex-wrap items-center gap-1">
-            <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground px-1 mr-1 select-none">
-              Planning
-            </span>
-            <TabsList className="h-auto gap-1 flex-wrap bg-transparent p-0">
-              <TabsTrigger
-                value="overview"
-                data-ocid="project-detail.overview.tab"
-              >
-                Overview
-              </TabsTrigger>
-              <TabsTrigger value="design" data-ocid="project-detail.design.tab">
-                Design Files
-              </TabsTrigger>
-              <TabsTrigger value="bom" data-ocid="project-detail.bom.tab">
-                BOM
-              </TabsTrigger>
-              <TabsTrigger value="items" data-ocid="project-detail.items.tab">
-                Items
-              </TabsTrigger>
-              {!isRestrictedRole && (
-                <TabsTrigger
-                  value="costing"
-                  data-ocid="project-detail.costing.tab"
-                >
-                  Internal Costing
-                </TabsTrigger>
-              )}
-            </TabsList>
-          </div>
-          {/* Materials group */}
-          <div className="flex flex-wrap items-center gap-1">
-            <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground px-1 mr-1 select-none">
-              Materials
-            </span>
-            <TabsList className="h-auto gap-1 flex-wrap bg-transparent p-0">
-              <TabsTrigger
-                value="materials"
-                data-ocid="project-detail.materials.tab"
-              >
-                Materials
-              </TabsTrigger>
-              <TabsTrigger
-                value="material-usage"
-                data-ocid="project-detail.material-usage.tab"
-              >
-                Material Usage
-              </TabsTrigger>
-            </TabsList>
-          </div>
-          {/* Execution group */}
-          <div className="flex flex-wrap items-center gap-1">
-            <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground px-1 mr-1 select-none">
-              Execution
-            </span>
-            <TabsList className="h-auto gap-1 flex-wrap bg-transparent p-0">
-              <TabsTrigger
-                value="production"
-                data-ocid="project-detail.production.tab"
-              >
-                Production
-              </TabsTrigger>
-              <TabsTrigger
-                value="outsourced"
-                data-ocid="project-detail.outsourced.tab"
-              >
-                Outsourced
-              </TabsTrigger>
-              <TabsTrigger
-                value="inspection"
-                data-ocid="project-detail.inspection.tab"
-              >
-                Inspection
-              </TabsTrigger>
-              <TabsTrigger value="qms" data-ocid="project-detail.qms.tab">
-                QMS
-              </TabsTrigger>
-            </TabsList>
-          </div>
-          {/* Closure group */}
-          <div className="flex flex-wrap items-center gap-1">
-            <span className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground px-1 mr-1 select-none">
-              Closure
-            </span>
-            <TabsList className="h-auto gap-1 flex-wrap bg-transparent p-0">
-              <TabsTrigger
-                value="delivery"
-                data-ocid="project-detail.delivery.tab"
-              >
-                Delivery
-              </TabsTrigger>
-              {!isRestrictedRole && (
-                <TabsTrigger
-                  value="profit"
-                  data-ocid="project-detail.profit.tab"
-                >
-                  Profit &amp; Costing
-                </TabsTrigger>
-              )}
-              <TabsTrigger
-                value="timeline"
-                data-ocid="project-detail.timeline.tab"
-              >
-                Timeline
-              </TabsTrigger>
-            </TabsList>
-          </div>
+      <div data-ocid="project-detail.panel">
+        {/* Phase 8 — section-anchor chip row (blueprint §10.2/§12),
+            replacing the old click-one-tab-see-one-section switcher.
+            Same real Planning/Materials/Execution/Closure grouping and
+            the same isRestrictedRole gating as before — only the
+            mechanism changed, from "hide the other 13 sections" to
+            "scroll to this one." Sticky so it stays reachable while
+            scrolling a long project. */}
+        <div className="sticky top-0 z-10 -mx-4 md:-mx-6 px-4 md:px-6 py-2 bg-background/95 backdrop-blur border-b border-border space-y-1 overflow-x-auto">
+          <SectionChipGroup label="Planning">
+            <SectionChip
+              id="overview"
+              label="Overview"
+              onClick={scrollToSection}
+              active={activeTab}
+            />
+            <SectionChip
+              id="design"
+              label="Design Files"
+              onClick={scrollToSection}
+              active={activeTab}
+            />
+            <SectionChip
+              id="bom"
+              label="BOM"
+              onClick={scrollToSection}
+              active={activeTab}
+            />
+            <SectionChip
+              id="items"
+              label="Items"
+              onClick={scrollToSection}
+              active={activeTab}
+            />
+            {!isRestrictedRole && (
+              <SectionChip
+                id="costing"
+                label="Internal Costing"
+                onClick={scrollToSection}
+                active={activeTab}
+              />
+            )}
+          </SectionChipGroup>
+          <SectionChipGroup label="Materials">
+            <SectionChip
+              id="materials"
+              label="Materials"
+              onClick={scrollToSection}
+              active={activeTab}
+            />
+            <SectionChip
+              id="material-usage"
+              label="Material Usage"
+              onClick={scrollToSection}
+              active={activeTab}
+            />
+          </SectionChipGroup>
+          <SectionChipGroup label="Execution">
+            <SectionChip
+              id="production"
+              label="Production"
+              onClick={scrollToSection}
+              active={activeTab}
+            />
+            <SectionChip
+              id="outsourced"
+              label="Outsourced"
+              onClick={scrollToSection}
+              active={activeTab}
+            />
+            <SectionChip
+              id="inspection"
+              label="Inspection"
+              onClick={scrollToSection}
+              active={activeTab}
+            />
+            <SectionChip
+              id="qms"
+              label="QMS"
+              onClick={scrollToSection}
+              active={activeTab}
+            />
+          </SectionChipGroup>
+          <SectionChipGroup label="Closure">
+            <SectionChip
+              id="delivery"
+              label="Delivery"
+              onClick={scrollToSection}
+              active={activeTab}
+            />
+            {!isRestrictedRole && (
+              <SectionChip
+                id="profit"
+                label="Profit & Costing"
+                onClick={scrollToSection}
+                active={activeTab}
+              />
+            )}
+            <SectionChip
+              id="timeline"
+              label="Timeline"
+              onClick={scrollToSection}
+              active={activeTab}
+            />
+          </SectionChipGroup>
         </div>
-
-        {/* Tab 1 — Overview */}
-        <TabsContent value="overview" className="mt-4">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Project Overview</CardTitle>
-            </CardHeader>
-            <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
-              <div>
-                <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                  Project No
-                </p>
-                <p className="font-mono font-semibold mt-0.5">
-                  {project.projectNo}
-                </p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                  Customer
-                </p>
-                <p className="font-medium mt-0.5">{customer?.name ?? "—"}</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                  Project Name
-                </p>
-                <p className="font-medium mt-0.5">{project.projectName}</p>
-              </div>
-              <div>
-                <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                  Created Date
-                </p>
-                <p className="mt-0.5">
-                  {new Date(project.createdAt).toLocaleDateString("en-IN")}
-                </p>
-              </div>
-              <div className="sm:col-span-2">
-                <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                  Work Description
-                </p>
-                <p className="mt-0.5">{project.workDescription || "—"}</p>
-              </div>
-              {project.projectType === "REPEAT_ORDER" && (
+        <div className="space-y-6 mt-4">
+          {/* Tab 1 — Overview */}
+          <section id="section-overview" className="mt-4 scroll-mt-24">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Project Overview</CardTitle>
+              </CardHeader>
+              <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+                <div>
+                  <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                    Project No
+                  </p>
+                  <p className="font-mono font-semibold mt-0.5">
+                    {project.projectNo}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                    Customer
+                  </p>
+                  <p className="font-medium mt-0.5">{customer?.name ?? "—"}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                    Project Name
+                  </p>
+                  <p className="font-medium mt-0.5">{project.projectName}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                    Created Date
+                  </p>
+                  <p className="mt-0.5">
+                    {new Date(project.createdAt).toLocaleDateString("en-IN")}
+                  </p>
+                </div>
                 <div className="sm:col-span-2">
                   <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                    Repeat Order
+                    Work Description
                   </p>
-                  <div className="mt-0.5 flex items-center gap-2 flex-wrap">
-                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-50 border border-amber-200 text-amber-700 text-xs font-medium">
-                      <span className="font-mono">
-                        {project.internalOrderCode}
-                      </span>
-                      <span>·</span>
-                      <span>
-                        Internal tracking code — not shown to customer
-                      </span>
-                    </span>
-                    {project.originalProjectName && (
-                      <span className="text-xs text-muted-foreground">
-                        Customer sees:{" "}
-                        <strong>{project.originalProjectName}</strong>
-                      </span>
-                    )}
-                  </div>
+                  <p className="mt-0.5">{project.workDescription || "—"}</p>
                 </div>
-              )}
-              <div className="sm:col-span-2">
-                {(() => {
-                  if (project.totalQty == null) {
+                {project.projectType === "REPEAT_ORDER" && (
+                  <div className="sm:col-span-2">
+                    <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                      Repeat Order
+                    </p>
+                    <div className="mt-0.5 flex items-center gap-2 flex-wrap">
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-info/10 border border-info/30 text-info text-xs font-medium">
+                        <span className="font-mono">
+                          {project.internalOrderCode}
+                        </span>
+                        <span>·</span>
+                        <span>
+                          Internal tracking code — not shown to customer
+                        </span>
+                      </span>
+                      {project.originalProjectName && (
+                        <span className="text-xs text-muted-foreground">
+                          Customer sees:{" "}
+                          <strong>{project.originalProjectName}</strong>
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
+                <div className="sm:col-span-2">
+                  {(() => {
+                    if (project.totalQty == null) {
+                      return (
+                        <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-warning/15 border border-warning/30 text-warning text-xs font-medium">
+                          ⚠ Quantity not set
+                        </div>
+                      );
+                    }
+                    const dispatchedQty = (deliveryChallans || []).reduce(
+                      (sum, dc) =>
+                        sum +
+                        ((dc.projectEntries || []).find(
+                          (e) => e.projectId === project.id,
+                        )?.dispatchQty || 0),
+                      0,
+                    );
+                    const remainingQty = project.totalQty - dispatchedQty;
                     return (
-                      <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-yellow-50 border border-yellow-200 text-yellow-700 text-xs font-medium">
-                        ⚠ Quantity not set
+                      <div className="flex gap-3 flex-wrap">
+                        <div className="flex-1 min-w-[80px] rounded-md bg-muted/50 border border-border p-2 text-center">
+                          <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                            Total Qty
+                          </p>
+                          <p className="text-base font-bold mt-0.5">
+                            {project.totalQty}
+                          </p>
+                        </div>
+                        <div className="flex-1 min-w-[80px] rounded-md bg-muted/50 border border-border p-2 text-center">
+                          <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                            Dispatched
+                          </p>
+                          <p className="text-base font-bold mt-0.5">
+                            {dispatchedQty}
+                          </p>
+                        </div>
+                        <div className="flex-1 min-w-[80px] rounded-md bg-muted/50 border border-border p-2 text-center">
+                          <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                            Remaining
+                          </p>
+                          <p
+                            className={`text-base font-bold mt-0.5 ${remainingQty <= 0 ? "text-destructive" : "text-success"}`}
+                          >
+                            {remainingQty}
+                          </p>
+                        </div>
                       </div>
                     );
-                  }
-                  const dispatchedQty = (deliveryChallans || []).reduce(
+                  })()}
+                </div>
+                {/* Production Summary */}
+                {(() => {
+                  const prodRecord = projectProductions.find(
+                    (pp) => pp.projectId === project.id,
+                  );
+                  const pStages = prodRecord?.stages || [];
+                  const {
+                    acceptedQtyTotal: approvedQtyTotal,
+                    rejectedQtyTotal,
+                  } = getQualityQtyTotals(project.id);
+                  const producedQty = pStages
+                    .filter((s) => s.status === "Completed" && !s.isRework)
+                    .reduce((sum, s) => sum + (s.receivedQty || 0), 0);
+                  const reworkCount = pStages.filter((s) => s.isRework).length;
+                  const dispatchedQtySummary = (deliveryChallans || []).reduce(
                     (sum, dc) =>
                       sum +
                       ((dc.projectEntries || []).find(
@@ -1964,385 +2226,462 @@ export function ProjectDetail({
                       )?.dispatchQty || 0),
                     0,
                   );
-                  const remainingQty = project.totalQty - dispatchedQty;
                   return (
-                    <div className="flex gap-3 flex-wrap">
-                      <div className="flex-1 min-w-[80px] rounded-md bg-muted/50 border border-border p-2 text-center">
-                        <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                          Total Qty
-                        </p>
-                        <p className="text-base font-bold mt-0.5">
-                          {project.totalQty}
-                        </p>
-                      </div>
-                      <div className="flex-1 min-w-[80px] rounded-md bg-muted/50 border border-border p-2 text-center">
-                        <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                          Dispatched
-                        </p>
-                        <p className="text-base font-bold mt-0.5">
-                          {dispatchedQty}
-                        </p>
-                      </div>
-                      <div className="flex-1 min-w-[80px] rounded-md bg-muted/50 border border-border p-2 text-center">
-                        <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                          Remaining
-                        </p>
-                        <p
-                          className={`text-base font-bold mt-0.5 ${remainingQty <= 0 ? "text-destructive" : "text-green-600"}`}
-                        >
-                          {remainingQty}
-                        </p>
+                    <div className="sm:col-span-2 pt-2 border-t border-border">
+                      <p className="text-xs text-muted-foreground uppercase tracking-wide font-semibold mb-2">
+                        Production Summary
+                      </p>
+                      <div className="flex gap-2 flex-wrap">
+                        <div className="flex-1 min-w-[70px] rounded-md bg-info/10 border border-info/30 p-2 text-center">
+                          <p className="text-[10px] text-info uppercase tracking-wide">
+                            Produced
+                          </p>
+                          <p className="text-base font-bold text-info mt-0.5">
+                            {producedQty}
+                          </p>
+                        </div>
+                        <div className="flex-1 min-w-[70px] rounded-md bg-success/10 border border-success/30 p-2 text-center">
+                          <p className="text-[10px] text-success uppercase tracking-wide">
+                            Approved
+                          </p>
+                          <p className="text-base font-bold text-success mt-0.5">
+                            {approvedQtyTotal}
+                          </p>
+                        </div>
+                        <div className="flex-1 min-w-[70px] rounded-md bg-destructive/10 border border-destructive/30 p-2 text-center">
+                          <p className="text-[10px] text-destructive uppercase tracking-wide">
+                            Rejected
+                          </p>
+                          <p className="text-base font-bold text-destructive mt-0.5">
+                            {rejectedQtyTotal}
+                          </p>
+                        </div>
+                        <div className="flex-1 min-w-[70px] rounded-md bg-warning/15 border border-warning/30 p-2 text-center">
+                          <p className="text-[10px] text-warning uppercase tracking-wide">
+                            Rework
+                          </p>
+                          <p className="text-base font-bold text-warning mt-0.5">
+                            {reworkCount}
+                          </p>
+                        </div>
+                        <div className="flex-1 min-w-[70px] rounded-md bg-muted/50 border border-border p-2 text-center">
+                          <p className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                            Dispatched
+                          </p>
+                          <p className="text-base font-bold mt-0.5">
+                            {dispatchedQtySummary}
+                          </p>
+                        </div>
                       </div>
                     </div>
                   );
                 })()}
-              </div>
-              {/* Production Summary */}
-              {(() => {
-                const prodRecord = projectProductions.find(
-                  (pp) => pp.projectId === project.id,
-                );
-                const pStages = prodRecord?.stages || [];
-                const { acceptedQtyTotal: approvedQtyTotal, rejectedQtyTotal } =
-                  getQualityQtyTotals(project.id);
-                const producedQty = pStages
-                  .filter((s) => s.status === "Completed" && !s.isRework)
-                  .reduce((sum, s) => sum + (s.receivedQty || 0), 0);
-                const reworkCount = pStages.filter((s) => s.isRework).length;
-                const dispatchedQtySummary = (deliveryChallans || []).reduce(
-                  (sum, dc) =>
-                    sum +
-                    ((dc.projectEntries || []).find(
-                      (e) => e.projectId === project.id,
-                    )?.dispatchQty || 0),
-                  0,
-                );
-                return (
+                {/* Model 3 Workspace comparison (see chat) — the one
+                    genuine "at a glance" gap: financial/invoice state was
+                    otherwise only visible after scrolling past Design/BOM/
+                    Items/Costing/Materials/Production to reach the Profit
+                    & Costing section. Same real, already-hoisted
+                    allProjectInvoices/projectInvoiceBalanceDue the full
+                    list below uses — this is a summary of that same data,
+                    not a second computation of it. Jumps to the existing
+                    "profit" section rather than duplicating the list or
+                    the payment action here. */}
+                {allProjectInvoices.length > 0 && (
                   <div className="sm:col-span-2 pt-2 border-t border-border">
                     <p className="text-xs text-muted-foreground uppercase tracking-wide font-semibold mb-2">
-                      Production Summary
+                      Invoices
                     </p>
-                    <div className="flex gap-2 flex-wrap">
-                      <div className="flex-1 min-w-[70px] rounded-md bg-blue-50 border border-blue-200 p-2 text-center">
-                        <p className="text-[10px] text-blue-600 uppercase tracking-wide">
-                          Produced
-                        </p>
-                        <p className="text-base font-bold text-blue-700 mt-0.5">
-                          {producedQty}
-                        </p>
-                      </div>
-                      <div className="flex-1 min-w-[70px] rounded-md bg-green-50 border border-green-200 p-2 text-center">
-                        <p className="text-[10px] text-green-600 uppercase tracking-wide">
-                          Approved
-                        </p>
-                        <p className="text-base font-bold text-green-700 mt-0.5">
-                          {approvedQtyTotal}
-                        </p>
-                      </div>
-                      <div className="flex-1 min-w-[70px] rounded-md bg-red-50 border border-red-200 p-2 text-center">
-                        <p className="text-[10px] text-red-500 uppercase tracking-wide">
-                          Rejected
-                        </p>
-                        <p className="text-base font-bold text-red-600 mt-0.5">
-                          {rejectedQtyTotal}
-                        </p>
-                      </div>
-                      <div className="flex-1 min-w-[70px] rounded-md bg-amber-50 border border-amber-200 p-2 text-center">
-                        <p className="text-[10px] text-amber-600 uppercase tracking-wide">
-                          Rework
-                        </p>
-                        <p className="text-base font-bold text-amber-700 mt-0.5">
-                          {reworkCount}
-                        </p>
-                      </div>
-                      <div className="flex-1 min-w-[70px] rounded-md bg-muted/50 border border-border p-2 text-center">
-                        <p className="text-[10px] text-muted-foreground uppercase tracking-wide">
-                          Dispatched
-                        </p>
-                        <p className="text-base font-bold mt-0.5">
-                          {dispatchedQtySummary}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })()}
-              {customer && (
-                <>
-                  <div>
-                    <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                      Contact Person
-                    </p>
-                    <p className="mt-0.5">{customer.contactPerson || "—"}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                      Phone
-                    </p>
-                    <p className="mt-0.5">{customer.phone || "—"}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                      Address
-                    </p>
-                    <p className="mt-0.5">{customer.address || "—"}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                      GSTIN
-                    </p>
-                    <p className="font-mono mt-0.5">{customer.gstin || "—"}</p>
-                  </div>
-                </>
-              )}
-              <div className="sm:col-span-2 pt-2 border-t border-border space-y-3">
-                <div className="flex items-center justify-between">
-                  <p className="text-xs text-muted-foreground uppercase tracking-wide font-semibold">
-                    Purchase Orders
-                  </p>
-                  <p className="text-[11px] text-muted-foreground">
-                    Recorded from the Quotations module
-                  </p>
-                </div>
-
-                {(project.pos || []).length === 0 ? (
-                  <p
-                    className="text-[11px] text-muted-foreground"
-                    data-ocid="project-detail.po.empty_state"
-                  >
-                    No purchase orders added yet
-                  </p>
-                ) : (
-                  <div className="table-wrapper">
-                    <table
-                      className="w-full text-xs border-collapse"
-                      style={{ minWidth: "400px" }}
+                    <button
+                      type="button"
+                      onClick={() => scrollToSection("profit")}
+                      className="w-full flex items-center justify-between gap-3 rounded-md border border-border bg-muted/30 hover:bg-muted/60 transition-colors p-2.5 text-left"
                     >
-                      <thead>
-                        <tr className="border-b border-border bg-muted/30">
-                          <th className="text-left py-1.5 px-2 font-medium text-muted-foreground">
-                            PO Number
-                          </th>
-                          <th className="text-left py-1.5 px-2 font-medium text-muted-foreground">
-                            Date
-                          </th>
-                          <th className="text-right py-1.5 px-2 font-medium text-muted-foreground">
-                            Qty
-                          </th>
-                          <th className="text-left py-1.5 px-2 font-medium text-muted-foreground">
-                            Status
-                          </th>
-                          <th className="text-left py-1.5 px-2 font-medium text-muted-foreground">
-                            File
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {(project.pos || []).map((po, idx) => (
-                          <tr
-                            key={po.id}
-                            className="border-b border-border/50 hover:bg-muted/20"
-                            data-ocid={`project-detail.po.item.${idx + 1}`}
-                          >
-                            <td className="py-1.5 px-2 font-medium">
-                              {po.poNumber}
-                            </td>
-                            <td className="py-1.5 px-2 text-muted-foreground">
-                              {po.poDate || "—"}
-                            </td>
-                            <td className="py-1.5 px-2 text-right">
-                              {po.quantity}
-                            </td>
-                            <td className="py-1.5 px-2">
-                              {!isRestrictedRole ? (
-                                <Select
-                                  value={po.status}
-                                  onValueChange={(v) =>
-                                    handleUpdatePOStatus(
-                                      po,
-                                      v as ProjectPOStatus,
-                                    )
-                                  }
-                                >
-                                  <SelectTrigger className="h-6 text-xs w-28 border-0 bg-transparent p-0 shadow-none focus:ring-0">
-                                    <span
-                                      className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                                        po.status === "Open"
-                                          ? "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
-                                          : po.status === "In Progress"
-                                            ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
-                                            : "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-                                      }`}
-                                    >
-                                      {po.status}
-                                    </span>
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    <SelectItem
-                                      value="Open"
-                                      className="text-xs"
-                                    >
-                                      Open
-                                    </SelectItem>
-                                    <SelectItem
-                                      value="In Progress"
-                                      className="text-xs"
-                                    >
-                                      In Progress
-                                    </SelectItem>
-                                    <SelectItem
-                                      value="Completed"
-                                      className="text-xs"
-                                    >
-                                      Completed
-                                    </SelectItem>
-                                  </SelectContent>
-                                </Select>
-                              ) : (
-                                <span
-                                  className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                                    po.status === "Open"
-                                      ? "bg-blue-100 text-blue-700"
-                                      : po.status === "In Progress"
-                                        ? "bg-amber-100 text-amber-700"
-                                        : "bg-green-100 text-green-700"
-                                  }`}
-                                >
-                                  {po.status}
-                                </span>
-                              )}
-                            </td>
-                            <td className="py-1.5 px-2">
-                              {(() => {
-                                const masterPO = po.sharedPoId
-                                  ? (masterPOs || []).find(
-                                      (m) => m.sharedPoId === po.sharedPoId,
-                                    )
-                                  : null;
-                                const files = masterPO?.files || [];
-                                if (files.length === 0)
-                                  return (
-                                    <span className="text-muted-foreground">
-                                      —
-                                    </span>
-                                  );
-                                return (
-                                  <div className="flex flex-col gap-1">
-                                    {files.map((f, fi) => {
-                                      const isImage =
-                                        f.type === "image" ||
-                                        /\.(png|jpg|jpeg|gif|webp)$/i.test(
-                                          f.name || "",
-                                        );
-                                      const handleView = () => {
-                                        if (!f?.ref) {
-                                          alert("File not available");
-                                          return;
-                                        }
-                                        const byteString = atob(
-                                          f.ref.split(",")[1],
-                                        );
-                                        const mimeType =
-                                          f.type === "pdf"
-                                            ? "application/pdf"
-                                            : "image/jpeg";
-                                        const ab = new ArrayBuffer(
-                                          byteString.length,
-                                        );
-                                        const ia = new Uint8Array(ab);
-                                        for (
-                                          let i = 0;
-                                          i < byteString.length;
-                                          i++
-                                        )
-                                          ia[i] = byteString.charCodeAt(i);
-                                        const blob = new Blob([ab], {
-                                          type: mimeType,
-                                        });
-                                        const url = URL.createObjectURL(blob);
-                                        window.open(url, "_blank");
-                                      };
-                                      const handleDownload = () => {
-                                        const a = document.createElement("a");
-                                        a.href = f.ref;
-                                        a.download =
-                                          f.name || `po-file-${fi + 1}`;
-                                        a.click();
-                                      };
-                                      return (
-                                        <div
-                                          key={`${fi}-${f.name || fi}`}
-                                          className="flex items-center gap-1"
-                                        >
-                                          {isImage ? (
-                                            <img
-                                              src={f.ref}
-                                              alt={f.name}
-                                              className="max-h-6 rounded border cursor-pointer object-cover"
-                                              onClick={handleView}
-                                              onKeyDown={handleView}
-                                            />
-                                          ) : (
-                                            <FileText className="w-3 h-3 text-blue-600" />
-                                          )}
-                                          <button
-                                            type="button"
-                                            onClick={handleView}
-                                            className="text-blue-600 underline text-[10px] hover:text-blue-800"
-                                          >
-                                            View
-                                          </button>
-                                          <button
-                                            type="button"
-                                            onClick={handleDownload}
-                                            className="text-green-600 underline text-[10px] hover:text-green-800"
-                                          >
-                                            Download
-                                          </button>
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                                );
-                              })()}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                      <span className="text-sm">
+                        <span className="font-semibold">
+                          {allProjectInvoices.length}
+                        </span>{" "}
+                        invoice{allProjectInvoices.length !== 1 ? "s" : ""}
+                        {projectInvoiceBalanceDue > 0 ? (
+                          <>
+                            {" "}
+                            —{" "}
+                            <span className="text-warning font-semibold">
+                              ₹
+                              {projectInvoiceBalanceDue.toLocaleString(
+                                "en-IN",
+                                { minimumFractionDigits: 2 },
+                              )}{" "}
+                              due
+                            </span>
+                          </>
+                        ) : (
+                          <span className="text-success font-medium">
+                            {" "}
+                            — fully paid
+                          </span>
+                        )}
+                      </span>
+                      <span className="text-xs text-muted-foreground shrink-0">
+                        View →
+                      </span>
+                    </button>
                   </div>
                 )}
-              </div>
-              {isAdmin && (
-                <div className="sm:col-span-2 pt-2 border-t border-border">
-                  <p className="text-xs text-muted-foreground uppercase tracking-wide mb-2">
-                    Assigned Employees
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    {employees
-                      .filter(
+                {customer && (
+                  <>
+                    <div>
+                      <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                        Contact Person
+                      </p>
+                      <p className="mt-0.5">{customer.contactPerson || "—"}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                        Phone
+                      </p>
+                      <p className="mt-0.5">{customer.phone || "—"}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                        Address
+                      </p>
+                      <p className="mt-0.5">{customer.address || "—"}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                        GSTIN
+                      </p>
+                      <p className="font-mono mt-0.5">
+                        {customer.gstin || "—"}
+                      </p>
+                    </div>
+                  </>
+                )}
+                <div className="sm:col-span-2 pt-2 border-t border-border space-y-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-muted-foreground uppercase tracking-wide font-semibold">
+                      Purchase Orders
+                    </p>
+                    <p className="text-[11px] text-muted-foreground">
+                      Recorded from the Quotations module
+                    </p>
+                  </div>
+
+                  {(project.pos || []).length === 0 ? (
+                    <p
+                      className="text-[11px] text-muted-foreground"
+                      data-ocid="project-detail.po.empty_state"
+                    >
+                      No purchase orders added yet
+                    </p>
+                  ) : (
+                    <div className="table-wrapper">
+                      <table
+                        className="w-full text-xs border-collapse"
+                        style={{ minWidth: "400px" }}
+                      >
+                        <thead>
+                          <tr className="border-b border-border bg-muted/30">
+                            <th className="text-left py-1.5 px-2 font-medium text-muted-foreground">
+                              PO Number
+                            </th>
+                            <th className="text-left py-1.5 px-2 font-medium text-muted-foreground">
+                              Date
+                            </th>
+                            <th className="text-right py-1.5 px-2 font-medium text-muted-foreground">
+                              Qty
+                            </th>
+                            <th className="text-left py-1.5 px-2 font-medium text-muted-foreground">
+                              Status
+                            </th>
+                            <th className="text-left py-1.5 px-2 font-medium text-muted-foreground">
+                              File
+                            </th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(project.pos || []).map((po, idx) => (
+                            <tr
+                              key={po.id}
+                              className="border-b border-border/50 hover:bg-muted/20"
+                              data-ocid={`project-detail.po.item.${idx + 1}`}
+                            >
+                              <td className="py-1.5 px-2 font-medium">
+                                {po.poNumber}
+                              </td>
+                              <td className="py-1.5 px-2 text-muted-foreground">
+                                {po.poDate || "—"}
+                              </td>
+                              <td className="py-1.5 px-2 text-right">
+                                {po.quantity}
+                              </td>
+                              <td className="py-1.5 px-2">
+                                {!isRestrictedRole ? (
+                                  <Select
+                                    value={po.status}
+                                    onValueChange={(v) =>
+                                      handleUpdatePOStatus(
+                                        po,
+                                        v as ProjectPOStatus,
+                                      )
+                                    }
+                                  >
+                                    <SelectTrigger className="h-6 text-xs w-28 border-0 bg-transparent p-0 shadow-none focus:ring-0">
+                                      <span
+                                        className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                          po.status === "Open"
+                                            ? "bg-info/10 text-info"
+                                            : po.status === "In Progress"
+                                              ? "bg-warning/15 text-warning"
+                                              : "bg-success/10 text-success"
+                                        }`}
+                                      >
+                                        {po.status}
+                                      </span>
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      <SelectItem
+                                        value="Open"
+                                        className="text-xs"
+                                      >
+                                        Open
+                                      </SelectItem>
+                                      <SelectItem
+                                        value="In Progress"
+                                        className="text-xs"
+                                      >
+                                        In Progress
+                                      </SelectItem>
+                                      <SelectItem
+                                        value="Completed"
+                                        className="text-xs"
+                                      >
+                                        Completed
+                                      </SelectItem>
+                                    </SelectContent>
+                                  </Select>
+                                ) : (
+                                  <span
+                                    className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                      po.status === "Open"
+                                        ? "bg-info/10 text-info"
+                                        : po.status === "In Progress"
+                                          ? "bg-warning/15 text-warning"
+                                          : "bg-success/10 text-success"
+                                    }`}
+                                  >
+                                    {po.status}
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-1.5 px-2">
+                                {(() => {
+                                  const masterPO = po.sharedPoId
+                                    ? (masterPOs || []).find(
+                                        (m) => m.sharedPoId === po.sharedPoId,
+                                      )
+                                    : null;
+                                  const files = masterPO?.files || [];
+                                  if (files.length === 0)
+                                    return (
+                                      <span className="text-muted-foreground">
+                                        —
+                                      </span>
+                                    );
+                                  return (
+                                    <div className="flex flex-col gap-1">
+                                      {files.map((f, fi) => {
+                                        const isImage =
+                                          f.type === "image" ||
+                                          /\.(png|jpg|jpeg|gif|webp)$/i.test(
+                                            f.name || "",
+                                          );
+                                        const handleView = () => {
+                                          if (!f?.ref) {
+                                            alert("File not available");
+                                            return;
+                                          }
+                                          const byteString = atob(
+                                            f.ref.split(",")[1],
+                                          );
+                                          const mimeType =
+                                            f.type === "pdf"
+                                              ? "application/pdf"
+                                              : "image/jpeg";
+                                          const ab = new ArrayBuffer(
+                                            byteString.length,
+                                          );
+                                          const ia = new Uint8Array(ab);
+                                          for (
+                                            let i = 0;
+                                            i < byteString.length;
+                                            i++
+                                          )
+                                            ia[i] = byteString.charCodeAt(i);
+                                          const blob = new Blob([ab], {
+                                            type: mimeType,
+                                          });
+                                          const url = URL.createObjectURL(blob);
+                                          window.open(url, "_blank");
+                                        };
+                                        const handleDownload = () => {
+                                          const a = document.createElement("a");
+                                          a.href = f.ref;
+                                          a.download =
+                                            f.name || `po-file-${fi + 1}`;
+                                          a.click();
+                                        };
+                                        return (
+                                          <div
+                                            key={`${fi}-${f.name || fi}`}
+                                            className="flex items-center gap-1"
+                                          >
+                                            {isImage ? (
+                                              <img
+                                                src={f.ref}
+                                                alt={f.name}
+                                                className="max-h-6 rounded border cursor-pointer object-cover"
+                                                onClick={handleView}
+                                                onKeyDown={handleView}
+                                              />
+                                            ) : (
+                                              <FileText className="w-3 h-3 text-info" />
+                                            )}
+                                            <button
+                                              type="button"
+                                              onClick={handleView}
+                                              className="text-info underline text-[10px] hover:text-info/80"
+                                            >
+                                              View
+                                            </button>
+                                            <button
+                                              type="button"
+                                              onClick={handleDownload}
+                                              className="text-success underline text-[10px] hover:text-success/80"
+                                            >
+                                              Download
+                                            </button>
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  );
+                                })()}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+                {isAdmin && (
+                  <div className="sm:col-span-2 pt-2 border-t border-border">
+                    <p className="text-xs text-muted-foreground uppercase tracking-wide mb-2">
+                      Assigned Employees
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {employees
+                        .filter(
+                          (e) => e.role === "Designer" || e.role === "Worker",
+                        )
+                        .map((emp) => {
+                          const isAssigned =
+                            project.assignedEmployeeIds?.includes(emp.id) ??
+                            false;
+                          return (
+                            <button
+                              key={emp.id}
+                              type="button"
+                              onClick={async () => {
+                                // Diff-based single-pair write, never a
+                                // wholesale replace of the join table (see
+                                // lib/projectEmployeesApi.ts).
+                                const result = isAssigned
+                                  ? await removeProjectEmployeeRemote(
+                                      project.id,
+                                      emp.id,
+                                    )
+                                  : await addProjectEmployeeRemote(
+                                      project.id,
+                                      emp.id,
+                                    );
+                                if (result.status === "unauthenticated") {
+                                  toast.error(
+                                    "Not signed in to the server - assignment was not saved",
+                                  );
+                                  return;
+                                }
+                                if (
+                                  result.status === "denied" ||
+                                  result.status === "error"
+                                ) {
+                                  toast.error(
+                                    result.error ??
+                                      "Could not save employee assignment",
+                                  );
+                                  return;
+                                }
+                                const current =
+                                  project.assignedEmployeeIds ?? [];
+                                const updated = isAssigned
+                                  ? current.filter((id) => id !== emp.id)
+                                  : [...current, emp.id];
+                                updateProject({
+                                  ...project,
+                                  assignedEmployeeIds: updated,
+                                });
+                              }}
+                              className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                                isAssigned
+                                  ? "bg-primary text-primary-foreground border-primary"
+                                  : "bg-background text-muted-foreground border-border hover:border-primary hover:text-primary"
+                              }`}
+                              data-ocid="project-detail.assign.toggle"
+                            >
+                              {emp.name} ({emp.role})
+                            </button>
+                          );
+                        })}
+                      {employees.filter(
                         (e) => e.role === "Designer" || e.role === "Worker",
-                      )
-                      .map((emp) => {
+                      ).length === 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          No designers or workers available
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {isAdmin && (
+                  <div className="sm:col-span-2 pt-2 border-t border-border">
+                    <p className="text-xs text-muted-foreground uppercase tracking-wide mb-2">
+                      Assigned Machinery
+                    </p>
+                    <p className="text-[11px] text-muted-foreground mb-2">
+                      Planning only — assigning a machine here does not create
+                      usage or revenue.
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {machines.map((m) => {
                         const isAssigned =
-                          project.assignedEmployeeIds?.includes(emp.id) ??
-                          false;
+                          project.assignedMachineIds?.includes(m.id) ?? false;
                         return (
                           <button
-                            key={emp.id}
+                            key={m.id}
                             type="button"
                             onClick={async () => {
                               // Diff-based single-pair write, never a
                               // wholesale replace of the join table (see
-                              // lib/projectEmployeesApi.ts).
+                              // lib/projectMachineryApi.ts).
                               const result = isAssigned
-                                ? await removeProjectEmployeeRemote(
+                                ? await removeProjectMachineRemote(
                                     project.id,
-                                    emp.id,
+                                    m.id,
                                   )
-                                : await addProjectEmployeeRemote(
+                                : await addProjectMachineRemote(
                                     project.id,
-                                    emp.id,
+                                    m.id,
                                   );
                               if (result.status === "unauthenticated") {
                                 toast.error(
@@ -2356,17 +2695,17 @@ export function ProjectDetail({
                               ) {
                                 toast.error(
                                   result.error ??
-                                    "Could not save employee assignment",
+                                    "Could not save machine assignment",
                                 );
                                 return;
                               }
-                              const current = project.assignedEmployeeIds ?? [];
+                              const current = project.assignedMachineIds ?? [];
                               const updated = isAssigned
-                                ? current.filter((id) => id !== emp.id)
-                                : [...current, emp.id];
+                                ? current.filter((id) => id !== m.id)
+                                : [...current, m.id];
                               updateProject({
                                 ...project,
-                                assignedEmployeeIds: updated,
+                                assignedMachineIds: updated,
                               });
                             }}
                             className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
@@ -2374,971 +2713,732 @@ export function ProjectDetail({
                                 ? "bg-primary text-primary-foreground border-primary"
                                 : "bg-background text-muted-foreground border-border hover:border-primary hover:text-primary"
                             }`}
-                            data-ocid="project-detail.assign.toggle"
+                            data-ocid="project-detail.assign-machine.toggle"
                           >
-                            {emp.name} ({emp.role})
+                            {m.name} ({m.machineCode})
                           </button>
                         );
                       })}
-                    {employees.filter(
-                      (e) => e.role === "Designer" || e.role === "Worker",
-                    ).length === 0 && (
-                      <p className="text-xs text-muted-foreground">
-                        No designers or workers available
-                      </p>
-                    )}
+                      {machines.length === 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          No machines registered
+                        </p>
+                      )}
+                    </div>
                   </div>
-                </div>
-              )}
-              {isAdmin && (
-                <div className="sm:col-span-2 pt-2 border-t border-border">
-                  <p className="text-xs text-muted-foreground uppercase tracking-wide mb-2">
-                    Assigned Machinery
-                  </p>
-                  <p className="text-[11px] text-muted-foreground mb-2">
-                    Planning only — assigning a machine here does not create
-                    usage or revenue.
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    {machines.map((m) => {
-                      const isAssigned =
-                        project.assignedMachineIds?.includes(m.id) ?? false;
-                      return (
-                        <button
-                          key={m.id}
-                          type="button"
-                          onClick={async () => {
-                            // Diff-based single-pair write, never a
-                            // wholesale replace of the join table (see
-                            // lib/projectMachineryApi.ts).
-                            const result = isAssigned
-                              ? await removeProjectMachineRemote(
-                                  project.id,
-                                  m.id,
-                                )
-                              : await addProjectMachineRemote(project.id, m.id);
-                            if (result.status === "unauthenticated") {
-                              toast.error(
-                                "Not signed in to the server - assignment was not saved",
-                              );
-                              return;
-                            }
-                            if (
-                              result.status === "denied" ||
-                              result.status === "error"
-                            ) {
-                              toast.error(
-                                result.error ??
-                                  "Could not save machine assignment",
-                              );
-                              return;
-                            }
-                            const current = project.assignedMachineIds ?? [];
-                            const updated = isAssigned
-                              ? current.filter((id) => id !== m.id)
-                              : [...current, m.id];
-                            updateProject({
-                              ...project,
-                              assignedMachineIds: updated,
-                            });
-                          }}
-                          className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
-                            isAssigned
-                              ? "bg-primary text-primary-foreground border-primary"
-                              : "bg-background text-muted-foreground border-border hover:border-primary hover:text-primary"
-                          }`}
-                          data-ocid="project-detail.assign-machine.toggle"
-                        >
-                          {m.name} ({m.machineCode})
-                        </button>
-                      );
-                    })}
-                    {machines.length === 0 && (
-                      <p className="text-xs text-muted-foreground">
-                        No machines registered
-                      </p>
-                    )}
+                )}
+                {isAdmin && (
+                  <div className="sm:col-span-2 pt-2 border-t border-border">
+                    <p className="text-xs text-muted-foreground uppercase tracking-wide mb-2">
+                      Assigned Dies/Tooling
+                    </p>
+                    <p className="text-[11px] text-muted-foreground mb-2">
+                      Dies are reusable — assigning here is a planning reference
+                      only, not ownership.
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {dies.map((d) => {
+                        const isAssigned =
+                          project.assignedDieIds?.includes(d.id) ?? false;
+                        return (
+                          <button
+                            key={d.id}
+                            type="button"
+                            onClick={async () => {
+                              // Diff-based single-pair write, never a
+                              // wholesale replace of the join table (see
+                              // lib/projectDiesApi.ts).
+                              const result = isAssigned
+                                ? await removeProjectDieRemote(project.id, d.id)
+                                : await addProjectDieRemote(project.id, d.id);
+                              if (result.status === "unauthenticated") {
+                                toast.error(
+                                  "Not signed in to the server - assignment was not saved",
+                                );
+                                return;
+                              }
+                              if (
+                                result.status === "denied" ||
+                                result.status === "error"
+                              ) {
+                                toast.error(
+                                  result.error ??
+                                    "Could not save die assignment",
+                                );
+                                return;
+                              }
+                              const current = project.assignedDieIds ?? [];
+                              const updated = isAssigned
+                                ? current.filter((id) => id !== d.id)
+                                : [...current, d.id];
+                              updateProject({
+                                ...project,
+                                assignedDieIds: updated,
+                              });
+                            }}
+                            className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                              isAssigned
+                                ? "bg-primary text-primary-foreground border-primary"
+                                : "bg-background text-muted-foreground border-border hover:border-primary hover:text-primary"
+                            }`}
+                            data-ocid="project-detail.assign-die.toggle"
+                          >
+                            {d.name} ({d.dieCode})
+                          </button>
+                        );
+                      })}
+                      {dies.length === 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          No dies registered
+                        </p>
+                      )}
+                    </div>
                   </div>
-                </div>
-              )}
-              {isAdmin && (
-                <div className="sm:col-span-2 pt-2 border-t border-border">
-                  <p className="text-xs text-muted-foreground uppercase tracking-wide mb-2">
-                    Assigned Dies/Tooling
-                  </p>
-                  <p className="text-[11px] text-muted-foreground mb-2">
-                    Dies are reusable — assigning here is a planning reference
-                    only, not ownership.
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    {dies.map((d) => {
-                      const isAssigned =
-                        project.assignedDieIds?.includes(d.id) ?? false;
-                      return (
-                        <button
-                          key={d.id}
-                          type="button"
-                          onClick={async () => {
-                            // Diff-based single-pair write, never a
-                            // wholesale replace of the join table (see
-                            // lib/projectDiesApi.ts).
-                            const result = isAssigned
-                              ? await removeProjectDieRemote(project.id, d.id)
-                              : await addProjectDieRemote(project.id, d.id);
-                            if (result.status === "unauthenticated") {
-                              toast.error(
-                                "Not signed in to the server - assignment was not saved",
-                              );
-                              return;
-                            }
-                            if (
-                              result.status === "denied" ||
-                              result.status === "error"
-                            ) {
-                              toast.error(
-                                result.error ?? "Could not save die assignment",
-                              );
-                              return;
-                            }
-                            const current = project.assignedDieIds ?? [];
-                            const updated = isAssigned
-                              ? current.filter((id) => id !== d.id)
-                              : [...current, d.id];
-                            updateProject({
-                              ...project,
-                              assignedDieIds: updated,
-                            });
-                          }}
-                          className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
-                            isAssigned
-                              ? "bg-primary text-primary-foreground border-primary"
-                              : "bg-background text-muted-foreground border-border hover:border-primary hover:text-primary"
-                          }`}
-                          data-ocid="project-detail.assign-die.toggle"
-                        >
-                          {d.name} ({d.dieCode})
-                        </button>
-                      );
-                    })}
-                    {dies.length === 0 && (
-                      <p className="text-xs text-muted-foreground">
-                        No dies registered
-                      </p>
-                    )}
-                  </div>
-                </div>
-              )}
-            </CardContent>
-          </Card>
+                )}
+              </CardContent>
+            </Card>
 
-          {revView && projectServiceRevenue.length > 0 && (
-            <Card data-ocid="project-detail.service_revenue.card">
-              <CardContent className="pt-6">
-                <p className="text-xs text-muted-foreground uppercase tracking-wide mb-1">
-                  Machine / Service Revenue
-                </p>
-                <p className="text-[11px] text-muted-foreground mb-3">
-                  Revenue only — separate from Profit &amp; Costing. Labeled by
-                  billable service, never by machine asset.
-                </p>
-                <div className="space-y-2">
-                  {projectServiceRevenue.map((r) => (
-                    <div
-                      key={r.serviceName}
-                      className="flex items-center justify-between text-sm border-b border-border/60 pb-1.5 last:border-0"
-                    >
-                      <span>
-                        {r.serviceName} — {r.totalQty} {r.unit || ""}
-                      </span>
-                      <span className="font-medium text-green-700">
+            {revView && projectServiceRevenue.length > 0 && (
+              <Card data-ocid="project-detail.service_revenue.card">
+                <CardContent className="pt-6">
+                  <p className="text-xs text-muted-foreground uppercase tracking-wide mb-1">
+                    Machine / Service Revenue
+                  </p>
+                  <p className="text-[11px] text-muted-foreground mb-3">
+                    Revenue only — separate from Profit &amp; Costing. Labeled
+                    by billable service, never by machine asset.
+                  </p>
+                  <div className="space-y-2">
+                    {projectServiceRevenue.map((r) => (
+                      <div
+                        key={r.serviceName}
+                        className="flex items-center justify-between text-sm border-b border-border/60 pb-1.5 last:border-0"
+                      >
+                        <span>
+                          {r.serviceName} — {r.totalQty} {r.unit || ""}
+                        </span>
+                        <span className="font-medium text-success">
+                          ₹
+                          {r.totalRevenue.toLocaleString("en-IN", {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}
+                        </span>
+                      </div>
+                    ))}
+                    <div className="flex items-center justify-between text-sm font-semibold pt-1">
+                      <span>Total</span>
+                      <span className="text-success">
                         ₹
-                        {r.totalRevenue.toLocaleString("en-IN", {
+                        {projectServiceRevenueTotal.toLocaleString("en-IN", {
                           minimumFractionDigits: 2,
                           maximumFractionDigits: 2,
                         })}
                       </span>
                     </div>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+          </section>
+
+          {/* Tab 2 — Design Files.
+            Monster-1 — retired: this tab's storage is local-only (base64
+            file data directly in the Zustand-persisted localStorage blob,
+            informal `df-${Date.now()}` ids) and functionally superseded by
+            the Drawing Repository (drawingEditor/, Supabase Storage-backed,
+            multi-device, has its own upload flow that doesn't depend on
+            this tab at all). New uploads are disabled here so no further
+            local-only data accumulates; existing entries for this project
+            (if any were uploaded before this change) remain visible below,
+            including "Edit in Drawing Editor" (which already creates a
+            real, Supabase-backed drawing), so nothing already-created is
+            hidden or lost. */}
+          <section id="section-design" className="mt-4 space-y-4 scroll-mt-24">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold">Design & Drawing Files</h2>
+            </div>
+            <div
+              className="rounded-md border border-warning/30 bg-warning/15 px-3 py-2 text-xs text-warning"
+              data-ocid="project-detail.design.retired_notice"
+            >
+              This tab is retired and no longer accepts new uploads. Use{" "}
+              <strong>Drawing Repository</strong> (in the sidebar) to upload and
+              manage drawings — it's the same capability, properly synced across
+              devices. Files already listed below remain accessible.
+            </div>
+            <div className="table-wrapper">
+              <div
+                className="rounded-md border"
+                data-ocid="project-detail.design.table"
+              >
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/40">
+                      <TableHead className="text-xs font-semibold">
+                        File Name
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold">
+                        Uploaded
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold w-24">
+                        Actions
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {projDesignFiles.map((f, i) => {
+                      // Read-only lookup — never findOrCreateMasterDrawing,
+                      // which would create a hidden Working Drawing just from
+                      // rendering this list. Only Edit (below) may create one.
+                      const master = allDrawings.find(
+                        (d) => d.sourceDesignFileId === f.id,
+                      );
+                      const workDrawings = master
+                        ? buildDrawingSubtree(master, allDrawings).children
+                        : [];
+                      return (
+                        <Fragment key={f.id}>
+                          <TableRow
+                            data-ocid={`project-detail.design.item.${i + 1}`}
+                          >
+                            <TableCell className="text-sm font-medium">
+                              <div className="flex items-center gap-1.5">
+                                <span>{f.fileName}</span>
+                                <Badge
+                                  variant="outline"
+                                  className="text-[10px] px-1 py-0"
+                                >
+                                  Original
+                                </Badge>
+                                {master && (
+                                  <Badge
+                                    variant="outline"
+                                    className="text-[10px] px-1 py-0 border-info/40 text-info"
+                                  >
+                                    Edited
+                                  </Badge>
+                                )}
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-xs text-muted-foreground">
+                              {new Date(f.uploadedAt).toLocaleDateString(
+                                "en-IN",
+                              )}
+                            </TableCell>
+                            <TableCell className="flex gap-1">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-6 px-2"
+                                onClick={() =>
+                                  master
+                                    ? setPreviewWorkDrawing(master)
+                                    : setPreviewFile(f)
+                                }
+                                title={
+                                  master
+                                    ? "Preview — latest saved edited version"
+                                    : "Preview Original"
+                                }
+                                data-ocid={`project-detail.design.preview_button.${i + 1}`}
+                              >
+                                <Eye className="w-3.5 h-3.5" />
+                              </Button>
+                              {master && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-6 px-2"
+                                  onClick={() => setPreviewFile(f)}
+                                  title="Preview Original — untouched uploaded file"
+                                  data-ocid={`project-detail.design.preview_original_button.${i + 1}`}
+                                >
+                                  <FileText className="w-3.5 h-3.5" />
+                                </Button>
+                              )}
+                              {dEdit && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-6 px-2"
+                                  onClick={() => handleEditDesignFile(f)}
+                                  title="Edit"
+                                  data-ocid={`project-detail.design.edit_button.${i + 1}`}
+                                >
+                                  <Pencil className="w-3.5 h-3.5" />
+                                </Button>
+                              )}
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-6 px-2"
+                                onClick={() => handleDownloadFile(f)}
+                                title="Download Original"
+                                data-ocid={`project-detail.design.secondary_button.${i + 1}`}
+                              >
+                                <Download className="w-3.5 h-3.5" />
+                              </Button>
+                              {pDelete && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-6 px-2 text-destructive hover:text-destructive"
+                                  onClick={() => {
+                                    if (!pDelete) {
+                                      alert("Access restricted");
+                                      return;
+                                    }
+                                    deleteDesignFile(f.id);
+                                    toast.success("File removed");
+                                  }}
+                                  data-ocid={`project-detail.design.delete_button.${i + 1}`}
+                                >
+                                  ×
+                                </Button>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                          {dView &&
+                            workDrawings.map((child) => (
+                              <DrawingTreeRow
+                                key={child.drawing.id}
+                                node={child}
+                                depth={1}
+                                canEdit={dEdit}
+                                canDelete={dDelete}
+                                onOpen={(d) =>
+                                  onOpenDrawingEditor?.({
+                                    projectId,
+                                    drawingId: d.id,
+                                  })
+                                }
+                                onDelete={handleDrawingDelete}
+                                onPreview={setPreviewWorkDrawing}
+                                onPrint={handlePrintWorkDrawing}
+                                showRename={false}
+                                showLink={false}
+                                showDuplicate={false}
+                                openLabel="Edit"
+                                compact
+                              />
+                            ))}
+                        </Fragment>
+                      );
+                    })}
+                    {projDesignFiles.length === 0 && (
+                      <TableRow>
+                        <TableCell
+                          colSpan={3}
+                          className="text-center py-8 text-sm text-muted-foreground"
+                          data-ocid="project-detail.design.empty_state"
+                        >
+                          No design files uploaded yet
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+            <DesignFilePreviewDialog
+              file={previewFile}
+              open={!!previewFile}
+              onOpenChange={(o) => !o && setPreviewFile(null)}
+              onDownload={handleDownloadFile}
+            />
+            <WorkDrawingPreviewDialog
+              drawing={previewWorkDrawing}
+              open={!!previewWorkDrawing}
+              onOpenChange={(o) => !o && setPreviewWorkDrawing(null)}
+              company={{
+                companyName: settings?.companyName || "Your Company",
+                companyLogoDataUrl: settings?.companyLogo || undefined,
+              }}
+            />
+          </section>
+
+          {/* Tab 3 — Internal Costing */}
+          <section id="section-costing" className="mt-4 scroll-mt-24">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-warning" />
+                  Internal Costing Sheet
+                  <Badge variant="outline" className="text-xs font-normal ml-1">
+                    Internal Use Only — Not visible to customer
+                  </Badge>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {(
+                    [
+                      ["rawMaterialCost", "Raw Material Cost"],
+                      ["cncCost", "CNC / Laser Cutting Cost"],
+                      ["hardwareCost", "Hardware Cost"],
+                      ["powderCoatingCost", "Powder Coating Cost"],
+                      ["assemblyCost", "Assembly Cost"],
+                      ["packingCost", "Packing Cost"],
+                      ["labourCost", "Labour Cost"],
+                      ["machineCost", "Machine / Equipment Cost"],
+                      ["outsourceCost", "Outsourced Work Cost"],
+                      ["consumablesCost", "Consumables Cost"],
+                      ["electricityCost", "Electricity Cost"],
+                      ["scrapLossCost", "Scrap / Material Loss"],
+                      ["transportCost", "Transport Cost"],
+                    ] as [keyof typeof costing, string][]
+                  ).map(([field, label]) => (
+                    <div key={field} className="space-y-1.5">
+                      <Label htmlFor={`costing-${field}`}>{label} (₹)</Label>
+                      <Input
+                        id={`costing-${field}`}
+                        type="number"
+                        min={0}
+                        value={(costing[field] as number) ?? 0}
+                        onChange={(e) =>
+                          setCosting((c) => ({
+                            ...c,
+                            [field]: Number(e.target.value),
+                          }))
+                        }
+                        data-ocid="project-detail.costing.input"
+                      />
+                    </div>
                   ))}
-                  <div className="flex items-center justify-between text-sm font-semibold pt-1">
-                    <span>Total</span>
-                    <span className="text-green-700">
-                      ₹
-                      {projectServiceRevenueTotal.toLocaleString("en-IN", {
-                        minimumFractionDigits: 2,
-                        maximumFractionDigits: 2,
-                      })}
+                </div>
+                {/* Custom Costs Section */}
+                <div className="space-y-3 pt-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-semibold text-foreground">
+                      Extra Costs
+                    </span>
+                    {!showAddCustomCost && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setShowAddCustomCost(true)}
+                        data-ocid="project-detail.costing.open_modal_button"
+                      >
+                        <Plus className="w-3.5 h-3.5 mr-1" /> Add Custom Cost
+                      </Button>
+                    )}
+                  </div>
+                  {(costing.extraCosts || []).length > 0 && (
+                    <div className="table-wrapper">
+                      <div className="rounded-md border overflow-hidden">
+                        <table
+                          className="w-full text-sm"
+                          style={{ minWidth: "400px" }}
+                        >
+                          <thead className="bg-muted/50">
+                            <tr>
+                              <th className="px-3 py-2 text-left font-medium text-muted-foreground">
+                                #
+                              </th>
+                              <th className="px-3 py-2 text-left font-medium text-muted-foreground">
+                                Cost Name
+                              </th>
+                              <th className="px-3 py-2 text-left font-medium text-muted-foreground">
+                                Category
+                              </th>
+                              <th className="px-3 py-2 text-right font-medium text-muted-foreground">
+                                Amount
+                              </th>
+                              <th className="px-3 py-2 text-center font-medium text-muted-foreground">
+                                Del
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(costing.extraCosts || []).map((entry, idx) => (
+                              <tr
+                                key={entry.id}
+                                className="border-t"
+                                data-ocid={`project-detail.costing.item.${idx + 1}`}
+                              >
+                                <td className="px-3 py-2 text-muted-foreground">
+                                  {idx + 1}
+                                </td>
+                                <td className="px-3 py-2">{entry.name}</td>
+                                <td className="px-3 py-2">
+                                  <span className="text-xs px-2 py-0.5 rounded-full bg-muted">
+                                    {entry.category}
+                                  </span>
+                                </td>
+                                <td className="px-3 py-2 text-right font-medium">
+                                  {fmt(entry.amount)}
+                                </td>
+                                <td className="px-3 py-2 text-center">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleDeleteCustomCost(entry.id)
+                                    }
+                                    className="text-destructive hover:text-destructive/80"
+                                    data-ocid={`project-detail.costing.delete_button.${idx + 1}`}
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+                  {showAddCustomCost && (
+                    <div className="flex flex-col sm:flex-row gap-2 p-3 rounded-md border bg-muted/30">
+                      <Input
+                        placeholder="Cost Name"
+                        value={newCustomCost.name}
+                        onChange={(e) =>
+                          setNewCustomCost((c) => ({
+                            ...c,
+                            name: e.target.value,
+                          }))
+                        }
+                        className="flex-1"
+                        data-ocid="project-detail.costing.input"
+                      />
+                      <select
+                        value={newCustomCost.category}
+                        onChange={(e) =>
+                          setNewCustomCost((c) => ({
+                            ...c,
+                            category: e.target.value as
+                              | "Material"
+                              | "Process"
+                              | "Misc",
+                          }))
+                        }
+                        className="border border-input rounded-md px-3 py-2 text-sm bg-background"
+                      >
+                        <option>Material</option>
+                        <option>Process</option>
+                        <option>Misc</option>
+                      </select>
+                      <Input
+                        type="number"
+                        placeholder="Amount"
+                        min={0}
+                        value={newCustomCost.amount}
+                        onChange={(e) =>
+                          setNewCustomCost((c) => ({
+                            ...c,
+                            amount: e.target.value,
+                          }))
+                        }
+                        className="w-28"
+                        data-ocid="project-detail.costing.input"
+                      />
+                      <Button
+                        size="sm"
+                        onClick={handleAddCustomCost}
+                        data-ocid="project-detail.costing.save_button"
+                      >
+                        Add
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => setShowAddCustomCost(false)}
+                        data-ocid="project-detail.costing.cancel_button"
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center justify-between pt-3 border-t">
+                  <div>
+                    <span className="text-sm text-muted-foreground">
+                      Total Internal Cost:{" "}
+                    </span>
+                    <span className="text-lg font-bold">
+                      {fmt(totalCosting)}
                     </span>
                   </div>
+                  <Button
+                    onClick={handleSaveCosting}
+                    data-ocid="project-detail.costing.save_button"
+                  >
+                    <Save className="w-4 h-4 mr-1.5" /> Save Costing
+                  </Button>
                 </div>
               </CardContent>
             </Card>
-          )}
-        </TabsContent>
+          </section>
 
-        {/* Tab 2 — Design Files */}
-        <TabsContent value="design" className="mt-4 space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold">Design & Drawing Files</h2>
-            {pCreate && (
-              <>
+          {/* Tab 4 — Material Purchases */}
+          <section
+            id="section-materials"
+            className="mt-4 space-y-4 scroll-mt-24"
+          >
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold">Raw Material Purchases</h2>
+              {pCreate && (
                 <Button
                   size="sm"
-                  variant="outline"
-                  onClick={() => fileInputRef.current?.click()}
-                  data-ocid="project-detail.upload_button"
+                  onClick={() => setMatDialog(true)}
+                  data-ocid="project-detail.materials.open_modal_button"
                 >
-                  <Upload className="w-3.5 h-3.5 mr-1.5" /> Upload File
+                  <Plus className="w-3.5 h-3.5 mr-1" /> Add Purchase
                 </Button>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept="*/*"
-                  className="hidden"
-                  onChange={handleFileUpload}
-                />
-              </>
-            )}
-          </div>
-          <div className="table-wrapper">
-            <div
-              className="rounded-md border"
-              data-ocid="project-detail.design.table"
-            >
-              <Table>
-                <TableHeader>
-                  <TableRow className="bg-muted/40">
-                    <TableHead className="text-xs font-semibold">
-                      File Name
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold">
-                      Uploaded
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold w-24">
-                      Actions
-                    </TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {projDesignFiles.map((f, i) => {
-                    // Read-only lookup — never findOrCreateMasterDrawing,
-                    // which would create a hidden Working Drawing just from
-                    // rendering this list. Only Edit (below) may create one.
-                    const master = allDrawings.find(
-                      (d) => d.sourceDesignFileId === f.id,
-                    );
-                    const workDrawings = master
-                      ? buildDrawingSubtree(master, allDrawings).children
-                      : [];
-                    return (
-                      <Fragment key={f.id}>
-                        <TableRow
-                          data-ocid={`project-detail.design.item.${i + 1}`}
-                        >
-                          <TableCell className="text-sm font-medium">
-                            <div className="flex items-center gap-1.5">
-                              <span>{f.fileName}</span>
-                              <Badge
-                                variant="outline"
-                                className="text-[10px] px-1 py-0"
-                              >
-                                Original
-                              </Badge>
-                              {master && (
-                                <Badge
-                                  variant="outline"
-                                  className="text-[10px] px-1 py-0 border-blue-400 text-blue-600"
+              )}
+            </div>
+            <div className="table-wrapper">
+              <div
+                className="rounded-md border"
+                data-ocid="project-detail.materials.table"
+              >
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/40">
+                      <TableHead className="text-xs font-semibold">
+                        Material
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold">
+                        Thickness
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold">
+                        Qty
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold">
+                        Supplier
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold">
+                        Date
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold">
+                        Attachments
+                      </TableHead>
+                      {(inventoryEdit || inventoryDelete) && (
+                        <TableHead className="text-xs font-semibold w-20">
+                          Actions
+                        </TableHead>
+                      )}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {projMaterials.map((m, i) => (
+                      <TableRow
+                        key={m.id}
+                        data-ocid={`project-detail.materials.item.${i + 1}`}
+                      >
+                        <TableCell className="text-sm font-medium">
+                          {m.materialType}
+                        </TableCell>
+                        <TableCell className="text-xs">{m.thickness}</TableCell>
+                        <TableCell className="text-sm">{m.quantity}</TableCell>
+                        <TableCell className="text-sm">
+                          {m.supplierName}
+                        </TableCell>
+                        <TableCell className="text-xs">
+                          {m.purchaseDate}
+                        </TableCell>
+                        <TableCell className="text-xs">
+                          {(m.attachments ?? []).length > 0 ? (
+                            <span className="flex items-center gap-1 text-muted-foreground">
+                              <Paperclip className="w-3 h-3" />
+                              {(m.attachments ?? []).length}
+                            </span>
+                          ) : (
+                            "—"
+                          )}
+                        </TableCell>
+                        {(inventoryEdit || inventoryDelete) && (
+                          <TableCell>
+                            <div className="flex gap-1">
+                              {inventoryEdit && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7"
+                                  title="Edit purchase"
+                                  aria-label="Edit purchase"
+                                  onClick={() => {
+                                    setEditPurchaseId(m.id);
+                                    setEditPurchaseForm({
+                                      materialType: m.materialType,
+                                      thickness: m.thickness,
+                                      quantity: m.quantity,
+                                      unit: m.unit || "",
+                                      vendorId: m.vendorId || "",
+                                      supplierName: m.supplierName,
+                                      purchaseDate: m.purchaseDate,
+                                    });
+                                  }}
                                 >
-                                  Edited
-                                </Badge>
+                                  <Pencil className="w-3.5 h-3.5" />
+                                </Button>
+                              )}
+                              {inventoryDelete && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7 text-destructive hover:text-destructive"
+                                  onClick={() => setDeletePurchaseTarget(m.id)}
+                                  title="Delete purchase"
+                                  aria-label="Delete purchase"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </Button>
                               )}
                             </div>
                           </TableCell>
-                          <TableCell className="text-xs text-muted-foreground">
-                            {new Date(f.uploadedAt).toLocaleDateString("en-IN")}
-                          </TableCell>
-                          <TableCell className="flex gap-1">
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-6 px-2"
-                              onClick={() =>
-                                master
-                                  ? setPreviewWorkDrawing(master)
-                                  : setPreviewFile(f)
-                              }
-                              title={
-                                master
-                                  ? "Preview — latest saved edited version"
-                                  : "Preview Original"
-                              }
-                              data-ocid={`project-detail.design.preview_button.${i + 1}`}
-                            >
-                              <Eye className="w-3.5 h-3.5" />
-                            </Button>
-                            {master && (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-6 px-2"
-                                onClick={() => setPreviewFile(f)}
-                                title="Preview Original — untouched uploaded file"
-                                data-ocid={`project-detail.design.preview_original_button.${i + 1}`}
-                              >
-                                <FileText className="w-3.5 h-3.5" />
-                              </Button>
-                            )}
-                            {dEdit && (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-6 px-2"
-                                onClick={() => handleEditDesignFile(f)}
-                                title="Edit"
-                                data-ocid={`project-detail.design.edit_button.${i + 1}`}
-                              >
-                                <Pencil className="w-3.5 h-3.5" />
-                              </Button>
-                            )}
-                            <Button
-                              variant="ghost"
-                              size="sm"
-                              className="h-6 px-2"
-                              onClick={() => handleDownloadFile(f)}
-                              title="Download Original"
-                              data-ocid={`project-detail.design.secondary_button.${i + 1}`}
-                            >
-                              <Download className="w-3.5 h-3.5" />
-                            </Button>
-                            {pDelete && (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-6 px-2 text-destructive hover:text-destructive"
-                                onClick={() => {
-                                  if (!pDelete) {
-                                    alert("Access restricted");
-                                    return;
-                                  }
-                                  deleteDesignFile(f.id);
-                                  toast.success("File removed");
-                                }}
-                                data-ocid={`project-detail.design.delete_button.${i + 1}`}
-                              >
-                                ×
-                              </Button>
-                            )}
-                          </TableCell>
-                        </TableRow>
-                        {dView &&
-                          workDrawings.map((child) => (
-                            <DrawingTreeRow
-                              key={child.drawing.id}
-                              node={child}
-                              depth={1}
-                              canEdit={dEdit}
-                              canDelete={dDelete}
-                              onOpen={(d) =>
-                                onOpenDrawingEditor?.({
-                                  projectId,
-                                  drawingId: d.id,
-                                })
-                              }
-                              onDelete={handleDrawingDelete}
-                              onPreview={setPreviewWorkDrawing}
-                              onPrint={handlePrintWorkDrawing}
-                              showRename={false}
-                              showLink={false}
-                              showDuplicate={false}
-                              openLabel="Edit"
-                              compact
-                            />
-                          ))}
-                      </Fragment>
-                    );
-                  })}
-                  {projDesignFiles.length === 0 && (
-                    <TableRow>
-                      <TableCell
-                        colSpan={3}
-                        className="text-center py-8 text-sm text-muted-foreground"
-                        data-ocid="project-detail.design.empty_state"
-                      >
-                        No design files uploaded yet
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </div>
-          </div>
-          <DesignFilePreviewDialog
-            file={previewFile}
-            open={!!previewFile}
-            onOpenChange={(o) => !o && setPreviewFile(null)}
-            onDownload={handleDownloadFile}
-          />
-          <WorkDrawingPreviewDialog
-            drawing={previewWorkDrawing}
-            open={!!previewWorkDrawing}
-            onOpenChange={(o) => !o && setPreviewWorkDrawing(null)}
-            company={{
-              companyName: settings?.companyName || "Your Company",
-              companyLogoDataUrl: settings?.companyLogo || undefined,
-            }}
-          />
-        </TabsContent>
-
-        {/* Tab 3 — Internal Costing */}
-        <TabsContent value="costing" className="mt-4">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 text-amber-500" />
-                Internal Costing Sheet
-                <Badge variant="outline" className="text-xs font-normal ml-1">
-                  Internal Use Only — Not visible to customer
-                </Badge>
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {(
-                  [
-                    ["rawMaterialCost", "Raw Material Cost"],
-                    ["cncCost", "CNC / Laser Cutting Cost"],
-                    ["hardwareCost", "Hardware Cost"],
-                    ["powderCoatingCost", "Powder Coating Cost"],
-                    ["assemblyCost", "Assembly Cost"],
-                    ["packingCost", "Packing Cost"],
-                    ["labourCost", "Labour Cost"],
-                    ["machineCost", "Machine / Equipment Cost"],
-                    ["outsourceCost", "Outsourced Work Cost"],
-                    ["consumablesCost", "Consumables Cost"],
-                    ["electricityCost", "Electricity Cost"],
-                    ["scrapLossCost", "Scrap / Material Loss"],
-                    ["transportCost", "Transport Cost"],
-                  ] as [keyof typeof costing, string][]
-                ).map(([field, label]) => (
-                  <div key={field} className="space-y-1.5">
-                    <Label htmlFor={`costing-${field}`}>{label} (₹)</Label>
-                    <Input
-                      id={`costing-${field}`}
-                      type="number"
-                      min={0}
-                      value={(costing[field] as number) ?? 0}
-                      onChange={(e) =>
-                        setCosting((c) => ({
-                          ...c,
-                          [field]: Number(e.target.value),
-                        }))
-                      }
-                      data-ocid="project-detail.costing.input"
-                    />
-                  </div>
-                ))}
-              </div>
-              {/* Custom Costs Section */}
-              <div className="space-y-3 pt-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-semibold text-foreground">
-                    Extra Costs
-                  </span>
-                  {!showAddCustomCost && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => setShowAddCustomCost(true)}
-                      data-ocid="project-detail.costing.open_modal_button"
-                    >
-                      <Plus className="w-3.5 h-3.5 mr-1" /> Add Custom Cost
-                    </Button>
-                  )}
-                </div>
-                {(costing.extraCosts || []).length > 0 && (
-                  <div className="table-wrapper">
-                    <div className="rounded-md border overflow-hidden">
-                      <table
-                        className="w-full text-sm"
-                        style={{ minWidth: "400px" }}
-                      >
-                        <thead className="bg-muted/50">
-                          <tr>
-                            <th className="px-3 py-2 text-left font-medium text-muted-foreground">
-                              #
-                            </th>
-                            <th className="px-3 py-2 text-left font-medium text-muted-foreground">
-                              Cost Name
-                            </th>
-                            <th className="px-3 py-2 text-left font-medium text-muted-foreground">
-                              Category
-                            </th>
-                            <th className="px-3 py-2 text-right font-medium text-muted-foreground">
-                              Amount
-                            </th>
-                            <th className="px-3 py-2 text-center font-medium text-muted-foreground">
-                              Del
-                            </th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {(costing.extraCosts || []).map((entry, idx) => (
-                            <tr
-                              key={entry.id}
-                              className="border-t"
-                              data-ocid={`project-detail.costing.item.${idx + 1}`}
-                            >
-                              <td className="px-3 py-2 text-muted-foreground">
-                                {idx + 1}
-                              </td>
-                              <td className="px-3 py-2">{entry.name}</td>
-                              <td className="px-3 py-2">
-                                <span className="text-xs px-2 py-0.5 rounded-full bg-muted">
-                                  {entry.category}
-                                </span>
-                              </td>
-                              <td className="px-3 py-2 text-right font-medium">
-                                {fmt(entry.amount)}
-                              </td>
-                              <td className="px-3 py-2 text-center">
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    handleDeleteCustomCost(entry.id)
-                                  }
-                                  className="text-destructive hover:text-destructive/80"
-                                  data-ocid={`project-detail.costing.delete_button.${idx + 1}`}
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                )}
-                {showAddCustomCost && (
-                  <div className="flex flex-col sm:flex-row gap-2 p-3 rounded-md border bg-muted/30">
-                    <Input
-                      placeholder="Cost Name"
-                      value={newCustomCost.name}
-                      onChange={(e) =>
-                        setNewCustomCost((c) => ({
-                          ...c,
-                          name: e.target.value,
-                        }))
-                      }
-                      className="flex-1"
-                      data-ocid="project-detail.costing.input"
-                    />
-                    <select
-                      value={newCustomCost.category}
-                      onChange={(e) =>
-                        setNewCustomCost((c) => ({
-                          ...c,
-                          category: e.target.value as
-                            | "Material"
-                            | "Process"
-                            | "Misc",
-                        }))
-                      }
-                      className="border border-input rounded-md px-3 py-2 text-sm bg-background"
-                    >
-                      <option>Material</option>
-                      <option>Process</option>
-                      <option>Misc</option>
-                    </select>
-                    <Input
-                      type="number"
-                      placeholder="Amount"
-                      min={0}
-                      value={newCustomCost.amount}
-                      onChange={(e) =>
-                        setNewCustomCost((c) => ({
-                          ...c,
-                          amount: e.target.value,
-                        }))
-                      }
-                      className="w-28"
-                      data-ocid="project-detail.costing.input"
-                    />
-                    <Button
-                      size="sm"
-                      onClick={handleAddCustomCost}
-                      data-ocid="project-detail.costing.save_button"
-                    >
-                      Add
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => setShowAddCustomCost(false)}
-                      data-ocid="project-detail.costing.cancel_button"
-                    >
-                      Cancel
-                    </Button>
-                  </div>
-                )}
-              </div>
-              <div className="flex items-center justify-between pt-3 border-t">
-                <div>
-                  <span className="text-sm text-muted-foreground">
-                    Total Internal Cost:{" "}
-                  </span>
-                  <span className="text-lg font-bold">{fmt(totalCosting)}</span>
-                </div>
-                <Button
-                  onClick={handleSaveCosting}
-                  data-ocid="project-detail.costing.save_button"
-                >
-                  <Save className="w-4 h-4 mr-1.5" /> Save Costing
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        {/* Tab 4 — Material Purchases */}
-        <TabsContent value="materials" className="mt-4 space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold">Raw Material Purchases</h2>
-            {pCreate && (
-              <Button
-                size="sm"
-                onClick={() => setMatDialog(true)}
-                data-ocid="project-detail.materials.open_modal_button"
-              >
-                <Plus className="w-3.5 h-3.5 mr-1" /> Add Purchase
-              </Button>
-            )}
-          </div>
-          <div className="table-wrapper">
-            <div
-              className="rounded-md border"
-              data-ocid="project-detail.materials.table"
-            >
-              <Table>
-                <TableHeader>
-                  <TableRow className="bg-muted/40">
-                    <TableHead className="text-xs font-semibold">
-                      Material
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold">
-                      Thickness
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold">Qty</TableHead>
-                    <TableHead className="text-xs font-semibold">
-                      Supplier
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold">
-                      Date
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold">
-                      Attachments
-                    </TableHead>
-                    {(pEdit || pDelete) && (
-                      <TableHead className="text-xs font-semibold w-20">
-                        Actions
-                      </TableHead>
-                    )}
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {projMaterials.map((m, i) => (
-                    <TableRow
-                      key={m.id}
-                      data-ocid={`project-detail.materials.item.${i + 1}`}
-                    >
-                      <TableCell className="text-sm font-medium">
-                        {m.materialType}
-                      </TableCell>
-                      <TableCell className="text-xs">{m.thickness}</TableCell>
-                      <TableCell className="text-sm">{m.quantity}</TableCell>
-                      <TableCell className="text-sm">
-                        {m.supplierName}
-                      </TableCell>
-                      <TableCell className="text-xs">
-                        {m.purchaseDate}
-                      </TableCell>
-                      <TableCell className="text-xs">
-                        {(m.attachments ?? []).length > 0 ? (
-                          <span className="flex items-center gap-1 text-muted-foreground">
-                            <Paperclip className="w-3 h-3" />
-                            {(m.attachments ?? []).length}
-                          </span>
-                        ) : (
-                          "—"
                         )}
-                      </TableCell>
-                      {(pEdit || pDelete) && (
-                        <TableCell>
-                          <div className="flex gap-1">
-                            {pEdit && (
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-7 w-7"
-                                onClick={() => {
-                                  setEditPurchaseId(m.id);
-                                  setEditPurchaseForm({
-                                    materialType: m.materialType,
-                                    thickness: m.thickness,
-                                    quantity: m.quantity,
-                                    unit: m.unit || "",
-                                    vendorId: m.vendorId || "",
-                                    supplierName: m.supplierName,
-                                    purchaseDate: m.purchaseDate,
-                                  });
-                                }}
-                              >
-                                <Pencil className="w-3.5 h-3.5" />
-                              </Button>
-                            )}
-                            {pDelete && (
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-7 w-7 text-destructive hover:text-destructive"
-                                onClick={() => setDeletePurchaseTarget(m.id)}
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </Button>
-                            )}
-                          </div>
-                        </TableCell>
-                      )}
-                    </TableRow>
-                  ))}
-                  {projMaterials.length === 0 && (
-                    <TableRow>
-                      <TableCell
-                        colSpan={pEdit || pDelete ? 7 : 6}
-                        className="text-center py-8 text-sm text-muted-foreground"
-                        data-ocid="project-detail.materials.empty_state"
-                      >
-                        No material purchases recorded
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </div>
-          </div>
-
-          {/* Add Material Dialog */}
-          <Dialog open={matDialog} onOpenChange={setMatDialog}>
-            <DialogContent data-ocid="project-detail.materials.dialog">
-              <DialogHeader>
-                <DialogTitle>Add Material Purchase</DialogTitle>
-              </DialogHeader>
-              <div className="space-y-3 py-2">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div className="space-y-1.5">
-                    <Label>Material Type *</Label>
-                    <Input
-                      placeholder="e.g. MS Sheet"
-                      value={matForm.materialType}
-                      onChange={(e) =>
-                        setMatForm((f) => ({
-                          ...f,
-                          materialType: e.target.value,
-                        }))
-                      }
-                      data-ocid="project-detail.materials.input"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Thickness</Label>
-                    <Input
-                      placeholder="e.g. 2mm"
-                      value={matForm.thickness}
-                      onChange={(e) =>
-                        setMatForm((f) => ({ ...f, thickness: e.target.value }))
-                      }
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Quantity</Label>
-                    <Input
-                      type="number"
-                      min={0}
-                      value={matForm.quantity}
-                      onChange={(e) =>
-                        setMatForm((f) => ({
-                          ...f,
-                          quantity: Number(e.target.value),
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Unit</Label>
-                    <Input
-                      placeholder="e.g. kg, sheets, pcs"
-                      value={matForm.unit}
-                      onChange={(e) =>
-                        setMatForm((f) => ({
-                          ...f,
-                          unit: e.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Supplier / Vendor</Label>
-                    <VendorSelect
-                      value={matForm.vendorId || undefined}
-                      onChange={(id, name) =>
-                        setMatForm((f) => ({
-                          ...f,
-                          vendorId: id,
-                          supplierName: name,
-                        }))
-                      }
-                      placeholder="Select vendor"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Purchase Date</Label>
-                    <Input
-                      type="date"
-                      value={matForm.purchaseDate}
-                      onChange={(e) =>
-                        setMatForm((f) => ({
-                          ...f,
-                          purchaseDate: e.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                </div>
-                {/* Attachments */}
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between">
-                    <Label className="text-xs flex items-center gap-1.5">
-                      <Paperclip className="w-3.5 h-3.5" />
-                      Attach Invoices
-                    </Label>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-7 text-xs"
-                      onClick={() => matFileInputRef.current?.click()}
-                    >
-                      <Plus className="w-3 h-3 mr-1" /> Add Files
-                    </Button>
-                    <input
-                      ref={matFileInputRef}
-                      type="file"
-                      accept=".pdf,.jpg,.jpeg,.png"
-                      multiple
-                      className="hidden"
-                      onChange={handleMatAttachFiles}
-                    />
-                  </div>
-                  {matPendingAttachments.length > 0 && (
-                    <div className="space-y-1.5">
-                      {matPendingAttachments.map((att) => (
-                        <div
-                          key={att.ref}
-                          className="flex items-center gap-2 p-2 rounded-md bg-muted/50 border border-border"
+                      </TableRow>
+                    ))}
+                    {projMaterials.length === 0 && (
+                      <TableRow>
+                        <TableCell
+                          colSpan={pEdit || pDelete ? 7 : 6}
+                          className="text-center py-8 text-sm text-muted-foreground"
+                          data-ocid="project-detail.materials.empty_state"
                         >
-                          {att.type === "image" ? (
-                            <img
-                              src={att.ref}
-                              alt={att.name}
-                              className="h-8 w-8 rounded object-cover shrink-0 border"
-                            />
-                          ) : (
-                            <div className="h-8 w-8 rounded bg-blue-100 dark:bg-blue-950 flex items-center justify-center shrink-0">
-                              <FileText className="w-4 h-4 text-blue-600" />
-                            </div>
-                          )}
-                          <span className="text-xs flex-1 truncate">
-                            {att.name}
-                          </span>
-                          {att.type === "pdf" && (
-                            <Badge
-                              variant="secondary"
-                              className="text-[10px] px-1.5 py-0 shrink-0"
-                            >
-                              PDF
-                            </Badge>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => removeMatAttachment(att.ref)}
-                            className="p-1 rounded hover:bg-muted transition-colors shrink-0"
-                          >
-                            <X className="w-3 h-3 text-muted-foreground" />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                  {matPendingAttachments.length === 0 && (
-                    <p className="text-[11px] text-muted-foreground">
-                      PDF, JPG or PNG — supports multiple files
-                    </p>
-                  )}
-                </div>
+                          No material purchases recorded
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
               </div>
-              <DialogFooter>
-                <Button
-                  variant="outline"
-                  onClick={() => setMatDialog(false)}
-                  data-ocid="project-detail.materials.cancel_button"
-                >
-                  Cancel
-                </Button>
-                <Button
-                  onClick={handleAddMaterial}
-                  data-ocid="project-detail.materials.submit_button"
-                >
-                  Save
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
+            </div>
 
-          {/* Edit Material Purchase Dialog */}
-          <Dialog
-            open={!!editPurchaseId}
-            onOpenChange={(o) => {
-              if (!o) {
-                setEditPurchaseId(null);
-                setEditPurchaseForm(null);
-              }
-            }}
-          >
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>Edit Material Purchase</DialogTitle>
-              </DialogHeader>
-              {editPurchaseForm && (
+            {/* Add Material Dialog */}
+            <Dialog open={matDialog} onOpenChange={setMatDialog}>
+              <DialogContent data-ocid="project-detail.materials.dialog">
+                <DialogHeader>
+                  <DialogTitle>Add Material Purchase</DialogTitle>
+                </DialogHeader>
                 <div className="space-y-3 py-2">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div className="space-y-1.5">
                       <Label>Material Type *</Label>
                       <Input
-                        value={editPurchaseForm.materialType}
+                        placeholder="e.g. MS Sheet"
+                        value={matForm.materialType}
                         onChange={(e) =>
-                          setEditPurchaseForm((f) =>
-                            f ? { ...f, materialType: e.target.value } : f,
-                          )
+                          setMatForm((f) => ({
+                            ...f,
+                            materialType: e.target.value,
+                          }))
                         }
+                        data-ocid="project-detail.materials.input"
                       />
                     </div>
                     <div className="space-y-1.5">
                       <Label>Thickness</Label>
                       <Input
-                        value={editPurchaseForm.thickness}
+                        placeholder="e.g. 2mm"
+                        value={matForm.thickness}
                         onChange={(e) =>
-                          setEditPurchaseForm((f) =>
-                            f ? { ...f, thickness: e.target.value } : f,
-                          )
+                          setMatForm((f) => ({
+                            ...f,
+                            thickness: e.target.value,
+                          }))
                         }
                       />
                     </div>
@@ -3347,1855 +3447,1730 @@ export function ProjectDetail({
                       <Input
                         type="number"
                         min={0}
-                        value={editPurchaseForm.quantity}
+                        value={matForm.quantity}
                         onChange={(e) =>
-                          setEditPurchaseForm((f) =>
-                            f ? { ...f, quantity: Number(e.target.value) } : f,
-                          )
+                          setMatForm((f) => ({
+                            ...f,
+                            quantity: Number(e.target.value),
+                          }))
                         }
                       />
                     </div>
                     <div className="space-y-1.5">
                       <Label>Unit</Label>
                       <Input
-                        value={editPurchaseForm.unit}
+                        placeholder="e.g. kg, sheets, pcs"
+                        value={matForm.unit}
                         onChange={(e) =>
-                          setEditPurchaseForm((f) =>
-                            f ? { ...f, unit: e.target.value } : f,
-                          )
+                          setMatForm((f) => ({
+                            ...f,
+                            unit: e.target.value,
+                          }))
                         }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Supplier / Vendor</Label>
+                      <VendorSelect
+                        value={matForm.vendorId || undefined}
+                        onChange={(id, name) =>
+                          setMatForm((f) => ({
+                            ...f,
+                            vendorId: id,
+                            supplierName: name,
+                          }))
+                        }
+                        placeholder="Select vendor"
                       />
                     </div>
                     <div className="space-y-1.5">
                       <Label>Purchase Date</Label>
                       <Input
                         type="date"
-                        value={editPurchaseForm.purchaseDate}
+                        value={matForm.purchaseDate}
                         onChange={(e) =>
-                          setEditPurchaseForm((f) =>
-                            f ? { ...f, purchaseDate: e.target.value } : f,
-                          )
+                          setMatForm((f) => ({
+                            ...f,
+                            purchaseDate: e.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+                  </div>
+                  {/* Attachments */}
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <Label className="text-xs flex items-center gap-1.5">
+                        <Paperclip className="w-3.5 h-3.5" />
+                        Attach Invoices
+                      </Label>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs"
+                        onClick={() => matFileInputRef.current?.click()}
+                      >
+                        <Plus className="w-3 h-3 mr-1" /> Add Files
+                      </Button>
+                      <input
+                        ref={matFileInputRef}
+                        type="file"
+                        accept=".pdf,.jpg,.jpeg,.png"
+                        multiple
+                        className="hidden"
+                        onChange={handleMatAttachFiles}
+                      />
+                    </div>
+                    {matPendingAttachments.length > 0 && (
+                      <div className="space-y-1.5">
+                        {matPendingAttachments.map((att) => (
+                          <div
+                            key={att.ref}
+                            className="flex items-center gap-2 p-2 rounded-md bg-muted/50 border border-border"
+                          >
+                            {att.type === "image" ? (
+                              <img
+                                src={att.ref}
+                                alt={att.name}
+                                className="h-8 w-8 rounded object-cover shrink-0 border"
+                              />
+                            ) : (
+                              <div className="h-8 w-8 rounded bg-info/10 flex items-center justify-center shrink-0">
+                                <FileText className="w-4 h-4 text-info" />
+                              </div>
+                            )}
+                            <span className="text-xs flex-1 truncate">
+                              {att.name}
+                            </span>
+                            {att.type === "pdf" && (
+                              <Badge
+                                variant="secondary"
+                                className="text-[10px] px-1.5 py-0 shrink-0"
+                              >
+                                PDF
+                              </Badge>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => removeMatAttachment(att.ref)}
+                              className="p-1 rounded hover:bg-muted transition-colors shrink-0"
+                            >
+                              <X className="w-3 h-3 text-muted-foreground" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {matPendingAttachments.length === 0 && (
+                      <p className="text-[11px] text-muted-foreground">
+                        PDF, JPG or PNG — supports multiple files
+                      </p>
+                    )}
+                  </div>
+                </div>
+                <DialogFooter>
+                  <Button
+                    variant="outline"
+                    onClick={() => setMatDialog(false)}
+                    data-ocid="project-detail.materials.cancel_button"
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={handleAddMaterial}
+                    data-ocid="project-detail.materials.submit_button"
+                  >
+                    Save
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+
+            {/* Edit Material Purchase Dialog */}
+            <Dialog
+              open={!!editPurchaseId}
+              onOpenChange={(o) => {
+                if (!o) {
+                  setEditPurchaseId(null);
+                  setEditPurchaseForm(null);
+                }
+              }}
+            >
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Edit Material Purchase</DialogTitle>
+                </DialogHeader>
+                {editPurchaseForm && (
+                  <div className="space-y-3 py-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="space-y-1.5">
+                        <Label>Material Type *</Label>
+                        <Input
+                          value={editPurchaseForm.materialType}
+                          onChange={(e) =>
+                            setEditPurchaseForm((f) =>
+                              f ? { ...f, materialType: e.target.value } : f,
+                            )
+                          }
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Thickness</Label>
+                        <Input
+                          value={editPurchaseForm.thickness}
+                          onChange={(e) =>
+                            setEditPurchaseForm((f) =>
+                              f ? { ...f, thickness: e.target.value } : f,
+                            )
+                          }
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Quantity</Label>
+                        <Input
+                          type="number"
+                          min={0}
+                          value={editPurchaseForm.quantity}
+                          onChange={(e) =>
+                            setEditPurchaseForm((f) =>
+                              f
+                                ? { ...f, quantity: Number(e.target.value) }
+                                : f,
+                            )
+                          }
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Unit</Label>
+                        <Input
+                          value={editPurchaseForm.unit}
+                          onChange={(e) =>
+                            setEditPurchaseForm((f) =>
+                              f ? { ...f, unit: e.target.value } : f,
+                            )
+                          }
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Purchase Date</Label>
+                        <Input
+                          type="date"
+                          value={editPurchaseForm.purchaseDate}
+                          onChange={(e) =>
+                            setEditPurchaseForm((f) =>
+                              f ? { ...f, purchaseDate: e.target.value } : f,
+                            )
+                          }
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+                <DialogFooter>
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setEditPurchaseId(null);
+                      setEditPurchaseForm(null);
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={async () => {
+                      if (!editPurchaseId || !editPurchaseForm) return;
+                      const existing = materialPurchases.find(
+                        (x) => x.id === editPurchaseId,
+                      );
+                      if (!existing) return;
+                      if (!existing.inventoryItemId) {
+                        toast.error(
+                          "This purchase has no linked inventory item — cannot update.",
+                        );
+                        return;
+                      }
+                      // Monster-1 — remote-first via the same
+                      // inventory_purchases row inventoryPurchasesApi.ts
+                      // already manages. Note: this table has no per-purchase
+                      // "unit" column (unit lives on inventory_items) — a
+                      // pre-existing schema gap, not a new one, so a unit
+                      // edited here is reflected locally but not persisted.
+                      const result = await updateInventoryPurchaseRemote({
+                        id: existing.id,
+                        inventoryItemId: existing.inventoryItemId,
+                        materialName: editPurchaseForm.materialType,
+                        quantityPurchased: editPurchaseForm.quantity,
+                        supplierName: editPurchaseForm.supplierName,
+                        vendorId: editPurchaseForm.vendorId || undefined,
+                        purchaseDate: editPurchaseForm.purchaseDate,
+                        cost: 0,
+                        attachments: existing.attachments,
+                        createdAt: Date.now(),
+                      });
+                      if (result.status === "unauthenticated") {
+                        toast.error(
+                          "Not signed in to the server - purchase was not updated",
+                        );
+                        return;
+                      }
+                      if (
+                        result.status === "denied" ||
+                        result.status === "error"
+                      ) {
+                        toast.error(
+                          result.error ?? "Could not update purchase",
+                        );
+                        return;
+                      }
+                      const refreshed = await hydrateMaterialPurchases();
+                      if (refreshed.status === "success" && refreshed.data) {
+                        setMaterialPurchasesFromServer(refreshed.data);
+                      }
+                      setEditPurchaseId(null);
+                      setEditPurchaseForm(null);
+                      toast.success("Purchase updated");
+                    }}
+                  >
+                    Save
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+          </section>
+
+          {/* Tab 5 — Outsourced Work */}
+          <section
+            id="section-outsourced"
+            className="mt-4 space-y-4 scroll-mt-24"
+          >
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold">Outsourced Work</h2>
+              {pAddOutsourced && (
+                <Button
+                  size="sm"
+                  onClick={() => setOutDialog(true)}
+                  data-ocid="project-detail.outsourced.open_modal_button"
+                >
+                  <Plus className="w-3.5 h-3.5 mr-1" /> Add Outsourced
+                </Button>
+              )}
+            </div>
+            <div className="table-wrapper">
+              <div
+                className="rounded-md border"
+                data-ocid="project-detail.outsourced.table"
+              >
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/40">
+                      <TableHead className="text-xs font-semibold">
+                        Vendor
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold">
+                        Material Sent
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold">
+                        Qty
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold">
+                        Date Sent
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold">
+                        Date Received
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold">
+                        Cost
+                      </TableHead>
+                      {(pEdit || pDelete) && (
+                        <TableHead className="text-xs font-semibold">
+                          Actions
+                        </TableHead>
+                      )}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {projOutsourced.map((o, i) => (
+                      <TableRow
+                        key={o.id}
+                        data-ocid={`project-detail.outsourced.item.${i + 1}`}
+                      >
+                        <TableCell className="text-sm font-medium">
+                          {o.vendorName}
+                        </TableCell>
+                        <TableCell className="text-sm">
+                          {o.materialSent}
+                        </TableCell>
+                        <TableCell className="text-sm">
+                          {o.quantitySent}
+                        </TableCell>
+                        <TableCell className="text-xs">{o.dateSent}</TableCell>
+                        <TableCell className="text-xs">
+                          {o.dateReceived || "—"}
+                        </TableCell>
+                        <TableCell className="text-sm font-medium">
+                          {fmt(o.processCost)}
+                        </TableCell>
+                        {(pEdit || pDelete) && (
+                          <TableCell>
+                            <div className="flex gap-1">
+                              {pEdit && (
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-7 w-7 p-0"
+                                  title="Edit outsourced work"
+                                  aria-label="Edit outsourced work"
+                                  data-ocid={`project-detail.outsourced.edit_button.${i + 1}`}
+                                  onClick={() => {
+                                    if (!canEdit(currentUser, "projects")) {
+                                      alert("Access restricted");
+                                      return;
+                                    }
+                                    setOutEditId(o.id);
+                                    setOutForm({
+                                      vendorId: o.vendorId || "",
+                                      vendorName: o.vendorName,
+                                      materialSent: o.materialSent || "",
+                                      quantitySent: o.quantitySent || 0,
+                                      dateSent: o.dateSent || "",
+                                      dateReceived: o.dateReceived || "",
+                                      processCost: o.processCost || 0,
+                                    });
+                                    setOutDialog(true);
+                                  }}
+                                >
+                                  <Pencil className="w-3.5 h-3.5" />
+                                </Button>
+                              )}
+                              {pDelete && (
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-7 w-7 p-0 text-destructive hover:text-destructive"
+                                  title="Delete outsourced work"
+                                  aria-label="Delete outsourced work"
+                                  data-ocid={`project-detail.outsourced.delete_button.${i + 1}`}
+                                  onClick={() => handleDeleteOutsourced(o.id)}
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </Button>
+                              )}
+                            </div>
+                          </TableCell>
+                        )}
+                      </TableRow>
+                    ))}
+                    {projOutsourced.length === 0 && (
+                      <TableRow>
+                        <TableCell
+                          colSpan={pEdit || pDelete ? 7 : 6}
+                          className="text-center py-8 text-sm text-muted-foreground"
+                          data-ocid="project-detail.outsourced.empty_state"
+                        >
+                          No outsourced work recorded
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+
+            {/* Add Outsourced Dialog */}
+            <Dialog
+              open={outDialog}
+              onOpenChange={(open) => {
+                if (!open) {
+                  setOutDialog(false);
+                  setOutEditId(null);
+                  setOutForm({
+                    vendorId: "",
+                    vendorName: "",
+                    materialSent: "",
+                    quantitySent: 0,
+                    dateSent: "",
+                    dateReceived: "",
+                    processCost: 0,
+                  });
+                }
+              }}
+            >
+              <DialogContent data-ocid="project-detail.outsourced.dialog">
+                <DialogHeader>
+                  <DialogTitle>
+                    {outEditId ? "Edit Outsourced Work" : "Add Outsourced Work"}
+                  </DialogTitle>
+                </DialogHeader>
+                <div className="space-y-3 py-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="space-y-1.5">
+                      <Label>Vendor Name *</Label>
+                      <VendorSelect
+                        value={outForm.vendorId || ""}
+                        onChange={(id) => handleVendorSelect(id)}
+                        placeholder="Select Vendor"
+                        className="w-full"
+                        data-ocid="project-detail.outsourced.input"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Material Sent</Label>
+                      <Input
+                        placeholder="e.g. MS Sheet 2mm"
+                        value={outForm.materialSent}
+                        onChange={(e) =>
+                          setOutForm((f) => ({
+                            ...f,
+                            materialSent: e.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Quantity Sent</Label>
+                      <Input
+                        type="number"
+                        min={0}
+                        value={outForm.quantitySent}
+                        onChange={(e) =>
+                          setOutForm((f) => ({
+                            ...f,
+                            quantitySent: Number(e.target.value),
+                          }))
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Process Cost (₹)</Label>
+                      <Input
+                        type="number"
+                        min={0}
+                        value={outForm.processCost}
+                        onChange={(e) =>
+                          setOutForm((f) => ({
+                            ...f,
+                            processCost: Number(e.target.value),
+                          }))
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Date Sent</Label>
+                      <Input
+                        type="date"
+                        value={outForm.dateSent}
+                        onChange={(e) =>
+                          setOutForm((f) => ({
+                            ...f,
+                            dateSent: e.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Date Received</Label>
+                      <Input
+                        type="date"
+                        value={outForm.dateReceived}
+                        onChange={(e) =>
+                          setOutForm((f) => ({
+                            ...f,
+                            dateReceived: e.target.value,
+                          }))
                         }
                       />
                     </div>
                   </div>
                 </div>
-              )}
-              <DialogFooter>
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    setEditPurchaseId(null);
-                    setEditPurchaseForm(null);
-                  }}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  onClick={() => {
-                    if (!editPurchaseId || !editPurchaseForm) return;
-                    const existing = materialPurchases.find(
-                      (x) => x.id === editPurchaseId,
-                    );
-                    if (!existing) return;
-                    updateMaterialPurchase({
-                      ...existing,
-                      ...editPurchaseForm,
-                    });
-                    setEditPurchaseId(null);
-                    setEditPurchaseForm(null);
-                    toast.success("Purchase updated");
-                  }}
-                >
-                  Save
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
-        </TabsContent>
+                <DialogFooter>
+                  <Button
+                    variant="outline"
+                    onClick={() => setOutDialog(false)}
+                    data-ocid="project-detail.outsourced.cancel_button"
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={handleAddOutsourced}
+                    data-ocid="project-detail.outsourced.submit_button"
+                  >
+                    Save
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+          </section>
 
-        {/* Tab 5 — Outsourced Work */}
-        <TabsContent value="outsourced" className="mt-4 space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold">Outsourced Work</h2>
-            {pAddOutsourced && (
-              <Button
-                size="sm"
-                onClick={() => setOutDialog(true)}
-                data-ocid="project-detail.outsourced.open_modal_button"
-              >
-                <Plus className="w-3.5 h-3.5 mr-1" /> Add Outsourced
-              </Button>
-            )}
-          </div>
-          <div className="table-wrapper">
-            <div
-              className="rounded-md border"
-              data-ocid="project-detail.outsourced.table"
-            >
-              <Table>
-                <TableHeader>
-                  <TableRow className="bg-muted/40">
-                    <TableHead className="text-xs font-semibold">
-                      Vendor
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold">
-                      Material Sent
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold">Qty</TableHead>
-                    <TableHead className="text-xs font-semibold">
-                      Date Sent
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold">
-                      Date Received
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold">
-                      Cost
-                    </TableHead>
-                    {(pEdit || pDelete) && (
-                      <TableHead className="text-xs font-semibold">
-                        Actions
-                      </TableHead>
-                    )}
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {projOutsourced.map((o, i) => (
-                    <TableRow
-                      key={o.id}
-                      data-ocid={`project-detail.outsourced.item.${i + 1}`}
-                    >
-                      <TableCell className="text-sm font-medium">
-                        {o.vendorName}
-                      </TableCell>
-                      <TableCell className="text-sm">
-                        {o.materialSent}
-                      </TableCell>
-                      <TableCell className="text-sm">
-                        {o.quantitySent}
-                      </TableCell>
-                      <TableCell className="text-xs">{o.dateSent}</TableCell>
-                      <TableCell className="text-xs">
-                        {o.dateReceived || "—"}
-                      </TableCell>
-                      <TableCell className="text-sm font-medium">
-                        {fmt(o.processCost)}
-                      </TableCell>
-                      {(pEdit || pDelete) && (
-                        <TableCell>
-                          <div className="flex gap-1">
-                            {pEdit && (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className="h-7 w-7 p-0"
-                                data-ocid={`project-detail.outsourced.edit_button.${i + 1}`}
-                                onClick={() => {
-                                  if (!canEdit(currentUser, "projects")) {
-                                    alert("Access restricted");
-                                    return;
-                                  }
-                                  setOutEditId(o.id);
-                                  setOutForm({
-                                    vendorId: o.vendorId || "",
-                                    vendorName: o.vendorName,
-                                    materialSent: o.materialSent || "",
-                                    quantitySent: o.quantitySent || 0,
-                                    dateSent: o.dateSent || "",
-                                    dateReceived: o.dateReceived || "",
-                                    processCost: o.processCost || 0,
-                                  });
-                                  setOutDialog(true);
-                                }}
-                              >
-                                <Pencil className="w-3.5 h-3.5" />
-                              </Button>
-                            )}
-                            {pDelete && (
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className="h-7 w-7 p-0 text-destructive hover:text-destructive"
-                                data-ocid={`project-detail.outsourced.delete_button.${i + 1}`}
-                                onClick={() => handleDeleteOutsourced(o.id)}
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </Button>
-                            )}
-                          </div>
-                        </TableCell>
-                      )}
-                    </TableRow>
-                  ))}
-                  {projOutsourced.length === 0 && (
-                    <TableRow>
-                      <TableCell
-                        colSpan={pEdit || pDelete ? 7 : 6}
-                        className="text-center py-8 text-sm text-muted-foreground"
-                        data-ocid="project-detail.outsourced.empty_state"
-                      >
-                        No outsourced work recorded
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </div>
-          </div>
-
-          {/* Add Outsourced Dialog */}
-          <Dialog
-            open={outDialog}
-            onOpenChange={(open) => {
-              if (!open) {
-                setOutDialog(false);
-                setOutEditId(null);
-                setOutForm({
-                  vendorId: "",
-                  vendorName: "",
-                  materialSent: "",
-                  quantitySent: 0,
-                  dateSent: "",
-                  dateReceived: "",
-                  processCost: 0,
-                });
-              }
-            }}
+          {/* Tab 6 — Production Tracking */}
+          <section
+            id="section-production"
+            className="mt-4 space-y-3 scroll-mt-24"
           >
-            <DialogContent data-ocid="project-detail.outsourced.dialog">
-              <DialogHeader>
-                <DialogTitle>
-                  {outEditId ? "Edit Outsourced Work" : "Add Outsourced Work"}
-                </DialogTitle>
-              </DialogHeader>
-              <div className="space-y-3 py-2">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div className="space-y-1.5">
-                    <Label>Vendor Name *</Label>
-                    <VendorSelect
-                      value={outForm.vendorId || ""}
-                      onChange={(id) => handleVendorSelect(id)}
-                      placeholder="Select Vendor"
-                      className="w-full"
-                      data-ocid="project-detail.outsourced.input"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Material Sent</Label>
-                    <Input
-                      placeholder="e.g. MS Sheet 2mm"
-                      value={outForm.materialSent}
-                      onChange={(e) =>
-                        setOutForm((f) => ({
-                          ...f,
-                          materialSent: e.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Quantity Sent</Label>
-                    <Input
-                      type="number"
-                      min={0}
-                      value={outForm.quantitySent}
-                      onChange={(e) =>
-                        setOutForm((f) => ({
-                          ...f,
-                          quantitySent: Number(e.target.value),
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Process Cost (₹)</Label>
-                    <Input
-                      type="number"
-                      min={0}
-                      value={outForm.processCost}
-                      onChange={(e) =>
-                        setOutForm((f) => ({
-                          ...f,
-                          processCost: Number(e.target.value),
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Date Sent</Label>
-                    <Input
-                      type="date"
-                      value={outForm.dateSent}
-                      onChange={(e) =>
-                        setOutForm((f) => ({ ...f, dateSent: e.target.value }))
-                      }
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label>Date Received</Label>
-                    <Input
-                      type="date"
-                      value={outForm.dateReceived}
-                      onChange={(e) =>
-                        setOutForm((f) => ({
-                          ...f,
-                          dateReceived: e.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                </div>
-              </div>
-              <DialogFooter>
-                <Button
-                  variant="outline"
-                  onClick={() => setOutDialog(false)}
-                  data-ocid="project-detail.outsourced.cancel_button"
-                >
-                  Cancel
-                </Button>
-                <Button
-                  onClick={handleAddOutsourced}
-                  data-ocid="project-detail.outsourced.submit_button"
-                >
-                  Save
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
-        </TabsContent>
-
-        {/* Tab 6 — Production Tracking */}
-        <TabsContent value="production" className="mt-4 space-y-3">
-          {isV2 ? (
-            /* V2 Production UI */
-            <div className="space-y-3">
-              {(() => {
-                if (project.totalQty == null) {
+            {isV2 ? (
+              /* V2 Production UI */
+              <div className="space-y-3">
+                {(() => {
+                  if (project.totalQty == null) {
+                    return (
+                      <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-warning/15 border border-warning/30 text-warning text-xs font-medium">
+                        ⚠ Quantity not set — please update project settings
+                      </div>
+                    );
+                  }
+                  const dispatchedQty = (deliveryChallans || []).reduce(
+                    (sum, dc) =>
+                      sum +
+                      ((dc.projectEntries || []).find(
+                        (e) => e.projectId === project.id,
+                      )?.dispatchQty || 0),
+                    0,
+                  );
+                  const progress = Math.round(
+                    (dispatchedQty / project.totalQty) * 100,
+                  );
                   return (
-                    <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-yellow-50 border border-yellow-200 text-yellow-700 text-xs font-medium">
-                      ⚠ Quantity not set — please update project settings
+                    <div className="flex items-center gap-4 px-3 py-2 rounded-md bg-muted/50 border border-border text-sm">
+                      <span>
+                        Target: <strong>{project.totalQty} units</strong>
+                      </span>
+                      <span>
+                        Dispatched: <strong>{dispatchedQty}</strong>
+                      </span>
+                      <span>
+                        Progress: <strong>{progress}%</strong>
+                      </span>
                     </div>
                   );
-                }
-                const dispatchedQty = (deliveryChallans || []).reduce(
-                  (sum, dc) =>
-                    sum +
-                    ((dc.projectEntries || []).find(
-                      (e) => e.projectId === project.id,
-                    )?.dispatchQty || 0),
-                  0,
-                );
-                const progress = Math.round(
-                  (dispatchedQty / project.totalQty) * 100,
-                );
-                return (
-                  <div className="flex items-center gap-4 px-3 py-2 rounded-md bg-muted/50 border border-border text-sm">
-                    <span>
-                      Target: <strong>{project.totalQty} units</strong>
-                    </span>
-                    <span>
-                      Dispatched: <strong>{dispatchedQty}</strong>
-                    </span>
-                    <span>
-                      Progress: <strong>{progress}%</strong>
-                    </span>
-                  </div>
-                );
-              })()}
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold">
-                  Production Stage Tracking
-                </h2>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setAddStageDialog(true)}
-                >
-                  <Plus className="w-3.5 h-3.5 mr-1.5" /> Add Stage
-                </Button>
-              </div>
-
-              {v2Stages.length === 0 && (
-                <div className="text-center py-8 text-muted-foreground text-sm">
-                  No stages defined. Click "Add Stage" to begin.
-                </div>
-              )}
-
-              <div className="space-y-2">
-                {v2Stages.map((stage, idx) => {
-                  const prevStage = idx > 0 ? v2Stages[idx - 1] : null;
-                  const isLocked =
-                    prevStage !== null && prevStage.status !== "Completed";
-                  const isExpanded = expandedStage === idx;
-                  const txs = stage.transactions || [];
-                  const totalSent = txs
-                    .filter((t) => t.type === "send")
-                    .reduce((a, t) => a + t.quantity, 0);
-                  const totalReceived = txs
-                    .filter((t) => t.type === "receive")
-                    .reduce((a, t) => a + t.quantity, 0);
-                  const pending = totalSent - totalReceived;
-                  const isActive = !isLocked && stage.status !== "Completed";
-
-                  return (
-                    <div
-                      key={`${stage.stageName}-${idx}`}
-                      className={`rounded-lg border ${isLocked ? "opacity-60" : ""} ${isActive ? "border-blue-300 shadow-sm" : ""}`}
+                })()}
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-semibold">
+                    Production Stage Tracking
+                  </h2>
+                  {productionEdit && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setAddStageDialog(true)}
                     >
-                      {/* Stage Header */}
-                      <div className="flex items-center justify-between px-4 py-3">
-                        <button
-                          type="button"
-                          className="flex items-center gap-3 flex-1 text-left"
-                          onClick={() =>
-                            !isLocked &&
-                            setExpandedStage(isExpanded ? null : idx)
-                          }
-                          disabled={isLocked}
-                        >
-                          <span
-                            className={`flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${isActive ? "bg-blue-500 text-white" : "bg-muted text-muted-foreground"}`}
-                          >
-                            {idx + 1}
-                          </span>
-                          <div>
-                            <span className="text-sm font-semibold">
-                              {stage.stageName}
-                            </span>
-                            {stage.requiresMaterialTracking && (
-                              <span className="ml-2 text-[10px] bg-amber-100 text-amber-700 rounded px-1 py-0.5">
-                                Material
-                              </span>
-                            )}
-                            {stage.stageId &&
-                              projectQmsInspectionsForThisProject.some(
-                                (i) =>
-                                  i.requiredProductionStageId === stage.stageId,
-                              ) && (
-                                <span
-                                  className="ml-2 text-[10px] bg-blue-100 text-blue-700 rounded px-1 py-0.5"
-                                  data-ocid={`project-detail.production.inspection_badge.${stage.stageId}`}
-                                >
-                                  Inspection Required
-                                </span>
-                              )}
-                            {isLocked && (
-                              <span className="ml-2 text-xs text-muted-foreground">
-                                (locked)
-                              </span>
-                            )}
-                          </div>
-                        </button>
-                        <div className="flex items-center gap-1">
-                          <span
-                            className={`text-xs px-2 py-0.5 rounded-full font-medium mr-2 ${STAGE_STATUS_COLORS[stage.status]}`}
-                          >
-                            {STAGE_STATUS_LABELS[stage.status]}
-                          </span>
-                          <Button
-                            size="icon"
-                            variant="ghost"
-                            className="h-6 w-6"
-                            onClick={() => handleMoveStage(idx, "up")}
-                            disabled={idx === 0}
-                          >
-                            <ChevronUp className="w-3 h-3" />
-                          </Button>
-                          <Button
-                            size="icon"
-                            variant="ghost"
-                            className="h-6 w-6"
-                            onClick={() => handleMoveStage(idx, "down")}
-                            disabled={idx === v2Stages.length - 1}
-                          >
-                            <ChevronDown className="w-3 h-3" />
-                          </Button>
-                          <Button
-                            size="icon"
-                            variant="ghost"
-                            className="h-6 w-6 text-red-500 hover:text-red-700"
-                            onClick={() => handleRemoveStage(idx)}
-                          >
-                            <Trash2 className="w-3 h-3" />
-                          </Button>
-                          <Button
-                            size="icon"
-                            variant="ghost"
-                            className="h-6 w-6"
+                      <Plus className="w-3.5 h-3.5 mr-1.5" /> Add Stage
+                    </Button>
+                  )}
+                </div>
+
+                {v2Stages.length === 0 && (
+                  <div className="text-center py-8 text-muted-foreground text-sm">
+                    No stages defined. Click "Add Stage" to begin.
+                  </div>
+                )}
+
+                <div className="space-y-2">
+                  {v2Stages.map((stage, idx) => {
+                    const prevStage = idx > 0 ? v2Stages[idx - 1] : null;
+                    const isLocked =
+                      prevStage !== null && prevStage.status !== "Completed";
+                    const isExpanded = expandedStage === idx;
+                    const txs = stage.transactions || [];
+                    const totalSent = txs
+                      .filter((t) => t.type === "send")
+                      .reduce((a, t) => a + t.quantity, 0);
+                    const totalReceived = txs
+                      .filter((t) => t.type === "receive")
+                      .reduce((a, t) => a + t.quantity, 0);
+                    const pending = totalSent - totalReceived;
+                    const isActive = !isLocked && stage.status !== "Completed";
+
+                    return (
+                      <div
+                        key={`${stage.stageName}-${idx}`}
+                        className={`rounded-lg border ${isLocked ? "opacity-60" : ""} ${isActive ? "border-primary/40 shadow-sm" : ""}`}
+                      >
+                        {/* Stage Header */}
+                        <div className="flex items-center justify-between px-4 py-3">
+                          <button
+                            type="button"
+                            className="flex items-center gap-3 flex-1 text-left"
                             onClick={() =>
                               !isLocked &&
                               setExpandedStage(isExpanded ? null : idx)
                             }
                             disabled={isLocked}
                           >
+                            <span
+                              className={`flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${isActive ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}
+                            >
+                              {idx + 1}
+                            </span>
+                            <div>
+                              <span className="text-sm font-semibold">
+                                {stage.stageName}
+                              </span>
+                              {stage.requiresMaterialTracking && (
+                                <span className="ml-2 text-[10px] bg-warning/15 text-warning rounded px-1 py-0.5">
+                                  Material
+                                </span>
+                              )}
+                              {stage.stageId &&
+                                projectQmsInspectionsForThisProject.some(
+                                  (i) =>
+                                    i.requiredProductionStageId ===
+                                    stage.stageId,
+                                ) && (
+                                  <span
+                                    className="ml-2 text-[10px] bg-info/10 text-info rounded px-1 py-0.5"
+                                    data-ocid={`project-detail.production.inspection_badge.${stage.stageId}`}
+                                  >
+                                    Inspection Required
+                                  </span>
+                                )}
+                              {isLocked && (
+                                <span className="ml-2 text-xs text-muted-foreground">
+                                  (locked)
+                                </span>
+                              )}
+                            </div>
+                          </button>
+                          <div className="flex items-center gap-1">
+                            <span
+                              className={`text-xs px-2 py-0.5 rounded-full font-medium mr-2 ${STAGE_STATUS_COLORS[stage.status]}`}
+                            >
+                              {STAGE_STATUS_LABELS[stage.status]}
+                            </span>
+                            {productionEdit && (
+                              <>
+                                <Button
+                                  size="icon"
+                                  variant="ghost"
+                                  className="h-6 w-6"
+                                  onClick={() => handleMoveStage(idx, "up")}
+                                  disabled={idx === 0}
+                                  title="Move stage up"
+                                  aria-label="Move stage up"
+                                >
+                                  <ChevronUp className="w-3 h-3" />
+                                </Button>
+                                <Button
+                                  size="icon"
+                                  variant="ghost"
+                                  className="h-6 w-6"
+                                  onClick={() => handleMoveStage(idx, "down")}
+                                  disabled={idx === v2Stages.length - 1}
+                                  title="Move stage down"
+                                  aria-label="Move stage down"
+                                >
+                                  <ChevronDown className="w-3 h-3" />
+                                </Button>
+                                <Button
+                                  size="icon"
+                                  variant="ghost"
+                                  className="h-6 w-6 text-destructive hover:text-destructive/80"
+                                  onClick={() => handleRemoveStage(idx)}
+                                  title="Remove stage"
+                                  aria-label="Remove stage"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                </Button>
+                              </>
+                            )}
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              className="h-6 w-6"
+                              onClick={() =>
+                                !isLocked &&
+                                setExpandedStage(isExpanded ? null : idx)
+                              }
+                              disabled={isLocked}
+                              title={
+                                isExpanded ? "Collapse stage" : "Expand stage"
+                              }
+                              aria-label={
+                                isExpanded ? "Collapse stage" : "Expand stage"
+                              }
+                            >
+                              {isExpanded ? (
+                                <ChevronUp className="w-4 h-4 text-muted-foreground" />
+                              ) : (
+                                <ChevronDown className="w-4 h-4 text-muted-foreground" />
+                              )}
+                            </Button>
+                          </div>
+                        </div>
+
+                        {/* Stage Body */}
+                        {isExpanded && (
+                          <div className="border-t px-4 py-4 space-y-4">
+                            {/* Phase 32 (Task #174) - QMS inspection link.
+                             * Optional, independent of material tracking.
+                             * Task #176 added the actual gate enforcement
+                             * (handleCompleteStage above) and the read-only
+                             * gate status this control now displays. */}
+                            {stage.stageId && (
+                              <div className="border rounded-md px-3 py-2 bg-muted/20">
+                                <ProductionStageInspectionControl
+                                  projectId={projectId}
+                                  stageId={stage.stageId}
+                                  stageName={stage.stageName}
+                                  libraryInspections={inspectionStages}
+                                  projectInspections={
+                                    projectQmsInspectionsForThisProject
+                                  }
+                                  projectOverrides={
+                                    projectQmsInspectionOverridesForThisProject
+                                  }
+                                  onOpenInspection={() =>
+                                    scrollToSection("qms")
+                                  }
+                                  currentUserId={userId}
+                                  currentUserName={userName}
+                                  canManage={canManageInspectionLink}
+                                />
+                              </div>
+                            )}
+                            {stage.requiresMaterialTracking ? (
+                              <div className="space-y-3">
+                                {/* Totals */}
+                                <div className="grid grid-cols-3 gap-3">
+                                  <div className="bg-info/10 border border-info/30 rounded-md p-2 text-center">
+                                    <div className="text-xs text-info font-medium">
+                                      Total Sent
+                                    </div>
+                                    <div className="text-lg font-bold text-info">
+                                      {totalSent}
+                                    </div>
+                                  </div>
+                                  <div className="bg-success/10 border border-success/30 rounded-md p-2 text-center">
+                                    <div className="text-xs text-success font-medium">
+                                      Total Received
+                                    </div>
+                                    <div className="text-lg font-bold text-success">
+                                      {totalReceived}
+                                    </div>
+                                  </div>
+                                  <div
+                                    className={`border rounded-md p-2 text-center ${pending > 0 ? "bg-warning/15 border-warning/30" : "bg-muted border-border"}`}
+                                  >
+                                    <div
+                                      className={`text-xs font-medium ${pending > 0 ? "text-warning" : "text-muted-foreground"}`}
+                                    >
+                                      Pending
+                                    </div>
+                                    <div
+                                      className={`text-lg font-bold ${pending > 0 ? "text-warning" : "text-muted-foreground"}`}
+                                    >
+                                      {pending}
+                                    </div>
+                                  </div>
+                                </div>
+                                {/* Actions */}
+                                {productionEdit && (
+                                  <div className="flex gap-2">
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      onClick={() => {
+                                        setSendMaterialDialog({
+                                          stageIdx: idx,
+                                        });
+                                        setSendForm({
+                                          quantity: 0,
+                                          dateTime: "",
+                                          vendorId: "",
+                                          vendorName: "",
+                                        });
+                                      }}
+                                    >
+                                      Send Material
+                                    </Button>
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      onClick={() => {
+                                        setReceiveMaterialDialog({
+                                          stageIdx: idx,
+                                        });
+                                        setReceiveForm({
+                                          quantity: 0,
+                                          dateTime: "",
+                                        });
+                                      }}
+                                      disabled={totalSent <= 0}
+                                    >
+                                      Mark Received
+                                    </Button>
+                                    {totalReceived >= totalSent &&
+                                      totalSent > 0 &&
+                                      stage.status !== "Completed" && (
+                                        <Button
+                                          size="sm"
+                                          onClick={() =>
+                                            handleCompleteStage(idx)
+                                          }
+                                        >
+                                          Mark Complete
+                                        </Button>
+                                      )}
+                                  </div>
+                                )}
+                                {/* Transaction History */}
+                                {txs.length > 0 && (
+                                  <div className="space-y-1">
+                                    <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                                      Transaction History
+                                    </p>
+                                    <div className="border rounded-md overflow-hidden">
+                                      <table className="w-full text-xs">
+                                        <thead className="bg-muted">
+                                          <tr>
+                                            <th className="text-left px-2 py-1 font-medium">
+                                              Type
+                                            </th>
+                                            <th className="text-left px-2 py-1 font-medium">
+                                              Qty
+                                            </th>
+                                            <th className="text-left px-2 py-1 font-medium">
+                                              Date & Time
+                                            </th>
+                                            <th className="text-left px-2 py-1 font-medium">
+                                              Sent To
+                                            </th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {txs.map((tx) => (
+                                            <tr
+                                              key={tx.id}
+                                              className="border-t"
+                                            >
+                                              <td className="px-2 py-1">
+                                                <span
+                                                  className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${tx.type === "send" ? "bg-info/10 text-info" : "bg-success/10 text-success"}`}
+                                                >
+                                                  {tx.type === "send"
+                                                    ? "Sent"
+                                                    : "Received"}
+                                                </span>
+                                              </td>
+                                              <td className="px-2 py-1">
+                                                {tx.quantity}
+                                              </td>
+                                              <td className="px-2 py-1">
+                                                {tx.dateTime
+                                                  ? new Date(
+                                                      tx.dateTime,
+                                                    ).toLocaleString("en-IN")
+                                                  : "—"}
+                                              </td>
+                                              <td className="px-2 py-1">
+                                                {tx.sentToVendorName ||
+                                                  (tx.type === "receive"
+                                                    ? "—"
+                                                    : "In-house")}
+                                              </td>
+                                            </tr>
+                                          ))}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            ) : (
+                              /* Non-material stage */
+                              <div className="space-y-3">
+                                <div className="space-y-1">
+                                  <Label className="text-xs">Status</Label>
+                                  <Select
+                                    value={stage.status}
+                                    disabled={!productionEdit}
+                                    onValueChange={async (v) => {
+                                      // Phase 32 (Task #176) - "Completed" is
+                                      // the one transition the QMS gate can
+                                      // block, so route it through the same
+                                      // gated handler the "Mark as Complete"
+                                      // button already uses below, instead of
+                                      // writing the status directly here.
+                                      if (v === "Completed") {
+                                        handleCompleteStage(idx);
+                                        return;
+                                      }
+                                      const updated = v2Stages.map((s, i) =>
+                                        i === idx
+                                          ? {
+                                              ...s,
+                                              status: v as ProjectStageStatus,
+                                            }
+                                          : s,
+                                      );
+                                      const ok = await updateProjectStagesV2(
+                                        projectId,
+                                        updated,
+                                      );
+                                      if (!ok) {
+                                        toast.error(
+                                          "Could not save stage status - please try again",
+                                        );
+                                      }
+                                    }}
+                                  >
+                                    <SelectTrigger className="h-8 text-xs w-40">
+                                      <SelectValue />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      {(
+                                        [
+                                          "NotStarted",
+                                          "InProgress",
+                                          "Completed",
+                                        ] as ProjectStageStatus[]
+                                      ).map((s) => (
+                                        <SelectItem
+                                          key={s}
+                                          value={s}
+                                          className="text-xs"
+                                        >
+                                          {STAGE_STATUS_LABELS[s]}
+                                        </SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+
+                                {/* Quantity Tracking */}
+                                <div>
+                                  <div className="flex items-center justify-between mb-2">
+                                    <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                                      Quantity Tracking
+                                    </p>
+                                    {project?.totalQty && (
+                                      <span className="text-xs text-muted-foreground">
+                                        Ordered:{" "}
+                                        <strong>{project.totalQty}</strong>
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                                    {[
+                                      {
+                                        label: "Input Qty",
+                                        field: "sentQty" as const,
+                                        color:
+                                          "bg-info/10 border-info/30 text-info",
+                                      },
+                                      {
+                                        label: "Completed",
+                                        field: "okQty" as const,
+                                        color:
+                                          "bg-success/10 border-success/30 text-success",
+                                      },
+                                      {
+                                        label: "Rejected",
+                                        field: "rejectedQty" as const,
+                                        color:
+                                          "bg-destructive/10 border-destructive/30 text-destructive",
+                                      },
+                                      {
+                                        label: "Rework",
+                                        field: "reworkQty" as const,
+                                        color:
+                                          "bg-warning/15 border-warning/30 text-warning",
+                                      },
+                                    ].map(({ label, field, color }) => (
+                                      <div
+                                        key={field}
+                                        className={`rounded-md border p-2 ${color}`}
+                                      >
+                                        <p className="text-[10px] font-medium mb-1">
+                                          {label}
+                                        </p>
+                                        <input
+                                          key={`${stage.stageId ?? idx}-${field}`}
+                                          type="number"
+                                          min={0}
+                                          disabled={!productionEdit}
+                                          className="w-full bg-transparent text-sm font-bold border-none outline-none p-0 rounded-sm focus-visible:ring-2 focus-visible:ring-primary/50 disabled:opacity-70"
+                                          defaultValue={stage[field] ?? 0}
+                                          // Fires on blur, not on every
+                                          // keystroke - now that this goes
+                                          // through the remote-first
+                                          // updateProjectStagesV2, awaiting a
+                                          // network round-trip per digit
+                                          // typed would make the field
+                                          // lag/drop keystrokes (same fix as
+                                          // the Notes textarea above).
+                                          onBlur={async (e) => {
+                                            const nextValue = Math.max(
+                                              0,
+                                              Number(e.target.value),
+                                            );
+                                            if (
+                                              (stage[field] ?? 0) === nextValue
+                                            )
+                                              return;
+                                            const updated = v2Stages.map(
+                                              (s, i) =>
+                                                i === idx
+                                                  ? { ...s, [field]: nextValue }
+                                                  : s,
+                                            );
+                                            const ok =
+                                              await updateProjectStagesV2(
+                                                projectId,
+                                                updated,
+                                              );
+                                            if (!ok) {
+                                              toast.error(
+                                                `Could not save ${label} - please try again`,
+                                              );
+                                            }
+                                          }}
+                                        />
+                                      </div>
+                                    ))}
+                                  </div>
+                                  {/* Balance — auto-calculated */}
+                                  {(() => {
+                                    const input = stage.sentQty ?? 0;
+                                    const completed = stage.okQty ?? 0;
+                                    const rejected = stage.rejectedQty ?? 0;
+                                    const rework = stage.reworkQty ?? 0;
+                                    const balance = Math.max(
+                                      0,
+                                      input - completed - rejected - rework,
+                                    );
+                                    const stageMoves = (
+                                      productionMovements || []
+                                    ).filter(
+                                      (m) =>
+                                        m.projectId === projectId &&
+                                        (m.fromStage === stage.stageName ||
+                                          m.toStage === stage.stageName),
+                                    );
+                                    return (
+                                      <>
+                                        {input > 0 && (
+                                          <div
+                                            className={`mt-2 flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium ${balance > 0 ? "bg-warning/15 border border-warning/30 text-warning" : "bg-success/10 border border-success/30 text-success"}`}
+                                          >
+                                            <span>
+                                              Balance:{" "}
+                                              <strong>{balance}</strong>
+                                            </span>
+                                            {balance === 0 && completed > 0 && (
+                                              <span>
+                                                · Stage fully accounted
+                                              </span>
+                                            )}
+                                          </div>
+                                        )}
+                                        {stageMoves.length > 0 && (
+                                          <div className="mt-1.5 text-[11px] text-muted-foreground">
+                                            {stageMoves.map((m) => (
+                                              <span
+                                                key={m.id}
+                                                className="inline-flex items-center gap-1 mr-2"
+                                              >
+                                                {m.fromStage === stage.stageName
+                                                  ? `→ ${m.toStage}: ${m.qty}`
+                                                  : `← ${m.fromStage}: ${m.qty}`}
+                                              </span>
+                                            ))}
+                                          </div>
+                                        )}
+                                      </>
+                                    );
+                                  })()}
+                                </div>
+
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  {productionEdit &&
+                                    stage.status !== "Completed" && (
+                                      <Button
+                                        size="sm"
+                                        onClick={() => handleCompleteStage(idx)}
+                                      >
+                                        Mark as Complete
+                                      </Button>
+                                    )}
+                                  {productionEdit && (
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="outline"
+                                      onClick={() => {
+                                        setMoveForm({
+                                          fromStage: stage.stageName,
+                                          toStage: "",
+                                          qty: 0,
+                                          notes: "",
+                                        });
+                                        setMoveQtyDialog(true);
+                                      }}
+                                    >
+                                      Move Qty →
+                                    </Button>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                            {/* Notes */}
+                            <div className="space-y-1">
+                              <Label className="text-xs">Notes</Label>
+                              <Textarea
+                                key={stage.stageId ?? idx}
+                                rows={2}
+                                className="text-xs"
+                                placeholder="Notes for this stage..."
+                                disabled={!productionEdit}
+                                defaultValue={stage.notes}
+                                // Fires on blur, not on every keystroke - see
+                                // the matching fix earlier in this file.
+                                onBlur={async (e) => {
+                                  if (stage.notes === e.target.value) return;
+                                  const updated = v2Stages.map((s, i) =>
+                                    i === idx
+                                      ? { ...s, notes: e.target.value }
+                                      : s,
+                                  );
+                                  const ok = await updateProjectStagesV2(
+                                    projectId,
+                                    updated,
+                                  );
+                                  if (!ok) {
+                                    toast.error(
+                                      "Could not save notes - please try again",
+                                    );
+                                  }
+                                }}
+                              />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Add Stage Dialog */}
+                <Dialog open={addStageDialog} onOpenChange={setAddStageDialog}>
+                  <DialogContent className="max-w-sm">
+                    <DialogHeader>
+                      <DialogTitle>Add Stage</DialogTitle>
+                    </DialogHeader>
+                    <div className="space-y-3 py-2">
+                      <div className="space-y-1">
+                        <Label className="text-xs">Stage Name</Label>
+                        <Input
+                          className="h-8 text-xs"
+                          placeholder="e.g. Drilling"
+                          value={newStageName}
+                          onChange={(e) => setNewStageName(e.target.value)}
+                        />
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          id="req-material"
+                          checked={newStageRequiresMaterial}
+                          onChange={(e) =>
+                            setNewStageRequiresMaterial(e.target.checked)
+                          }
+                          className="w-4 h-4"
+                        />
+                        <Label
+                          htmlFor="req-material"
+                          className="text-xs cursor-pointer"
+                        >
+                          Requires Material Tracking
+                        </Label>
+                      </div>
+                    </div>
+                    <DialogFooter>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setAddStageDialog(false)}
+                      >
+                        Cancel
+                      </Button>
+                      <Button size="sm" onClick={handleAddStage}>
+                        Add
+                      </Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
+
+                {/* Phase 32 (Task #176) - Supervisor/admin QMS gate override */}
+                {gateOverrideDialog && (
+                  <QmsGateOverrideDialog
+                    open={!!gateOverrideDialog}
+                    onOpenChange={(open) =>
+                      !open && setGateOverrideDialog(null)
+                    }
+                    stageName={gateOverrideDialog.stageName}
+                    inspectionName={
+                      gateOverrideDialog.gate.inspection.libraryInspectionName
+                    }
+                    blockReason={gateOverrideDialog.gate.blockReason ?? ""}
+                    onConfirm={async (reason) => {
+                      const result = await createProjectQmsInspectionOverride({
+                        projectQmsInspectionId:
+                          gateOverrideDialog.gate.inspection.id,
+                        requiredProductionStageId: gateOverrideDialog.stageId,
+                        reason,
+                        byUserId: userId,
+                        byUserName: userName,
+                      });
+                      if (result.status !== "success") {
+                        toast.error(
+                          result.error || "Could not record override",
+                        );
+                        return false;
+                      }
+                      const idx = gateOverrideDialog.idx;
+                      const updated = v2Stages.map((s, i) =>
+                        i === idx
+                          ? { ...s, status: "Completed" as ProjectStageStatus }
+                          : s,
+                      );
+                      const ok = await updateProjectStagesV2(
+                        projectId,
+                        updated,
+                      );
+                      if (!ok) {
+                        toast.error(
+                          "Could not save stage completion - please try again",
+                        );
+                        return false;
+                      }
+                      toast.success(
+                        "Stage marked complete (supervisor override recorded)",
+                      );
+                      return true;
+                    }}
+                  />
+                )}
+
+                {/* Send Material Dialog */}
+                <Dialog
+                  open={!!sendMaterialDialog}
+                  onOpenChange={(open) => !open && setSendMaterialDialog(null)}
+                >
+                  <DialogContent className="max-w-sm">
+                    <DialogHeader>
+                      <DialogTitle>Send Material</DialogTitle>
+                    </DialogHeader>
+                    <div className="space-y-3 py-2">
+                      <div className="space-y-1">
+                        <Label className="text-xs">Quantity</Label>
+                        <Input
+                          type="number"
+                          className="h-8 text-xs"
+                          min={1}
+                          placeholder="0"
+                          value={sendForm.quantity || ""}
+                          onChange={(e) =>
+                            setSendForm((f) => ({
+                              ...f,
+                              quantity: +e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs">Date & Time</Label>
+                        <Input
+                          type="datetime-local"
+                          className="h-8 text-xs"
+                          value={sendForm.dateTime}
+                          onChange={(e) =>
+                            setSendForm((f) => ({
+                              ...f,
+                              dateTime: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs">Sent To</Label>
+                        <SentToSelect
+                          vendorId={sendForm.vendorId}
+                          onChange={(id, name) =>
+                            setSendForm((f) => ({
+                              ...f,
+                              vendorId: id,
+                              vendorName: name,
+                            }))
+                          }
+                          stageIdx={sendMaterialDialog?.stageIdx ?? 0}
+                        />
+                      </div>
+                    </div>
+                    <DialogFooter>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setSendMaterialDialog(null)}
+                      >
+                        Cancel
+                      </Button>
+                      <Button size="sm" onClick={handleSendMaterial}>
+                        Save
+                      </Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
+
+                {/* Mark Received Dialog */}
+                <Dialog
+                  open={!!receiveMaterialDialog}
+                  onOpenChange={(open) =>
+                    !open && setReceiveMaterialDialog(null)
+                  }
+                >
+                  <DialogContent className="max-w-sm">
+                    <DialogHeader>
+                      <DialogTitle>Mark as Received</DialogTitle>
+                    </DialogHeader>
+                    <div className="space-y-3 py-2">
+                      <div className="space-y-1">
+                        <Label className="text-xs">Received Quantity</Label>
+                        <Input
+                          type="number"
+                          className="h-8 text-xs"
+                          min={1}
+                          placeholder="0"
+                          value={receiveForm.quantity || ""}
+                          onChange={(e) =>
+                            setReceiveForm((f) => ({
+                              ...f,
+                              quantity: +e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs">Date & Time</Label>
+                        <Input
+                          type="datetime-local"
+                          className="h-8 text-xs"
+                          value={receiveForm.dateTime}
+                          onChange={(e) =>
+                            setReceiveForm((f) => ({
+                              ...f,
+                              dateTime: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                    </div>
+                    <DialogFooter>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => setReceiveMaterialDialog(null)}
+                      >
+                        Cancel
+                      </Button>
+                      <Button size="sm" onClick={handleReceiveMaterial}>
+                        Save
+                      </Button>
+                    </DialogFooter>
+                  </DialogContent>
+                </Dialog>
+              </div>
+            ) : (
+              /* Legacy Production UI — Read-only */
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-sm font-semibold">
+                    Production Stage Tracking
+                  </h2>
+                  <span className="text-xs bg-warning/15 text-warning border border-warning/30 rounded px-2 py-0.5">
+                    Legacy — Read Only
+                  </span>
+                </div>
+                <div className="rounded-md border bg-warning/15 px-4 py-2 text-xs text-warning mb-2">
+                  This project uses the legacy production system. Production
+                  data is view-only.
+                </div>
+                <div className="space-y-2 pointer-events-none opacity-80">
+                  {stages.map((stage, idx) => {
+                    const prevStage = idx > 0 ? stages[idx - 1] : null;
+                    const isLocked =
+                      prevStage !== null &&
+                      prevStage.status !== "Completed" &&
+                      prevStage.status !== "Received";
+                    const isExpanded = expandedStage === idx;
+                    return (
+                      <div
+                        key={stage.stageName}
+                        className={`rounded-lg border ${isLocked ? "opacity-50" : ""}`}
+                      >
+                        <button
+                          type="button"
+                          className="w-full flex items-center justify-between px-4 py-3 text-left"
+                          onClick={() =>
+                            setExpandedStage(isExpanded ? null : idx)
+                          }
+                        >
+                          <div className="flex items-center gap-3">
+                            <span className="flex items-center justify-center w-6 h-6 rounded-full bg-muted text-xs font-bold">
+                              {idx + 1}
+                            </span>
+                            <span className="text-sm font-semibold">
+                              {stage.stageName}
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`text-xs px-2 py-0.5 rounded-full font-medium ${STAGE_STATUS_COLORS[stage.status]}`}
+                            >
+                              {STAGE_STATUS_LABELS[stage.status]}
+                            </span>
                             {isExpanded ? (
                               <ChevronUp className="w-4 h-4 text-muted-foreground" />
                             ) : (
                               <ChevronDown className="w-4 h-4 text-muted-foreground" />
                             )}
-                          </Button>
-                        </div>
-                      </div>
-
-                      {/* Stage Body */}
-                      {isExpanded && (
-                        <div className="border-t px-4 py-4 space-y-4">
-                          {/* Phase 32 (Task #174) - QMS inspection link.
-                           * Optional, independent of material tracking.
-                           * Task #176 added the actual gate enforcement
-                           * (handleCompleteStage above) and the read-only
-                           * gate status this control now displays. */}
-                          {stage.stageId && (
-                            <div className="border rounded-md px-3 py-2 bg-muted/20">
-                              <ProductionStageInspectionControl
-                                projectId={projectId}
-                                stageId={stage.stageId}
-                                stageName={stage.stageName}
-                                libraryInspections={inspectionStages}
-                                projectInspections={
-                                  projectQmsInspectionsForThisProject
-                                }
-                                projectOverrides={
-                                  projectQmsInspectionOverridesForThisProject
-                                }
-                                onOpenInspection={() => setActiveTab("qms")}
-                                currentUserId={userId}
-                                currentUserName={userName}
-                                canManage={canManageInspectionLink}
-                              />
-                            </div>
-                          )}
-                          {stage.requiresMaterialTracking ? (
-                            <div className="space-y-3">
-                              {/* Totals */}
-                              <div className="grid grid-cols-3 gap-3">
-                                <div className="bg-blue-50 border border-blue-200 rounded-md p-2 text-center">
-                                  <div className="text-xs text-blue-600 font-medium">
-                                    Total Sent
-                                  </div>
-                                  <div className="text-lg font-bold text-blue-700">
-                                    {totalSent}
-                                  </div>
-                                </div>
-                                <div className="bg-green-50 border border-green-200 rounded-md p-2 text-center">
-                                  <div className="text-xs text-green-600 font-medium">
-                                    Total Received
-                                  </div>
-                                  <div className="text-lg font-bold text-green-700">
-                                    {totalReceived}
-                                  </div>
-                                </div>
-                                <div
-                                  className={`border rounded-md p-2 text-center ${pending > 0 ? "bg-orange-50 border-orange-200" : "bg-gray-50 border-gray-200"}`}
-                                >
-                                  <div
-                                    className={`text-xs font-medium ${pending > 0 ? "text-orange-600" : "text-gray-500"}`}
-                                  >
-                                    Pending
-                                  </div>
-                                  <div
-                                    className={`text-lg font-bold ${pending > 0 ? "text-orange-700" : "text-gray-600"}`}
-                                  >
-                                    {pending}
-                                  </div>
-                                </div>
-                              </div>
-                              {/* Actions */}
-                              <div className="flex gap-2">
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => {
-                                    setSendMaterialDialog({ stageIdx: idx });
-                                    setSendForm({
-                                      quantity: 0,
-                                      dateTime: "",
-                                      vendorId: "",
-                                      vendorName: "",
-                                    });
-                                  }}
-                                >
-                                  Send Material
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() => {
-                                    setReceiveMaterialDialog({ stageIdx: idx });
-                                    setReceiveForm({
-                                      quantity: 0,
-                                      dateTime: "",
-                                    });
-                                  }}
-                                  disabled={totalSent <= 0}
-                                >
-                                  Mark Received
-                                </Button>
-                                {totalReceived >= totalSent &&
-                                  totalSent > 0 &&
-                                  stage.status !== "Completed" && (
-                                    <Button
-                                      size="sm"
-                                      onClick={() => handleCompleteStage(idx)}
-                                    >
-                                      Mark Complete
-                                    </Button>
-                                  )}
-                              </div>
-                              {/* Transaction History */}
-                              {txs.length > 0 && (
-                                <div className="space-y-1">
-                                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-                                    Transaction History
-                                  </p>
-                                  <div className="border rounded-md overflow-hidden">
-                                    <table className="w-full text-xs">
-                                      <thead className="bg-muted">
-                                        <tr>
-                                          <th className="text-left px-2 py-1 font-medium">
-                                            Type
-                                          </th>
-                                          <th className="text-left px-2 py-1 font-medium">
-                                            Qty
-                                          </th>
-                                          <th className="text-left px-2 py-1 font-medium">
-                                            Date & Time
-                                          </th>
-                                          <th className="text-left px-2 py-1 font-medium">
-                                            Sent To
-                                          </th>
-                                        </tr>
-                                      </thead>
-                                      <tbody>
-                                        {txs.map((tx) => (
-                                          <tr key={tx.id} className="border-t">
-                                            <td className="px-2 py-1">
-                                              <span
-                                                className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${tx.type === "send" ? "bg-blue-100 text-blue-700" : "bg-green-100 text-green-700"}`}
-                                              >
-                                                {tx.type === "send"
-                                                  ? "Sent"
-                                                  : "Received"}
-                                              </span>
-                                            </td>
-                                            <td className="px-2 py-1">
-                                              {tx.quantity}
-                                            </td>
-                                            <td className="px-2 py-1">
-                                              {tx.dateTime
-                                                ? new Date(
-                                                    tx.dateTime,
-                                                  ).toLocaleString("en-IN")
-                                                : "—"}
-                                            </td>
-                                            <td className="px-2 py-1">
-                                              {tx.sentToVendorName ||
-                                                (tx.type === "receive"
-                                                  ? "—"
-                                                  : "In-house")}
-                                            </td>
-                                          </tr>
-                                        ))}
-                                      </tbody>
-                                    </table>
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          ) : (
-                            /* Non-material stage */
-                            <div className="space-y-3">
-                              <div className="space-y-1">
-                                <Label className="text-xs">Status</Label>
-                                <Select
-                                  value={stage.status}
-                                  onValueChange={async (v) => {
-                                    // Phase 32 (Task #176) - "Completed" is
-                                    // the one transition the QMS gate can
-                                    // block, so route it through the same
-                                    // gated handler the "Mark as Complete"
-                                    // button already uses below, instead of
-                                    // writing the status directly here.
-                                    if (v === "Completed") {
-                                      handleCompleteStage(idx);
-                                      return;
-                                    }
-                                    const updated = v2Stages.map((s, i) =>
-                                      i === idx
-                                        ? {
-                                            ...s,
-                                            status: v as ProjectStageStatus,
-                                          }
-                                        : s,
-                                    );
-                                    const ok = await updateProjectStagesV2(
-                                      projectId,
-                                      updated,
-                                    );
-                                    if (!ok) {
-                                      toast.error(
-                                        "Could not save stage status - please try again",
-                                      );
-                                    }
-                                  }}
-                                >
-                                  <SelectTrigger className="h-8 text-xs w-40">
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    {(
-                                      [
-                                        "NotStarted",
-                                        "InProgress",
-                                        "Completed",
-                                      ] as ProjectStageStatus[]
-                                    ).map((s) => (
-                                      <SelectItem
-                                        key={s}
-                                        value={s}
-                                        className="text-xs"
-                                      >
-                                        {STAGE_STATUS_LABELS[s]}
-                                      </SelectItem>
-                                    ))}
-                                  </SelectContent>
-                                </Select>
-                              </div>
-
-                              {/* Quantity Tracking */}
-                              <div>
-                                <div className="flex items-center justify-between mb-2">
-                                  <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-                                    Quantity Tracking
-                                  </p>
-                                  {project?.totalQty && (
-                                    <span className="text-xs text-muted-foreground">
-                                      Ordered:{" "}
-                                      <strong>{project.totalQty}</strong>
-                                    </span>
-                                  )}
-                                </div>
-                                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                                  {[
-                                    {
-                                      label: "Input Qty",
-                                      field: "sentQty" as const,
-                                      color:
-                                        "bg-blue-50 border-blue-200 text-blue-700",
-                                    },
-                                    {
-                                      label: "Completed",
-                                      field: "okQty" as const,
-                                      color:
-                                        "bg-green-50 border-green-200 text-green-700",
-                                    },
-                                    {
-                                      label: "Rejected",
-                                      field: "rejectedQty" as const,
-                                      color:
-                                        "bg-red-50 border-red-200 text-red-700",
-                                    },
-                                    {
-                                      label: "Rework",
-                                      field: "reworkQty" as const,
-                                      color:
-                                        "bg-orange-50 border-orange-200 text-orange-700",
-                                    },
-                                  ].map(({ label, field, color }) => (
-                                    <div
-                                      key={field}
-                                      className={`rounded-md border p-2 ${color}`}
-                                    >
-                                      <p className="text-[10px] font-medium mb-1">
-                                        {label}
-                                      </p>
-                                      <input
-                                        key={`${stage.stageId ?? idx}-${field}`}
-                                        type="number"
-                                        min={0}
-                                        className="w-full bg-transparent text-sm font-bold border-none outline-none p-0"
-                                        defaultValue={stage[field] ?? 0}
-                                        // Fires on blur, not on every
-                                        // keystroke - now that this goes
-                                        // through the remote-first
-                                        // updateProjectStagesV2, awaiting a
-                                        // network round-trip per digit
-                                        // typed would make the field
-                                        // lag/drop keystrokes (same fix as
-                                        // the Notes textarea above).
-                                        onBlur={async (e) => {
-                                          const nextValue = Math.max(
-                                            0,
-                                            Number(e.target.value),
-                                          );
-                                          if ((stage[field] ?? 0) === nextValue)
-                                            return;
-                                          const updated = v2Stages.map(
-                                            (s, i) =>
-                                              i === idx
-                                                ? { ...s, [field]: nextValue }
-                                                : s,
-                                          );
-                                          const ok =
-                                            await updateProjectStagesV2(
-                                              projectId,
-                                              updated,
-                                            );
-                                          if (!ok) {
-                                            toast.error(
-                                              `Could not save ${label} - please try again`,
-                                            );
-                                          }
-                                        }}
-                                      />
-                                    </div>
-                                  ))}
-                                </div>
-                                {/* Balance — auto-calculated */}
-                                {(() => {
-                                  const input = stage.sentQty ?? 0;
-                                  const completed = stage.okQty ?? 0;
-                                  const rejected = stage.rejectedQty ?? 0;
-                                  const rework = stage.reworkQty ?? 0;
-                                  const balance = Math.max(
-                                    0,
-                                    input - completed - rejected - rework,
-                                  );
-                                  const stageMoves = (
-                                    productionMovements || []
-                                  ).filter(
-                                    (m) =>
-                                      m.projectId === projectId &&
-                                      (m.fromStage === stage.stageName ||
-                                        m.toStage === stage.stageName),
-                                  );
-                                  return (
-                                    <>
-                                      {input > 0 && (
-                                        <div
-                                          className={`mt-2 flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium ${balance > 0 ? "bg-amber-50 border border-amber-200 text-amber-700" : "bg-green-50 border border-green-200 text-green-700"}`}
-                                        >
-                                          <span>
-                                            Balance: <strong>{balance}</strong>
-                                          </span>
-                                          {balance === 0 && completed > 0 && (
-                                            <span>· Stage fully accounted</span>
-                                          )}
-                                        </div>
-                                      )}
-                                      {stageMoves.length > 0 && (
-                                        <div className="mt-1.5 text-[11px] text-muted-foreground">
-                                          {stageMoves.map((m) => (
-                                            <span
-                                              key={m.id}
-                                              className="inline-flex items-center gap-1 mr-2"
-                                            >
-                                              {m.fromStage === stage.stageName
-                                                ? `→ ${m.toStage}: ${m.qty}`
-                                                : `← ${m.fromStage}: ${m.qty}`}
-                                            </span>
-                                          ))}
-                                        </div>
-                                      )}
-                                    </>
-                                  );
-                                })()}
-                              </div>
-
-                              <div className="flex items-center gap-2 flex-wrap">
-                                {stage.status !== "Completed" && (
-                                  <Button
-                                    size="sm"
-                                    onClick={() => handleCompleteStage(idx)}
-                                  >
-                                    Mark as Complete
-                                  </Button>
-                                )}
-                                {pEdit && (
-                                  <Button
-                                    type="button"
-                                    size="sm"
-                                    variant="outline"
-                                    onClick={() => {
-                                      setMoveForm({
-                                        fromStage: stage.stageName,
-                                        toStage: "",
-                                        qty: 0,
-                                        notes: "",
-                                      });
-                                      setMoveQtyDialog(true);
-                                    }}
-                                  >
-                                    Move Qty →
-                                  </Button>
-                                )}
-                              </div>
-                            </div>
-                          )}
-                          {/* Notes */}
-                          <div className="space-y-1">
-                            <Label className="text-xs">Notes</Label>
-                            <Textarea
-                              key={stage.stageId ?? idx}
-                              rows={2}
-                              className="text-xs"
-                              placeholder="Notes for this stage..."
-                              defaultValue={stage.notes}
-                              // Fires on blur, not on every keystroke - see
-                              // the matching fix earlier in this file.
-                              onBlur={async (e) => {
-                                if (stage.notes === e.target.value) return;
-                                const updated = v2Stages.map((s, i) =>
-                                  i === idx
-                                    ? { ...s, notes: e.target.value }
-                                    : s,
-                                );
-                                const ok = await updateProjectStagesV2(
-                                  projectId,
-                                  updated,
-                                );
-                                if (!ok) {
-                                  toast.error(
-                                    "Could not save notes - please try again",
-                                  );
-                                }
-                              }}
-                            />
                           </div>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-
-              {/* Add Stage Dialog */}
-              <Dialog open={addStageDialog} onOpenChange={setAddStageDialog}>
-                <DialogContent className="max-w-sm">
-                  <DialogHeader>
-                    <DialogTitle>Add Stage</DialogTitle>
-                  </DialogHeader>
-                  <div className="space-y-3 py-2">
-                    <div className="space-y-1">
-                      <Label className="text-xs">Stage Name</Label>
-                      <Input
-                        className="h-8 text-xs"
-                        placeholder="e.g. Drilling"
-                        value={newStageName}
-                        onChange={(e) => setNewStageName(e.target.value)}
-                      />
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="checkbox"
-                        id="req-material"
-                        checked={newStageRequiresMaterial}
-                        onChange={(e) =>
-                          setNewStageRequiresMaterial(e.target.checked)
-                        }
-                        className="w-4 h-4"
-                      />
-                      <Label
-                        htmlFor="req-material"
-                        className="text-xs cursor-pointer"
-                      >
-                        Requires Material Tracking
-                      </Label>
-                    </div>
-                  </div>
-                  <DialogFooter>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setAddStageDialog(false)}
-                    >
-                      Cancel
-                    </Button>
-                    <Button size="sm" onClick={handleAddStage}>
-                      Add
-                    </Button>
-                  </DialogFooter>
-                </DialogContent>
-              </Dialog>
-
-              {/* Phase 32 (Task #176) - Supervisor/admin QMS gate override */}
-              {gateOverrideDialog && (
-                <QmsGateOverrideDialog
-                  open={!!gateOverrideDialog}
-                  onOpenChange={(open) => !open && setGateOverrideDialog(null)}
-                  stageName={gateOverrideDialog.stageName}
-                  inspectionName={
-                    gateOverrideDialog.gate.inspection.libraryInspectionName
-                  }
-                  blockReason={gateOverrideDialog.gate.blockReason ?? ""}
-                  onConfirm={async (reason) => {
-                    const result = await createProjectQmsInspectionOverride({
-                      projectQmsInspectionId:
-                        gateOverrideDialog.gate.inspection.id,
-                      requiredProductionStageId: gateOverrideDialog.stageId,
-                      reason,
-                      byUserId: userId,
-                      byUserName: userName,
-                    });
-                    if (result.status !== "success") {
-                      toast.error(result.error || "Could not record override");
-                      return false;
-                    }
-                    const idx = gateOverrideDialog.idx;
-                    const updated = v2Stages.map((s, i) =>
-                      i === idx
-                        ? { ...s, status: "Completed" as ProjectStageStatus }
-                        : s,
-                    );
-                    const ok = await updateProjectStagesV2(projectId, updated);
-                    if (!ok) {
-                      toast.error(
-                        "Could not save stage completion - please try again",
-                      );
-                      return false;
-                    }
-                    toast.success(
-                      "Stage marked complete (supervisor override recorded)",
-                    );
-                    return true;
-                  }}
-                />
-              )}
-
-              {/* Send Material Dialog */}
-              <Dialog
-                open={!!sendMaterialDialog}
-                onOpenChange={(open) => !open && setSendMaterialDialog(null)}
-              >
-                <DialogContent className="max-w-sm">
-                  <DialogHeader>
-                    <DialogTitle>Send Material</DialogTitle>
-                  </DialogHeader>
-                  <div className="space-y-3 py-2">
-                    <div className="space-y-1">
-                      <Label className="text-xs">Quantity</Label>
-                      <Input
-                        type="number"
-                        className="h-8 text-xs"
-                        min={1}
-                        placeholder="0"
-                        value={sendForm.quantity || ""}
-                        onChange={(e) =>
-                          setSendForm((f) => ({
-                            ...f,
-                            quantity: +e.target.value,
-                          }))
-                        }
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <Label className="text-xs">Date & Time</Label>
-                      <Input
-                        type="datetime-local"
-                        className="h-8 text-xs"
-                        value={sendForm.dateTime}
-                        onChange={(e) =>
-                          setSendForm((f) => ({
-                            ...f,
-                            dateTime: e.target.value,
-                          }))
-                        }
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <Label className="text-xs">Sent To</Label>
-                      <SentToSelect
-                        vendorId={sendForm.vendorId}
-                        vendorName={sendForm.vendorName}
-                        onChange={(id, name) =>
-                          setSendForm((f) => ({
-                            ...f,
-                            vendorId: id,
-                            vendorName: name,
-                          }))
-                        }
-                        stageIdx={sendMaterialDialog?.stageIdx ?? 0}
-                      />
-                    </div>
-                  </div>
-                  <DialogFooter>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setSendMaterialDialog(null)}
-                    >
-                      Cancel
-                    </Button>
-                    <Button size="sm" onClick={handleSendMaterial}>
-                      Save
-                    </Button>
-                  </DialogFooter>
-                </DialogContent>
-              </Dialog>
-
-              {/* Mark Received Dialog */}
-              <Dialog
-                open={!!receiveMaterialDialog}
-                onOpenChange={(open) => !open && setReceiveMaterialDialog(null)}
-              >
-                <DialogContent className="max-w-sm">
-                  <DialogHeader>
-                    <DialogTitle>Mark as Received</DialogTitle>
-                  </DialogHeader>
-                  <div className="space-y-3 py-2">
-                    <div className="space-y-1">
-                      <Label className="text-xs">Received Quantity</Label>
-                      <Input
-                        type="number"
-                        className="h-8 text-xs"
-                        min={1}
-                        placeholder="0"
-                        value={receiveForm.quantity || ""}
-                        onChange={(e) =>
-                          setReceiveForm((f) => ({
-                            ...f,
-                            quantity: +e.target.value,
-                          }))
-                        }
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <Label className="text-xs">Date & Time</Label>
-                      <Input
-                        type="datetime-local"
-                        className="h-8 text-xs"
-                        value={receiveForm.dateTime}
-                        onChange={(e) =>
-                          setReceiveForm((f) => ({
-                            ...f,
-                            dateTime: e.target.value,
-                          }))
-                        }
-                      />
-                    </div>
-                  </div>
-                  <DialogFooter>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => setReceiveMaterialDialog(null)}
-                    >
-                      Cancel
-                    </Button>
-                    <Button size="sm" onClick={handleReceiveMaterial}>
-                      Save
-                    </Button>
-                  </DialogFooter>
-                </DialogContent>
-              </Dialog>
-            </div>
-          ) : (
-            /* Legacy Production UI — Read-only */
-            <div className="space-y-3">
-              <div className="flex items-center justify-between">
-                <h2 className="text-sm font-semibold">
-                  Production Stage Tracking
-                </h2>
-                <span className="text-xs bg-yellow-100 text-yellow-700 border border-yellow-200 rounded px-2 py-0.5">
-                  Legacy — Read Only
-                </span>
-              </div>
-              <div className="rounded-md border bg-yellow-50 px-4 py-2 text-xs text-yellow-800 mb-2">
-                This project uses the legacy production system. Production data
-                is view-only.
-              </div>
-              <div className="space-y-2 pointer-events-none opacity-80">
-                {stages.map((stage, idx) => {
-                  const prevStage = idx > 0 ? stages[idx - 1] : null;
-                  const isLocked =
-                    prevStage !== null &&
-                    prevStage.status !== "Completed" &&
-                    prevStage.status !== "Received";
-                  const isExpanded = expandedStage === idx;
-                  return (
-                    <div
-                      key={stage.stageName}
-                      className={`rounded-lg border ${isLocked ? "opacity-50" : ""}`}
-                    >
-                      <button
-                        type="button"
-                        className="w-full flex items-center justify-between px-4 py-3 text-left"
-                        onClick={() =>
-                          setExpandedStage(isExpanded ? null : idx)
-                        }
-                      >
-                        <div className="flex items-center gap-3">
-                          <span className="flex items-center justify-center w-6 h-6 rounded-full bg-muted text-xs font-bold">
-                            {idx + 1}
-                          </span>
-                          <span className="text-sm font-semibold">
-                            {stage.stageName}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <span
-                            className={`text-xs px-2 py-0.5 rounded-full font-medium ${STAGE_STATUS_COLORS[stage.status]}`}
-                          >
-                            {STAGE_STATUS_LABELS[stage.status]}
-                          </span>
-                          {isExpanded ? (
-                            <ChevronUp className="w-4 h-4 text-muted-foreground" />
-                          ) : (
-                            <ChevronDown className="w-4 h-4 text-muted-foreground" />
-                          )}
-                        </div>
-                      </button>
-                      {isExpanded && (
-                        <div className="border-t px-4 py-3 space-y-2 text-xs text-muted-foreground">
-                          {stage.quantitySent > 0 && (
-                            <div>Qty Sent: {stage.quantitySent}</div>
-                          )}
-                          {stage.receivedQuantity > 0 && (
-                            <div>Qty Received: {stage.receivedQuantity}</div>
-                          )}
-                          {stage.sentDateTime && (
-                            <div>
-                              Sent:{" "}
-                              {new Date(stage.sentDateTime).toLocaleString(
-                                "en-IN",
-                              )}
-                            </div>
-                          )}
-                          {stage.receivedDateTime && (
-                            <div>
-                              Received:{" "}
-                              {new Date(stage.receivedDateTime).toLocaleString(
-                                "en-IN",
-                              )}
-                            </div>
-                          )}
-                          {stage.sentToVendorName && (
-                            <div>Sent To: {stage.sentToVendorName}</div>
-                          )}
-                          {stage.notes && <div>Notes: {stage.notes}</div>}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </TabsContent>
-
-        {/* Tab — Inspection (QMS Phase 2) */}
-        <TabsContent value="inspection" className="mt-4">
-          <ProjectInspectionTab projectId={projectId} />
-        </TabsContent>
-
-        {/* Tab — QMS (Phase 32, Task #175) */}
-        <TabsContent value="qms" className="mt-4">
-          <ProjectQmsInspectionsTab projectId={projectId} />
-        </TabsContent>
-
-        {/* Tab 7 — Delivery Details */}
-        <TabsContent value="delivery" className="mt-4">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">Delivery Details</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div className="space-y-1.5">
-                  <Label htmlFor="del-date">Delivery Date</Label>
-                  <Input
-                    id="del-date"
-                    type="date"
-                    value={delivery.deliveryDate}
-                    onChange={(e) =>
-                      setDelivery((d) => ({
-                        ...d,
-                        deliveryDate: e.target.value,
-                      }))
-                    }
-                    data-ocid="project-detail.delivery.input"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="del-vehicle">Vehicle Number</Label>
-                  <Input
-                    id="del-vehicle"
-                    placeholder="e.g. MH12-AB-1234"
-                    value={delivery.vehicleNumber}
-                    onChange={(e) =>
-                      setDelivery((d) => ({
-                        ...d,
-                        vehicleNumber: e.target.value,
-                      }))
-                    }
-                  />
-                </div>
-                <div className="space-y-1.5 sm:col-span-2">
-                  <Label htmlFor="del-dest">Delivery Destination</Label>
-                  <Input
-                    id="del-dest"
-                    placeholder="Delivery address or location"
-                    value={delivery.deliveryDestination}
-                    onChange={(e) =>
-                      setDelivery((d) => ({
-                        ...d,
-                        deliveryDestination: e.target.value,
-                      }))
-                    }
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="del-challan">Delivery Challan No</Label>
-                  <Input
-                    id="del-challan"
-                    placeholder="e.g. DC-2026-001"
-                    value={delivery.deliveryChallan}
-                    onChange={(e) =>
-                      setDelivery((d) => ({
-                        ...d,
-                        deliveryChallan: e.target.value,
-                      }))
-                    }
-                  />
-                </div>
-              </div>
-              <div className="pt-2">
-                {isAdmin && (
-                  <Button
-                    onClick={handleSaveDelivery}
-                    data-ocid="project-detail.delivery.save_button"
-                  >
-                    <Save className="w-4 h-4 mr-1.5" /> Save Delivery
-                  </Button>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        {/* Tab 8 — Material Usage */}
-        <TabsContent value="material-usage" className="mt-4 space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold">Material Usage</h2>
-            {pCreate && (
-              <Button
-                size="sm"
-                onClick={() => setUsageDialog(true)}
-                data-ocid="project-detail.material-usage.open_modal_button"
-              >
-                <Plus className="w-3.5 h-3.5 mr-1" /> Add Usage
-              </Button>
-            )}
-          </div>
-
-          <div className="table-wrapper">
-            <div
-              className="rounded-md border"
-              data-ocid="project-detail.material-usage.table"
-            >
-              <Table>
-                <TableHeader>
-                  <TableRow className="bg-muted/40">
-                    <TableHead className="text-xs font-semibold">
-                      Material
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold">
-                      Qty Used
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold">
-                      Unit
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold">
-                      Date
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold">
-                      Notes
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold w-16">
-                      Del
-                    </TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {projUsages.map((u, i) => {
-                    const invItem = inventoryItems.find(
-                      (x) => x.id === u.inventoryItemId,
-                    );
-                    return (
-                      <TableRow
-                        key={u.id}
-                        data-ocid={`project-detail.material-usage.item.${i + 1}`}
-                      >
-                        <TableCell className="font-medium text-sm">
-                          {u.materialName}
-                        </TableCell>
-                        <TableCell className="text-sm font-mono">
-                          {u.quantityUsed}
-                        </TableCell>
-                        <TableCell className="text-xs text-muted-foreground">
-                          {invItem?.unit ?? ""}
-                        </TableCell>
-                        <TableCell className="text-xs">{u.usedDate}</TableCell>
-                        <TableCell className="text-xs text-muted-foreground">
-                          {u.notes || "—"}
-                        </TableCell>
-                        <TableCell>
-                          {pEdit && (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7"
-                              onClick={() => {
-                                setEditUsageId(u.id);
-                                setEditUsageForm({
-                                  quantityUsed: String(u.quantityUsed),
-                                  usedDate: u.usedDate,
-                                  notes: u.notes || "",
-                                });
-                              }}
-                            >
-                              <Pencil className="w-3.5 h-3.5" />
-                            </Button>
-                          )}
-                          {pDelete && (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7 text-destructive hover:text-destructive"
-                              onClick={async () => {
-                                if (!pDelete) {
-                                  alert("Access restricted");
-                                  return;
-                                }
-                                const result = await deleteInventoryUsageRemote(
-                                  u.id,
-                                );
-                                if (result.status === "unauthenticated") {
-                                  toast.error(
-                                    "Not signed in to the server - usage was not deleted",
-                                  );
-                                  return;
-                                }
-                                if (
-                                  result.status === "denied" ||
-                                  result.status === "error"
-                                ) {
-                                  toast.error(
-                                    result.error ?? "Could not delete usage",
-                                  );
-                                  return;
-                                }
-                                // Disclosed mechanical gap (see
-                                // lib/inventoryUsagesApi.ts): no DB
-                                // trigger restores stock on delete -
-                                // explicitly compensate to preserve
-                                // existing behavior.
-                                const restoreResult =
-                                  await restoreInventoryStockRemote(
-                                    u.inventoryItemId,
-                                    u.quantityUsed,
-                                  );
-                                if (restoreResult.status !== "success") {
-                                  toast.error(
-                                    "Usage deleted, but stock restore failed - please verify inventory manually",
-                                  );
-                                }
-                                deleteMaterialUsage(
-                                  u.id,
-                                  u.inventoryItemId,
-                                  u.quantityUsed,
-                                );
-                                toast.success("Usage deleted");
-                              }}
-                              data-ocid={`project-detail.material-usage.delete_button.${i + 1}`}
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </Button>
-                          )}
-                        </TableCell>
-                      </TableRow>
+                        </button>
+                        {isExpanded && (
+                          <div className="border-t px-4 py-3 space-y-2 text-xs text-muted-foreground">
+                            {stage.quantitySent > 0 && (
+                              <div>Qty Sent: {stage.quantitySent}</div>
+                            )}
+                            {stage.receivedQuantity > 0 && (
+                              <div>Qty Received: {stage.receivedQuantity}</div>
+                            )}
+                            {stage.sentDateTime && (
+                              <div>
+                                Sent:{" "}
+                                {new Date(stage.sentDateTime).toLocaleString(
+                                  "en-IN",
+                                )}
+                              </div>
+                            )}
+                            {stage.receivedDateTime && (
+                              <div>
+                                Received:{" "}
+                                {new Date(
+                                  stage.receivedDateTime,
+                                ).toLocaleString("en-IN")}
+                              </div>
+                            )}
+                            {stage.sentToVendorName && (
+                              <div>Sent To: {stage.sentToVendorName}</div>
+                            )}
+                            {stage.notes && <div>Notes: {stage.notes}</div>}
+                          </div>
+                        )}
+                      </div>
                     );
                   })}
-                  {projUsages.length === 0 && (
-                    <TableRow>
-                      <TableCell
-                        colSpan={6}
-                        className="text-center py-8 text-sm text-muted-foreground"
-                        data-ocid="project-detail.material-usage.empty_state"
-                      >
-                        No material usage recorded for this project.
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </div>
-          </div>
-
-          {/* Add Usage Dialog */}
-          <Dialog open={usageDialog} onOpenChange={setUsageDialog}>
-            <DialogContent className="max-w-sm">
-              <DialogHeader>
-                <DialogTitle>Record Material Usage</DialogTitle>
-              </DialogHeader>
-              <div className="space-y-4 py-2">
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Select Material *</Label>
-                  <Select
-                    value={usageForm.inventoryItemId}
-                    onValueChange={(v) =>
-                      setUsageForm((f) => ({
-                        ...f,
-                        inventoryItemId: v,
-                        quantityUsed: "",
-                      }))
-                    }
-                  >
-                    <SelectTrigger data-ocid="project-detail.material-usage.select">
-                      <SelectValue placeholder="Choose material..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {inventoryItems.map((item) => (
-                        <SelectItem
-                          key={item.id}
-                          value={item.id}
-                          disabled={item.quantityAvailable === 0}
-                        >
-                          <span
-                            className={
-                              item.quantityAvailable === 0 ? "opacity-40" : ""
-                            }
-                          >
-                            {item.name} – Stock: {item.quantityAvailable}{" "}
-                            {item.unit}
-                          </span>
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  {selectedUsageItem && (
-                    <p className="text-xs text-muted-foreground">
-                      Available:{" "}
-                      <span className="font-medium text-foreground">
-                        {selectedUsageItem.quantityAvailable}{" "}
-                        {selectedUsageItem.unit}
-                      </span>
-                    </p>
-                  )}
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Quantity Used *</Label>
-                  <Input
-                    type="number"
-                    min="1"
-                    max={selectedUsageItem?.quantityAvailable ?? undefined}
-                    placeholder="0"
-                    value={usageForm.quantityUsed}
-                    onChange={(e) =>
-                      setUsageForm((f) => ({
-                        ...f,
-                        quantityUsed: e.target.value,
-                      }))
-                    }
-                    data-ocid="project-detail.material-usage.input"
-                  />
-                  {selectedUsageItem &&
-                    Number(usageForm.quantityUsed) >
-                      selectedUsageItem.quantityAvailable && (
-                      <p
-                        className="text-xs text-destructive"
-                        data-ocid="project-detail.material-usage.error_state"
-                      >
-                        Exceeds available stock (
-                        {selectedUsageItem.quantityAvailable}{" "}
-                        {selectedUsageItem.unit})
-                      </p>
-                    )}
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Date Used</Label>
-                  <Input
-                    type="date"
-                    value={usageForm.usedDate}
-                    onChange={(e) =>
-                      setUsageForm((f) => ({ ...f, usedDate: e.target.value }))
-                    }
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Notes</Label>
-                  <Textarea
-                    rows={2}
-                    className="text-xs"
-                    placeholder="Optional notes..."
-                    value={usageForm.notes}
-                    onChange={(e) =>
-                      setUsageForm((f) => ({ ...f, notes: e.target.value }))
-                    }
-                    data-ocid="project-detail.material-usage.textarea"
-                  />
                 </div>
               </div>
-              <DialogFooter>
-                <Button
-                  variant="outline"
-                  onClick={() => setUsageDialog(false)}
-                  data-ocid="project-detail.material-usage.cancel_button"
-                >
-                  Cancel
-                </Button>
-                <Button
-                  onClick={handleAddUsage}
-                  disabled={
-                    !!selectedUsageItem &&
-                    Number(usageForm.quantityUsed) >
-                      selectedUsageItem.quantityAvailable
-                  }
-                  data-ocid="project-detail.material-usage.submit_button"
-                >
-                  Save Usage
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
+            )}
+          </section>
 
-          {/* Edit Usage Dialog */}
-          <Dialog
-            open={!!editUsageId}
-            onOpenChange={(o) => {
-              if (!o) {
-                setEditUsageId(null);
-                setEditUsageForm(null);
-              }
-            }}
-          >
-            <DialogContent className="max-w-sm">
-              <DialogHeader>
-                <DialogTitle>Edit Material Usage</DialogTitle>
-              </DialogHeader>
-              {editUsageForm && (
-                <div className="space-y-4 py-2">
+          {/* Tab — Inspection (QMS Phase 2) */}
+          <section id="section-inspection" className="mt-4 scroll-mt-24">
+            <ProjectInspectionTab projectId={projectId} />
+          </section>
+
+          {/* Tab — QMS (Phase 32, Task #175) */}
+          <section id="section-qms" className="mt-4 scroll-mt-24">
+            <ProjectQmsInspectionsTab projectId={projectId} />
+          </section>
+
+          {/* Tab 7 — Delivery Details */}
+          <section id="section-delivery" className="mt-4 scroll-mt-24">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">Delivery Details</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="space-y-1.5">
-                    <Label className="text-xs">Quantity Used *</Label>
+                    <Label htmlFor="del-date">Delivery Date</Label>
                     <Input
-                      type="number"
-                      min="1"
-                      value={editUsageForm.quantityUsed}
-                      onChange={(e) =>
-                        setEditUsageForm((f) =>
-                          f ? { ...f, quantityUsed: e.target.value } : f,
-                        )
-                      }
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Date Used</Label>
-                    <Input
+                      id="del-date"
                       type="date"
-                      value={editUsageForm.usedDate}
+                      value={delivery.deliveryDate}
                       onChange={(e) =>
-                        setEditUsageForm((f) =>
-                          f ? { ...f, usedDate: e.target.value } : f,
-                        )
+                        setDelivery((d) => ({
+                          ...d,
+                          deliveryDate: e.target.value,
+                        }))
+                      }
+                      data-ocid="project-detail.delivery.input"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="del-vehicle">Vehicle Number</Label>
+                    <Input
+                      id="del-vehicle"
+                      placeholder="e.g. MH12-AB-1234"
+                      value={delivery.vehicleNumber}
+                      onChange={(e) =>
+                        setDelivery((d) => ({
+                          ...d,
+                          vehicleNumber: e.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                  <div className="space-y-1.5 sm:col-span-2">
+                    <Label htmlFor="del-dest">Delivery Destination</Label>
+                    <Input
+                      id="del-dest"
+                      placeholder="Delivery address or location"
+                      value={delivery.deliveryDestination}
+                      onChange={(e) =>
+                        setDelivery((d) => ({
+                          ...d,
+                          deliveryDestination: e.target.value,
+                        }))
                       }
                     />
                   </div>
                   <div className="space-y-1.5">
-                    <Label className="text-xs">Notes</Label>
-                    <Textarea
-                      rows={2}
-                      className="text-xs"
-                      value={editUsageForm.notes}
+                    <Label htmlFor="del-challan">Delivery Challan No</Label>
+                    <Input
+                      id="del-challan"
+                      placeholder="e.g. DC-2026-001"
+                      value={delivery.deliveryChallan}
                       onChange={(e) =>
-                        setEditUsageForm((f) =>
-                          f ? { ...f, notes: e.target.value } : f,
-                        )
+                        setDelivery((d) => ({
+                          ...d,
+                          deliveryChallan: e.target.value,
+                        }))
                       }
                     />
                   </div>
                 </div>
+                <div className="pt-2">
+                  {isAdmin && (
+                    <Button
+                      onClick={handleSaveDelivery}
+                      data-ocid="project-detail.delivery.save_button"
+                    >
+                      <Save className="w-4 h-4 mr-1.5" /> Save Delivery
+                    </Button>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          </section>
+
+          {/* Tab 8 — Material Usage */}
+          <section
+            id="section-material-usage"
+            className="mt-4 space-y-4 scroll-mt-24"
+          >
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold">Material Usage</h2>
+              {pCreateInventory && (
+                <Button
+                  size="sm"
+                  onClick={() => setUsageDialog(true)}
+                  data-ocid="project-detail.material-usage.open_modal_button"
+                >
+                  <Plus className="w-3.5 h-3.5 mr-1" /> Add Usage
+                </Button>
               )}
-              <DialogFooter>
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    setEditUsageId(null);
-                    setEditUsageForm(null);
-                  }}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  onClick={async () => {
-                    if (!editUsageId || !editUsageForm) return;
-                    const existing = materialUsages.find(
-                      (x) => x.id === editUsageId,
-                    );
-                    if (!existing) return;
-                    const result = await updateInventoryUsageRemote({
-                      ...existing,
-                      quantityUsed: Number(editUsageForm.quantityUsed),
-                      usedDate: editUsageForm.usedDate,
-                      notes: editUsageForm.notes,
-                    });
-                    if (result.status === "unauthenticated") {
-                      toast.error(
-                        "Not signed in to the server - usage was not saved",
-                      );
-                      return;
-                    }
-                    if (
-                      result.status === "denied" ||
-                      result.status === "error"
-                    ) {
-                      toast.error(result.error ?? "Could not save usage");
-                      return;
-                    }
-                    if (!result.data) {
-                      toast.error("Could not save usage");
-                      return;
-                    }
-                    // Same pre-existing behavior as before this
-                    // migration: updateMaterialUsage does NOT adjust
-                    // stock, matching the DB's own lack of a
-                    // recompute-on-update trigger.
-                    updateMaterialUsage(result.data);
-                    setEditUsageId(null);
-                    setEditUsageForm(null);
-                    toast.success("Usage updated");
-                  }}
-                >
-                  Save
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
-        </TabsContent>
+            </div>
 
-        {/* Tab 9 — Bill of Materials */}
-        <TabsContent value="bom" className="mt-4 space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold">Bill of Materials</h2>
-            {pCreate && (
-              <Button
-                size="sm"
-                onClick={openAddBom}
-                data-ocid="project-detail.bom.open_modal_button"
+            <div className="table-wrapper">
+              <div
+                className="rounded-md border"
+                data-ocid="project-detail.material-usage.table"
               >
-                <Plus className="w-3.5 h-3.5 mr-1" /> Add Item
-              </Button>
-            )}
-          </div>
-
-          <div className="table-wrapper">
-            <div
-              className="rounded-md border"
-              data-ocid="project-detail.bom.table"
-            >
-              <Table>
-                <TableHeader>
-                  <TableRow className="bg-muted/40">
-                    <TableHead className="text-xs font-semibold">
-                      Material
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold">
-                      Required Qty
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold">
-                      Available Stock
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold">
-                      Shortage
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold">
-                      Est. Price
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold">
-                      Est. Cost
-                    </TableHead>
-                    <TableHead className="text-xs font-semibold w-20">
-                      Actions
-                    </TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {projBomItems.map((b, i) => {
-                    const inv = inventoryItems.find(
-                      (x) => x.id === b.inventoryItemId,
-                    );
-                    const estimatedPrice = Number(b.estimatedPrice || 0);
-                    const requiredQty = Number(b.requiredQuantity || 0);
-                    const availableQty = Number(inv?.quantityAvailable || 0);
-                    console.log({ estimatedPrice, requiredQty, availableQty });
-                    const shortage = Math.max(0, requiredQty - availableQty);
-                    const totalEstimatedCost = shortage * estimatedPrice;
-                    return (
-                      <TableRow
-                        key={b.id}
-                        data-ocid={`project-detail.bom.item.${i + 1}`}
-                      >
-                        <TableCell className="font-medium text-sm">
-                          {b.materialName}
-                        </TableCell>
-                        <TableCell className="text-sm font-mono">
-                          {requiredQty} {inv?.unit ?? ""}
-                        </TableCell>
-                        <TableCell className="text-sm font-mono">
-                          {availableQty} {inv?.unit ?? ""}
-                        </TableCell>
-                        <TableCell className="text-sm font-mono">
-                          {shortage > 0 ? (
-                            <span className="text-destructive font-semibold">
-                              {shortage} {inv?.unit ?? ""}
-                            </span>
-                          ) : (
-                            <span className="text-green-600 dark:text-green-400 font-semibold">
-                              0
-                            </span>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-sm font-mono">
-                          ₹{estimatedPrice.toFixed(2)}
-                        </TableCell>
-                        <TableCell className="text-sm font-mono">
-                          {totalEstimatedCost > 0 ? (
-                            <span className="text-amber-600 dark:text-amber-400 font-semibold">
-                              ₹{totalEstimatedCost.toFixed(2)}
-                            </span>
-                          ) : (
-                            <span className="text-muted-foreground">—</span>
-                          )}
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex gap-1">
-                            {pEdit && (
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/40">
+                      <TableHead className="text-xs font-semibold">
+                        Material
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold">
+                        Qty Used
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold">
+                        Unit
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold">
+                        Date
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold">
+                        Notes
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold w-16">
+                        Del
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {projUsages.map((u, i) => {
+                      const invItem = inventoryItems.find(
+                        (x) => x.id === u.inventoryItemId,
+                      );
+                      return (
+                        <TableRow
+                          key={u.id}
+                          data-ocid={`project-detail.material-usage.item.${i + 1}`}
+                        >
+                          <TableCell className="font-medium text-sm">
+                            {u.materialName}
+                          </TableCell>
+                          <TableCell className="text-sm font-mono">
+                            {u.quantityUsed}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {invItem?.unit ?? ""}
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            {u.usedDate}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {u.notes || "—"}
+                          </TableCell>
+                          <TableCell>
+                            {inventoryEdit && (
                               <Button
                                 variant="ghost"
                                 size="icon"
                                 className="h-7 w-7"
-                                onClick={() => openEditBom(b)}
-                                data-ocid={`project-detail.bom.edit_button.${i + 1}`}
+                                title="Edit usage"
+                                aria-label="Edit usage"
+                                onClick={() => {
+                                  setEditUsageId(u.id);
+                                  setEditUsageForm({
+                                    quantityUsed: String(u.quantityUsed),
+                                    usedDate: u.usedDate,
+                                    notes: u.notes || "",
+                                  });
+                                }}
                               >
                                 <Pencil className="w-3.5 h-3.5" />
                               </Button>
                             )}
-                            {pDelete && (
+                            {inventoryDelete && (
                               <Button
                                 variant="ghost"
                                 size="icon"
                                 className="h-7 w-7 text-destructive hover:text-destructive"
+                                title="Delete usage"
+                                aria-label="Delete usage"
                                 onClick={async () => {
-                                  if (!pDelete) {
+                                  if (!inventoryDelete) {
                                     alert("Access restricted");
                                     return;
                                   }
-                                  const result = await deleteBomItemRemote(
-                                    b.id,
-                                  );
+                                  const result =
+                                    await deleteInventoryUsageRemote(u.id);
                                   if (result.status === "unauthenticated") {
                                     toast.error(
-                                      "Not signed in to the server - BOM item was not deleted",
+                                      "Not signed in to the server - usage was not deleted",
                                     );
                                     return;
                                   }
@@ -5204,888 +5179,1433 @@ export function ProjectDetail({
                                     result.status === "error"
                                   ) {
                                     toast.error(
-                                      result.error ??
-                                        "Could not delete BOM item",
+                                      result.error ?? "Could not delete usage",
                                     );
                                     return;
                                   }
-                                  deleteBomItem(b.id);
-                                  toast.success("BOM item removed");
-                                  await refreshBomRequisitions();
+                                  // Disclosed mechanical gap (see
+                                  // lib/inventoryUsagesApi.ts): no DB
+                                  // trigger restores stock on delete -
+                                  // explicitly compensate to preserve
+                                  // existing behavior.
+                                  const restoreResult =
+                                    await restoreInventoryStockRemote(
+                                      u.inventoryItemId,
+                                      u.quantityUsed,
+                                    );
+                                  if (restoreResult.status !== "success") {
+                                    toast.error(
+                                      "Usage deleted, but stock restore failed - please verify inventory manually",
+                                    );
+                                  }
+                                  deleteMaterialUsage(
+                                    u.id,
+                                    u.inventoryItemId,
+                                    u.quantityUsed,
+                                  );
+                                  toast.success("Usage deleted");
                                 }}
-                                data-ocid={`project-detail.bom.delete_button.${i + 1}`}
+                                data-ocid={`project-detail.material-usage.delete_button.${i + 1}`}
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
                               </Button>
                             )}
-                          </div>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                    {projUsages.length === 0 && (
+                      <TableRow>
+                        <TableCell
+                          colSpan={6}
+                          className="text-center py-8 text-sm text-muted-foreground"
+                          data-ocid="project-detail.material-usage.empty_state"
+                        >
+                          No material usage recorded for this project.
                         </TableCell>
                       </TableRow>
-                    );
-                  })}
-                  {projBomItems.length === 0 && (
-                    <TableRow>
-                      <TableCell
-                        colSpan={7}
-                        className="text-center py-8 text-sm text-muted-foreground"
-                        data-ocid="project-detail.bom.empty_state"
-                      >
-                        No BOM items added yet. Click 'Add Item' to plan
-                        materials.
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
             </div>
-          </div>
 
-          {/* Add/Edit BOM Dialog */}
-          <Dialog open={bomDialog} onOpenChange={setBomDialog}>
-            <DialogContent className="max-w-sm">
-              <DialogHeader>
-                <DialogTitle>
-                  {editingBomId ? "Edit BOM Item" : "Add BOM Item"}
-                </DialogTitle>
-              </DialogHeader>
-              <div className="space-y-4 py-2">
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Select Material *</Label>
-                  <Select
-                    value={bomForm.inventoryItemId}
-                    onValueChange={(v) =>
-                      setBomForm((f) => ({
-                        ...f,
-                        inventoryItemId: v,
-                        requiredQuantity: "",
-                      }))
-                    }
-                  >
-                    <SelectTrigger data-ocid="project-detail.bom.select">
-                      <SelectValue placeholder="Choose material..." />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {inventoryItems.map((item) => (
-                        <SelectItem key={item.id} value={item.id}>
-                          {item.name} (Stock: {item.quantityAvailable}{" "}
-                          {item.unit})
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  {selectedBomItem && (
-                    <p className="text-xs text-muted-foreground">
-                      Available:{" "}
-                      <span className="font-medium text-foreground">
-                        {selectedBomItem.quantityAvailable}{" "}
-                        {selectedBomItem.unit}
-                      </span>
-                    </p>
-                  )}
-                </div>
-                {pCreateInventory && (
-                  <div className="flex justify-end">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 text-xs text-primary"
-                      onClick={() => setNewMatDialog(true)}
-                      data-ocid="project-detail.bom.add_new_material_button"
+            {/* Add Usage Dialog */}
+            <Dialog open={usageDialog} onOpenChange={setUsageDialog}>
+              <DialogContent className="max-w-sm">
+                <DialogHeader>
+                  <DialogTitle>Record Material Usage</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4 py-2">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Select Material *</Label>
+                    <Select
+                      value={usageForm.inventoryItemId}
+                      onValueChange={(v) =>
+                        setUsageForm((f) => ({
+                          ...f,
+                          inventoryItemId: v,
+                          quantityUsed: "",
+                        }))
+                      }
                     >
-                      <Plus className="w-3 h-3 mr-1" /> Add New Material
-                    </Button>
+                      <SelectTrigger data-ocid="project-detail.material-usage.select">
+                        <SelectValue placeholder="Choose material..." />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {inventoryItems.map((item) => (
+                          <SelectItem
+                            key={item.id}
+                            value={item.id}
+                            disabled={item.quantityAvailable === 0}
+                          >
+                            <span
+                              className={
+                                item.quantityAvailable === 0 ? "opacity-40" : ""
+                              }
+                            >
+                              {item.name} – Stock: {item.quantityAvailable}{" "}
+                              {item.unit}
+                            </span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {selectedUsageItem && (
+                      <p className="text-xs text-muted-foreground">
+                        Available:{" "}
+                        <span className="font-medium text-foreground">
+                          {selectedUsageItem.quantityAvailable}{" "}
+                          {selectedUsageItem.unit}
+                        </span>
+                      </p>
+                    )}
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Quantity Used *</Label>
+                    <Input
+                      type="number"
+                      min="1"
+                      max={selectedUsageItem?.quantityAvailable ?? undefined}
+                      placeholder="0"
+                      value={usageForm.quantityUsed}
+                      onChange={(e) =>
+                        setUsageForm((f) => ({
+                          ...f,
+                          quantityUsed: e.target.value,
+                        }))
+                      }
+                      data-ocid="project-detail.material-usage.input"
+                    />
+                    {selectedUsageItem &&
+                      Number(usageForm.quantityUsed) >
+                        selectedUsageItem.quantityAvailable && (
+                        <p
+                          className="text-xs text-destructive"
+                          data-ocid="project-detail.material-usage.error_state"
+                        >
+                          Exceeds available stock (
+                          {selectedUsageItem.quantityAvailable}{" "}
+                          {selectedUsageItem.unit})
+                        </p>
+                      )}
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Date Used</Label>
+                    <Input
+                      type="date"
+                      value={usageForm.usedDate}
+                      onChange={(e) =>
+                        setUsageForm((f) => ({
+                          ...f,
+                          usedDate: e.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Notes</Label>
+                    <Textarea
+                      rows={2}
+                      className="text-xs"
+                      placeholder="Optional notes..."
+                      value={usageForm.notes}
+                      onChange={(e) =>
+                        setUsageForm((f) => ({ ...f, notes: e.target.value }))
+                      }
+                      data-ocid="project-detail.material-usage.textarea"
+                    />
+                  </div>
+                </div>
+                <DialogFooter>
+                  <Button
+                    variant="outline"
+                    onClick={() => setUsageDialog(false)}
+                    data-ocid="project-detail.material-usage.cancel_button"
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={handleAddUsage}
+                    disabled={
+                      !!selectedUsageItem &&
+                      Number(usageForm.quantityUsed) >
+                        selectedUsageItem.quantityAvailable
+                    }
+                    data-ocid="project-detail.material-usage.submit_button"
+                  >
+                    Save Usage
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+
+            {/* Edit Usage Dialog */}
+            <Dialog
+              open={!!editUsageId}
+              onOpenChange={(o) => {
+                if (!o) {
+                  setEditUsageId(null);
+                  setEditUsageForm(null);
+                }
+              }}
+            >
+              <DialogContent className="max-w-sm">
+                <DialogHeader>
+                  <DialogTitle>Edit Material Usage</DialogTitle>
+                </DialogHeader>
+                {editUsageForm && (
+                  <div className="space-y-4 py-2">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Quantity Used *</Label>
+                      <Input
+                        type="number"
+                        min="1"
+                        value={editUsageForm.quantityUsed}
+                        onChange={(e) =>
+                          setEditUsageForm((f) =>
+                            f ? { ...f, quantityUsed: e.target.value } : f,
+                          )
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Date Used</Label>
+                      <Input
+                        type="date"
+                        value={editUsageForm.usedDate}
+                        onChange={(e) =>
+                          setEditUsageForm((f) =>
+                            f ? { ...f, usedDate: e.target.value } : f,
+                          )
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Notes</Label>
+                      <Textarea
+                        rows={2}
+                        className="text-xs"
+                        value={editUsageForm.notes}
+                        onChange={(e) =>
+                          setEditUsageForm((f) =>
+                            f ? { ...f, notes: e.target.value } : f,
+                          )
+                        }
+                      />
+                    </div>
                   </div>
                 )}
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Required Quantity *</Label>
-                  <Input
-                    type="number"
-                    min="1"
-                    placeholder="0"
-                    value={bomForm.requiredQuantity}
-                    onChange={(e) =>
-                      setBomForm((f) => ({
-                        ...f,
-                        requiredQuantity: e.target.value,
-                      }))
-                    }
-                    data-ocid="project-detail.bom.input"
-                  />
-                  {selectedBomItem && Number(bomForm.requiredQuantity) > 0 && (
-                    <p className="text-xs text-muted-foreground">
-                      Shortage:{" "}
-                      <span
-                        className={
-                          Number(bomForm.requiredQuantity) >
-                          selectedBomItem.quantityAvailable
-                            ? "text-destructive font-semibold"
-                            : "text-green-600 dark:text-green-400 font-semibold"
-                        }
-                      >
-                        {Math.max(
-                          0,
-                          Number(bomForm.requiredQuantity) -
-                            selectedBomItem.quantityAvailable,
-                        )}{" "}
-                        {selectedBomItem.unit}
-                      </span>
-                    </p>
-                  )}
-                </div>
-              </div>
-              <DialogFooter>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setBomDialog(false)}
-                  data-ocid="project-detail.bom.cancel_button"
-                >
-                  Cancel
-                </Button>
-                <Button
-                  size="sm"
-                  onClick={handleSaveBom}
-                  data-ocid="project-detail.bom.submit_button"
-                >
-                  Save
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
-
-          {/* Add New Material Sub-Modal */}
-          <Dialog open={newMatDialog} onOpenChange={setNewMatDialog}>
-            <DialogContent className="max-w-xs">
-              <DialogHeader>
-                <DialogTitle>Add New Material</DialogTitle>
-              </DialogHeader>
-              <div className="space-y-4 py-2">
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Material Name *</Label>
-                  <Input
-                    placeholder="e.g. MS Sheet 3mm"
-                    value={newMatForm.name}
-                    onChange={(e) =>
-                      setNewMatForm((f) => ({ ...f, name: e.target.value }))
-                    }
-                    data-ocid="project-detail.bom.new_material_name_input"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Unit</Label>
-                  <Select
-                    value={newMatForm.unit}
-                    onValueChange={(v) =>
-                      setNewMatForm((f) => ({ ...f, unit: v }))
-                    }
+                <DialogFooter>
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setEditUsageId(null);
+                      setEditUsageForm(null);
+                    }}
                   >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {[
-                        "pcs",
-                        "kg",
-                        "sheets",
-                        "meters",
-                        "liters",
-                        "boxes",
-                        "rolls",
-                      ].map((u) => (
-                        <SelectItem key={u} value={u}>
-                          {u}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1.5">
-                  <Label className="text-xs">Estimated Price (optional)</Label>
-                  <Input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    placeholder="0.00"
-                    value={newMatForm.estimatedPrice}
-                    onChange={(e) =>
-                      setNewMatForm((f) => ({
-                        ...f,
-                        estimatedPrice: e.target.value,
-                      }))
-                    }
-                  />
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  Material will be added to the material list with 0 stock and
-                  auto-selected.
-                </p>
-              </div>
-              <DialogFooter>
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={async () => {
+                      if (!editUsageId || !editUsageForm) return;
+                      const existing = materialUsages.find(
+                        (x) => x.id === editUsageId,
+                      );
+                      if (!existing) return;
+                      const result = await updateInventoryUsageRemote({
+                        ...existing,
+                        quantityUsed: Number(editUsageForm.quantityUsed),
+                        usedDate: editUsageForm.usedDate,
+                        notes: editUsageForm.notes,
+                      });
+                      if (result.status === "unauthenticated") {
+                        toast.error(
+                          "Not signed in to the server - usage was not saved",
+                        );
+                        return;
+                      }
+                      if (
+                        result.status === "denied" ||
+                        result.status === "error"
+                      ) {
+                        toast.error(result.error ?? "Could not save usage");
+                        return;
+                      }
+                      if (!result.data) {
+                        toast.error("Could not save usage");
+                        return;
+                      }
+                      // Same pre-existing behavior as before this
+                      // migration: updateMaterialUsage does NOT adjust
+                      // stock, matching the DB's own lack of a
+                      // recompute-on-update trigger.
+                      updateMaterialUsage(result.data);
+                      setEditUsageId(null);
+                      setEditUsageForm(null);
+                      toast.success("Usage updated");
+                    }}
+                  >
+                    Save
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+          </section>
+
+          {/* Tab 9 — Bill of Materials */}
+          <section id="section-bom" className="mt-4 space-y-4 scroll-mt-24">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-semibold">Bill of Materials</h2>
+              {bomCreate && (
                 <Button
-                  variant="outline"
-                  onClick={() => setNewMatDialog(false)}
+                  size="sm"
+                  onClick={openAddBom}
+                  data-ocid="project-detail.bom.open_modal_button"
                 >
-                  Cancel
+                  <Plus className="w-3.5 h-3.5 mr-1" /> Add Item
                 </Button>
-                <Button
-                  onClick={handleAddNewMaterial}
-                  data-ocid="project-detail.bom.new_material_save_button"
-                >
-                  Add Material
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
-        </TabsContent>
+              )}
+            </div>
 
-        {/* Tab 10 — Items */}
-        <TabsContent
-          value="items"
-          className="mt-4 space-y-4"
-          data-ocid="project-detail.items.panel"
-        >
-          <ProjectItemsTab
-            projectId={projectId}
-            projectItems={projectItems}
-            addProjectItem={addProjectItem}
-            updateProjectItem={updateProjectItem}
-            deleteProjectItem={deleteProjectItem}
-            canAdd={pCreate}
-            canEditItem={pEdit}
-            canDelete={pDelete}
-          />
-        </TabsContent>
-
-        {/* Profit & Costing Tab */}
-        <TabsContent
-          value="profit"
-          className="mt-4 space-y-4"
-          data-ocid="project-detail.profit.panel"
-        >
-          {(() => {
-            const projectCosting = internalCostings.find(
-              (c) => c.projectId === projectId,
-            );
-            const projectInvoices = (invoices || []).filter(
-              (inv) =>
-                inv.projectId === projectId && inv.invoiceType !== "proforma",
-            );
-            const totalRevenue = projectInvoices.reduce(
-              (sum, inv) => sum + (inv.totalAmount || 0),
-              0,
-            );
-            const projectMaterialUsages = (materialUsages || []).filter(
-              (u) => u.projectId === projectId,
-            );
-            const materialCost = projectMaterialUsages.reduce((sum, usage) => {
-              const item = (inventoryItems || []).find(
-                (i) =>
-                  i.id === usage.inventoryItemId ||
-                  i.name.trim().toLowerCase() ===
-                    (usage.materialName || "").trim().toLowerCase(),
-              );
-              const price = item?.lastPurchasePrice ?? 0;
-              return sum + (usage.quantityUsed || 0) * price;
-            }, 0);
-            const labourCost = projectCosting?.labourCost ?? 0;
-            const outsourceCost = projOutsourced.reduce(
-              (sum, o) => sum + (o.processCost || 0),
-              0,
-            );
-            const transportCost = projectCosting?.transportCost ?? 0;
-            const customCostExtra = (projectCosting?.extraCosts || []).reduce(
-              (s, c) => s + (Number(c.amount) || 0),
-              0,
-            );
-            const pettyExpenseCost = (pettyExpenses || [])
-              .filter(
-                (e) =>
-                  e.projectId === projectId &&
-                  e.expenseMode === "Company Expense",
-              )
-              .reduce((s, e) => s + (Number(e.amount) || 0), 0);
-            const autoCost =
-              materialCost +
-              labourCost +
-              outsourceCost +
-              transportCost +
-              customCostExtra +
-              pettyExpenseCost;
-            const manualAdjustments = projectCosting?.manualAdjustments || [];
-            const addCostTotal = manualAdjustments
-              .filter((a) => a.type === "Add Cost")
-              .reduce((s, a) => s + (Number(a.amount) || 0), 0);
-            const reduceCostTotal = manualAdjustments
-              .filter((a) => a.type === "Reduce Cost")
-              .reduce((s, a) => s + (Number(a.amount) || 0), 0);
-            const adjustedCost = autoCost + addCostTotal - reduceCostTotal;
-            const profit = totalRevenue - adjustedCost;
-            const profitPct =
-              totalRevenue > 0 ? (profit / totalRevenue) * 100 : 0;
-            const isProfit = profit >= 0;
-            const hasAdjustments = addCostTotal > 0 || reduceCostTotal > 0;
-            console.log("Material Usage:", projectMaterialUsages);
-            console.log("Inventory:", inventoryItems);
-            console.log("Cost Calculation:", {
-              materialCost,
-              labourCost,
-              outsourceCost,
-              transportCost,
-              customCostExtra,
-              pettyExpenseCost,
-              autoCost,
-              adjustedCost,
-              totalRevenue,
-              profit,
-            });
-
-            return (
-              <div className="space-y-4">
-                {/* Revenue Card */}
-                <Card>
-                  <CardHeader className="pb-2">
-                    <CardTitle className="text-sm text-muted-foreground uppercase tracking-wide">
-                      Total Revenue
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <p
-                      className="text-3xl font-bold text-blue-600"
-                      data-ocid="project-detail.profit.revenue"
-                    >
-                      {fmt(totalRevenue)}
-                    </p>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      From {projectInvoices.length} tax invoice
-                      {projectInvoices.length !== 1 ? "s" : ""}
-                    </p>
-                  </CardContent>
-                </Card>
-
-                {/* Cost Breakdown */}
-                <div>
-                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
-                    Cost Breakdown
-                  </p>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <Card>
-                      <CardContent className="pt-4">
-                        <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                          Material Cost
-                        </p>
-                        <p className="text-xl font-bold mt-1">
-                          {fmt(materialCost)}
-                        </p>
-                        <p className="text-[10px] text-muted-foreground mt-0.5">
-                          Based on material usage × last purchase price
-                        </p>
-                      </CardContent>
-                    </Card>
-                    <Card>
-                      <CardContent className="pt-4">
-                        <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                          Labour Cost
-                        </p>
-                        <p className="text-xl font-bold mt-1">
-                          {fmt(labourCost)}
-                        </p>
-                        {labourCost === 0 && (
-                          <p className="text-[10px] text-amber-600 mt-0.5">
-                            Enter in Internal Costing tab
-                          </p>
-                        )}
-                      </CardContent>
-                    </Card>
-                    <Card>
-                      <CardContent className="pt-4">
-                        <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                          Outsource Cost
-                        </p>
-                        <p className="text-xl font-bold mt-1">
-                          {fmt(outsourceCost)}
-                        </p>
-                        <p className="text-[10px] text-muted-foreground mt-0.5">
-                          From {projOutsourced.length} outsourced work entries
-                        </p>
-                      </CardContent>
-                    </Card>
-                    <Card>
-                      <CardContent className="pt-4">
-                        <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                          Transport Cost
-                        </p>
-                        <p className="text-xl font-bold mt-1">
-                          {fmt(transportCost)}
-                        </p>
-                        {transportCost === 0 && (
-                          <p className="text-[10px] text-amber-600 mt-0.5">
-                            Enter in Internal Costing tab
-                          </p>
-                        )}
-                      </CardContent>
-                    </Card>
-                    {customCostExtra > 0 && (
-                      <Card>
-                        <CardContent className="pt-4">
-                          <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                            Custom Costs
-                          </p>
-                          <p className="text-xl font-bold mt-1">
-                            {fmt(customCostExtra)}
-                          </p>
-                          <p className="text-[10px] text-muted-foreground mt-0.5">
-                            From {(projectCosting?.extraCosts || []).length}{" "}
-                            custom entries
-                          </p>
-                        </CardContent>
-                      </Card>
-                    )}
-                    {pettyExpenseCost > 0 && (
-                      <Card>
-                        <CardContent className="pt-4">
-                          <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                            Petty Expenses
-                          </p>
-                          <p className="text-xl font-bold mt-1">
-                            {fmt(pettyExpenseCost)}
-                          </p>
-                          <p className="text-[10px] text-muted-foreground mt-0.5">
-                            Company expenses for this project
-                          </p>
-                        </CardContent>
-                      </Card>
-                    )}
-                  </div>
-                </div>
-
-                {/* Manual Adjustments Section */}
-                <Card>
-                  <CardHeader className="pb-2">
-                    <div className="flex items-center justify-between">
-                      <CardTitle className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-                        Manual Adjustments
-                      </CardTitle>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setShowAdjForm((f) => !f)}
-                        data-ocid="project-detail.profit.open_modal_button"
-                      >
-                        <Plus className="w-3.5 h-3.5 mr-1" /> Add Adjustment
-                      </Button>
-                    </div>
-                  </CardHeader>
-                  <CardContent className="space-y-3">
-                    {showAdjForm && (
-                      <div className="flex flex-wrap gap-2 p-3 bg-muted/30 rounded-md items-end">
-                        <div className="flex-1 min-w-[140px] space-y-1">
-                          <Label className="text-xs">Name</Label>
-                          <Input
-                            placeholder="Adjustment name"
-                            value={adjForm.name}
-                            onChange={(e) =>
-                              setAdjForm((f) => ({
-                                ...f,
-                                name: e.target.value,
-                              }))
-                            }
-                            className="h-8"
-                            data-ocid="project-detail.profit.input"
-                          />
-                        </div>
-                        <div className="w-28 space-y-1">
-                          <Label className="text-xs">Amount (₹)</Label>
-                          <Input
-                            type="number"
-                            min={0}
-                            placeholder="0"
-                            value={adjForm.amount}
-                            onChange={(e) =>
-                              setAdjForm((f) => ({
-                                ...f,
-                                amount: e.target.value,
-                              }))
-                            }
-                            className="h-8"
-                          />
-                        </div>
-                        <div className="w-36 space-y-1">
-                          <Label className="text-xs">Type</Label>
-                          <Select
-                            value={adjForm.type}
-                            onValueChange={(v) =>
-                              setAdjForm((f) => ({
-                                ...f,
-                                type: v as "Add Cost" | "Reduce Cost",
-                              }))
-                            }
-                          >
-                            <SelectTrigger
-                              className="h-8"
-                              data-ocid="project-detail.profit.select"
-                            >
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="Add Cost">Add Cost</SelectItem>
-                              <SelectItem value="Reduce Cost">
-                                Reduce Cost
-                              </SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </div>
-                        <Button
-                          size="sm"
-                          className="h-8"
-                          data-ocid="project-detail.profit.submit_button"
-                          onClick={() => {
-                            if (
-                              !adjForm.name.trim() ||
-                              !adjForm.amount ||
-                              Number(adjForm.amount) <= 0
-                            ) {
-                              toast.error(
-                                "Name and a positive amount are required.",
-                              );
-                              return;
-                            }
-                            const newAdj: ManualAdjustment = {
-                              id: crypto.randomUUID(),
-                              name: adjForm.name.trim(),
-                              amount: Number(adjForm.amount),
-                              type: adjForm.type,
-                            };
-                            const existing = internalCostings.find(
-                              (c) => c.projectId === projectId,
-                            );
-                            const updated = {
-                              ...(existing ?? {
-                                id: `ic-${Date.now()}`,
-                                projectId,
-                                rawMaterialCost: 0,
-                                cncCost: 0,
-                                hardwareCost: 0,
-                                powderCoatingCost: 0,
-                                assemblyCost: 0,
-                                packingCost: 0,
-                              }),
-                              manualAdjustments: [
-                                ...(existing?.manualAdjustments || []),
-                                newAdj,
-                              ],
-                            };
-                            upsertInternalCosting(updated);
-                            setAdjForm({
-                              name: "",
-                              amount: "",
-                              type: "Add Cost",
-                            });
-                            setShowAdjForm(false);
-                            toast.success("Adjustment added.");
-                          }}
+            <div className="table-wrapper">
+              <div
+                className="rounded-md border"
+                data-ocid="project-detail.bom.table"
+              >
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/40">
+                      <TableHead className="text-xs font-semibold">
+                        Material
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold">
+                        Required Qty
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold">
+                        Available Stock
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold">
+                        Shortage
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold">
+                        Est. Price
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold">
+                        Est. Cost
+                      </TableHead>
+                      <TableHead className="text-xs font-semibold w-20">
+                        Actions
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {projBomItems.map((b, i) => {
+                      const inv = inventoryItems.find(
+                        (x) => x.id === b.inventoryItemId,
+                      );
+                      const estimatedPrice = Number(b.estimatedPrice || 0);
+                      const requiredQty = Number(b.requiredQuantity || 0);
+                      const availableQty = Number(inv?.quantityAvailable || 0);
+                      const shortage = Math.max(0, requiredQty - availableQty);
+                      const totalEstimatedCost = shortage * estimatedPrice;
+                      return (
+                        <TableRow
+                          key={b.id}
+                          data-ocid={`project-detail.bom.item.${i + 1}`}
                         >
-                          Save
-                        </Button>
-                      </div>
-                    )}
-                    {manualAdjustments.length === 0 ? (
-                      <p
-                        className="text-xs text-muted-foreground text-center py-2"
-                        data-ocid="project-detail.profit.empty_state"
-                      >
-                        No adjustments yet.
-                      </p>
-                    ) : (
-                      <table className="w-full text-sm">
-                        <thead>
-                          <tr className="text-xs text-muted-foreground border-b">
-                            <th className="text-left pb-1">Name</th>
-                            <th className="text-right pb-1">Amount</th>
-                            <th className="text-center pb-1">Type</th>
-                            <th className="w-8 pb-1" />
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {manualAdjustments.map((adj, adjIdx) => (
-                            <tr
-                              key={adj.id}
-                              className="border-b border-border/50 last:border-0"
-                              data-ocid={`project-detail.profit.item.${adjIdx + 1}`}
-                            >
-                              <td className="py-1.5">{adj.name}</td>
-                              <td className="py-1.5 text-right font-medium">
-                                {fmt(adj.amount)}
-                              </td>
-                              <td className="py-1.5 text-center">
-                                <span
-                                  className={`text-xs px-2 py-0.5 rounded-full font-medium ${adj.type === "Add Cost" ? "bg-red-100 text-red-700" : "bg-green-100 text-green-700"}`}
+                          <TableCell className="font-medium text-sm">
+                            {b.materialName}
+                          </TableCell>
+                          <TableCell className="text-sm font-mono">
+                            {requiredQty} {inv?.unit ?? ""}
+                          </TableCell>
+                          <TableCell className="text-sm font-mono">
+                            {availableQty} {inv?.unit ?? ""}
+                          </TableCell>
+                          <TableCell className="text-sm font-mono">
+                            {shortage > 0 ? (
+                              <span className="text-destructive font-semibold">
+                                {shortage} {inv?.unit ?? ""}
+                              </span>
+                            ) : (
+                              <span className="text-success font-semibold">
+                                0
+                              </span>
+                            )}
+                          </TableCell>
+                          <TableCell className="text-sm font-mono">
+                            ₹{estimatedPrice.toFixed(2)}
+                          </TableCell>
+                          <TableCell className="text-sm font-mono">
+                            {totalEstimatedCost > 0 ? (
+                              <span className="text-warning font-semibold">
+                                ₹{totalEstimatedCost.toFixed(2)}
+                              </span>
+                            ) : (
+                              <span className="text-muted-foreground">—</span>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex gap-1">
+                              {bomEdit && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7"
+                                  onClick={() => openEditBom(b)}
+                                  title="Edit BOM item"
+                                  aria-label="Edit BOM item"
+                                  data-ocid={`project-detail.bom.edit_button.${i + 1}`}
                                 >
-                                  {adj.type}
-                                </span>
-                              </td>
-                              <td className="py-1.5 text-right">
-                                <button
-                                  type="button"
-                                  data-ocid={`project-detail.profit.delete_button.${adjIdx + 1}`}
-                                  onClick={() => {
-                                    const existing = internalCostings.find(
-                                      (c) => c.projectId === projectId,
+                                  <Pencil className="w-3.5 h-3.5" />
+                                </Button>
+                              )}
+                              {bomDelete && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7 text-destructive hover:text-destructive"
+                                  title="Delete BOM item"
+                                  aria-label="Delete BOM item"
+                                  onClick={async () => {
+                                    if (!bomDelete) {
+                                      alert("Access restricted");
+                                      return;
+                                    }
+                                    const result = await deleteBomItemRemote(
+                                      b.id,
                                     );
-                                    if (!existing) return;
-                                    upsertInternalCosting({
-                                      ...existing,
-                                      manualAdjustments: (
-                                        existing.manualAdjustments || []
-                                      ).filter((a) => a.id !== adj.id),
-                                    });
-                                    toast.success("Adjustment removed.");
+                                    if (result.status === "unauthenticated") {
+                                      toast.error(
+                                        "Not signed in to the server - BOM item was not deleted",
+                                      );
+                                      return;
+                                    }
+                                    if (
+                                      result.status === "denied" ||
+                                      result.status === "error"
+                                    ) {
+                                      toast.error(
+                                        result.error ??
+                                          "Could not delete BOM item",
+                                      );
+                                      return;
+                                    }
+                                    deleteBomItem(b.id);
+                                    toast.success("BOM item removed");
+                                    await refreshBomRequisitions();
                                   }}
-                                  className="text-destructive hover:text-destructive/80"
+                                  data-ocid={`project-detail.bom.delete_button.${i + 1}`}
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                                </Button>
+                              )}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                    {projBomItems.length === 0 && (
+                      <TableRow>
+                        <TableCell
+                          colSpan={7}
+                          className="text-center py-8 text-sm text-muted-foreground"
+                          data-ocid="project-detail.bom.empty_state"
+                        >
+                          No BOM items added yet. Click 'Add Item' to plan
+                          materials.
+                        </TableCell>
+                      </TableRow>
                     )}
-                    {manualAdjustments.length > 0 && (
-                      <div className="flex justify-between text-xs pt-1 border-t">
-                        <span className="text-green-700">
-                          Reduce Cost: -{fmt(reduceCostTotal)}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+
+            {/* Add/Edit BOM Dialog */}
+            <Dialog open={bomDialog} onOpenChange={setBomDialog}>
+              <DialogContent className="max-w-sm">
+                <DialogHeader>
+                  <DialogTitle>
+                    {editingBomId ? "Edit BOM Item" : "Add BOM Item"}
+                  </DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4 py-2">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Select Material *</Label>
+                    <Select
+                      value={bomForm.inventoryItemId}
+                      onValueChange={(v) =>
+                        setBomForm((f) => ({
+                          ...f,
+                          inventoryItemId: v,
+                          requiredQuantity: "",
+                        }))
+                      }
+                    >
+                      <SelectTrigger data-ocid="project-detail.bom.select">
+                        <SelectValue placeholder="Choose material..." />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {inventoryItems.map((item) => (
+                          <SelectItem key={item.id} value={item.id}>
+                            {item.name} (Stock: {item.quantityAvailable}{" "}
+                            {item.unit})
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {selectedBomItem && (
+                      <p className="text-xs text-muted-foreground">
+                        Available:{" "}
+                        <span className="font-medium text-foreground">
+                          {selectedBomItem.quantityAvailable}{" "}
+                          {selectedBomItem.unit}
                         </span>
-                        <span className="text-red-700">
-                          Add Cost: +{fmt(addCostTotal)}
+                      </p>
+                    )}
+                  </div>
+                  {pCreateInventory && (
+                    <div className="flex justify-end">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 text-xs text-primary"
+                        onClick={() => setNewMatDialog(true)}
+                        data-ocid="project-detail.bom.add_new_material_button"
+                      >
+                        <Plus className="w-3 h-3 mr-1" /> Add New Material
+                      </Button>
+                    </div>
+                  )}
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Required Quantity *</Label>
+                    <Input
+                      type="number"
+                      min="1"
+                      placeholder="0"
+                      value={bomForm.requiredQuantity}
+                      onChange={(e) =>
+                        setBomForm((f) => ({
+                          ...f,
+                          requiredQuantity: e.target.value,
+                        }))
+                      }
+                      data-ocid="project-detail.bom.input"
+                    />
+                    {selectedBomItem &&
+                      Number(bomForm.requiredQuantity) > 0 && (
+                        <p className="text-xs text-muted-foreground">
+                          Shortage:{" "}
+                          <span
+                            className={
+                              Number(bomForm.requiredQuantity) >
+                              selectedBomItem.quantityAvailable
+                                ? "text-destructive font-semibold"
+                                : "text-success font-semibold"
+                            }
+                          >
+                            {Math.max(
+                              0,
+                              Number(bomForm.requiredQuantity) -
+                                selectedBomItem.quantityAvailable,
+                            )}{" "}
+                            {selectedBomItem.unit}
+                          </span>
+                        </p>
+                      )}
+                  </div>
+                </div>
+                <DialogFooter>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setBomDialog(false)}
+                    data-ocid="project-detail.bom.cancel_button"
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={handleSaveBom}
+                    data-ocid="project-detail.bom.submit_button"
+                  >
+                    Save
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+
+            {/* Add New Material Sub-Modal */}
+            <Dialog open={newMatDialog} onOpenChange={setNewMatDialog}>
+              <DialogContent className="max-w-xs">
+                <DialogHeader>
+                  <DialogTitle>Add New Material</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4 py-2">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Material Name *</Label>
+                    <Input
+                      placeholder="e.g. MS Sheet 3mm"
+                      value={newMatForm.name}
+                      onChange={(e) =>
+                        setNewMatForm((f) => ({ ...f, name: e.target.value }))
+                      }
+                      data-ocid="project-detail.bom.new_material_name_input"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Unit</Label>
+                    <Select
+                      value={newMatForm.unit}
+                      onValueChange={(v) =>
+                        setNewMatForm((f) => ({ ...f, unit: v }))
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {[
+                          "pcs",
+                          "kg",
+                          "sheets",
+                          "meters",
+                          "liters",
+                          "boxes",
+                          "rolls",
+                        ].map((u) => (
+                          <SelectItem key={u} value={u}>
+                            {u}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">
+                      Estimated Price (optional)
+                    </Label>
+                    <Input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      placeholder="0.00"
+                      value={newMatForm.estimatedPrice}
+                      onChange={(e) =>
+                        setNewMatForm((f) => ({
+                          ...f,
+                          estimatedPrice: e.target.value,
+                        }))
+                      }
+                    />
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Material will be added to the material list with 0 stock and
+                    auto-selected.
+                  </p>
+                </div>
+                <DialogFooter>
+                  <Button
+                    variant="outline"
+                    onClick={() => setNewMatDialog(false)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={handleAddNewMaterial}
+                    data-ocid="project-detail.bom.new_material_save_button"
+                  >
+                    Add Material
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+          </section>
+
+          {/* Tab 10 — Items */}
+          <section
+            id="section-items"
+            className="mt-4 space-y-4 scroll-mt-24"
+            data-ocid="project-detail.items.panel"
+          >
+            <ProjectItemsTab
+              projectId={projectId}
+              projectItems={projectItems}
+              addProjectItem={addProjectItem}
+              updateProjectItem={updateProjectItem}
+              deleteProjectItem={deleteProjectItem}
+              canAdd={pCreate}
+              canEditItem={pEdit}
+              canDelete={pDelete}
+            />
+          </section>
+
+          {/* Profit & Costing Tab */}
+          <section
+            id="section-profit"
+            className="mt-4 space-y-4 scroll-mt-24"
+            data-ocid="project-detail.profit.panel"
+          >
+            {(() => {
+              const projectCosting = internalCostings.find(
+                (c) => c.projectId === projectId,
+              );
+              const projectInvoices = (invoices || []).filter(
+                (inv) =>
+                  inv.projectId === projectId && inv.invoiceType !== "proforma",
+              );
+              const totalRevenue = projectInvoices.reduce(
+                (sum, inv) => sum + (inv.totalAmount || 0),
+                0,
+              );
+              const projectMaterialUsages = (materialUsages || []).filter(
+                (u) => u.projectId === projectId,
+              );
+              const materialCost = projectMaterialUsages.reduce(
+                (sum, usage) => {
+                  const item = (inventoryItems || []).find(
+                    (i) =>
+                      i.id === usage.inventoryItemId ||
+                      i.name.trim().toLowerCase() ===
+                        (usage.materialName || "").trim().toLowerCase(),
+                  );
+                  const price = item?.lastPurchasePrice ?? 0;
+                  return sum + (usage.quantityUsed || 0) * price;
+                },
+                0,
+              );
+              const labourCost = projectCosting?.labourCost ?? 0;
+              const outsourceCost = projOutsourced.reduce(
+                (sum, o) => sum + (o.processCost || 0),
+                0,
+              );
+              const transportCost = projectCosting?.transportCost ?? 0;
+              const customCostExtra = (projectCosting?.extraCosts || []).reduce(
+                (s, c) => s + (Number(c.amount) || 0),
+                0,
+              );
+              const pettyExpenseCost = (pettyExpenses || [])
+                .filter(
+                  (e) =>
+                    e.projectId === projectId &&
+                    e.expenseMode === "Company Expense",
+                )
+                .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+              const autoCost =
+                materialCost +
+                labourCost +
+                outsourceCost +
+                transportCost +
+                customCostExtra +
+                pettyExpenseCost;
+              const manualAdjustments = projectCosting?.manualAdjustments || [];
+              const addCostTotal = manualAdjustments
+                .filter((a) => a.type === "Add Cost")
+                .reduce((s, a) => s + (Number(a.amount) || 0), 0);
+              const reduceCostTotal = manualAdjustments
+                .filter((a) => a.type === "Reduce Cost")
+                .reduce((s, a) => s + (Number(a.amount) || 0), 0);
+              const adjustedCost = autoCost + addCostTotal - reduceCostTotal;
+              const profit = totalRevenue - adjustedCost;
+              const profitPct =
+                totalRevenue > 0 ? (profit / totalRevenue) * 100 : 0;
+              const isProfit = profit >= 0;
+              const hasAdjustments = addCostTotal > 0 || reduceCostTotal > 0;
+              // allProjectInvoices — hoisted to component scope above (see
+              // the comment there); this list is purely for visibility,
+              // showing every real invoice that exists for this project
+              // (including proforma — projectInvoices above deliberately
+              // excludes it, and that exclusion is correct real revenue-
+              // recognition logic, left untouched), matching what
+              // pages/Invoices.tsx itself would show if filtered to this
+              // project.
+
+              return (
+                <div className="space-y-4">
+                  {/* Revenue Card */}
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <CardTitle className="text-sm text-muted-foreground uppercase tracking-wide">
+                        Total Revenue
+                      </CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <p
+                        className="text-3xl font-bold text-success"
+                        data-ocid="project-detail.profit.revenue"
+                      >
+                        {fmt(totalRevenue)}
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        From {projectInvoices.length} tax invoice
+                        {projectInvoices.length !== 1 ? "s" : ""}
+                      </p>
+                    </CardContent>
+                  </Card>
+
+                  {/* Invoices — real per-invoice visibility (Model 3
+                      Workspace comparison adoption). Every field/action
+                      beyond status + balance + payment stays owned by
+                      pages/Invoices.tsx / pages/Payments.tsx - this never
+                      creates or edits an invoice, only pays one. */}
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <div className="flex items-center justify-between">
+                        <CardTitle className="text-sm text-muted-foreground uppercase tracking-wide">
+                          Invoices
+                        </CardTitle>
+                        {onViewInvoices && allProjectInvoices.length > 0 && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-6 text-xs px-2"
+                            onClick={onViewInvoices}
+                            data-ocid="project-detail.invoices.view_all"
+                          >
+                            View all in Invoices →
+                          </Button>
+                        )}
+                      </div>
+                    </CardHeader>
+                    <CardContent className="space-y-2">
+                      {allProjectInvoices.length === 0 ? (
+                        <p className="text-xs text-muted-foreground">
+                          No invoices raised for this project yet.
+                        </p>
+                      ) : (
+                        allProjectInvoices.map((inv) => {
+                          const balance =
+                            (inv.totalAmount ?? 0) - (inv.paidAmount ?? 0);
+                          return (
+                            <div
+                              key={inv.id}
+                              className="rounded-md border border-border p-2.5"
+                              data-ocid={`project-detail.invoices.item.${inv.id}`}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div>
+                                  <p className="text-sm font-medium font-mono">
+                                    {inv.invoiceNumber || inv.invNo}
+                                    {inv.invoiceType === "proforma" && (
+                                      <span className="ml-1.5 text-[10px] font-sans text-muted-foreground">
+                                        Proforma
+                                      </span>
+                                    )}
+                                  </p>
+                                  <p className="text-[11px] text-muted-foreground">
+                                    Due {inv.dueDate || "—"}
+                                  </p>
+                                </div>
+                                <StatusBadge status={inv.status} />
+                              </div>
+                              <p className="text-xs text-muted-foreground mt-1.5">
+                                {fmt(inv.paidAmount ?? 0)} paid of{" "}
+                                {fmt(inv.totalAmount ?? 0)}
+                                {balance > 0 && (
+                                  <>
+                                    {" "}
+                                    — balance{" "}
+                                    <span className="text-warning font-medium">
+                                      {fmt(balance)}
+                                    </span>
+                                  </>
+                                )}
+                              </p>
+                              {balance > 0 && pCreatePayment && (
+                                <div className="flex gap-2 mt-2">
+                                  <Input
+                                    type="number"
+                                    min={0}
+                                    placeholder="Amount"
+                                    className="h-7 text-xs"
+                                    value={payAmountByInvoiceId[inv.id] ?? ""}
+                                    onChange={(e) =>
+                                      setPayAmountByInvoiceId((p) => ({
+                                        ...p,
+                                        [inv.id]: e.target.value,
+                                      }))
+                                    }
+                                    data-ocid={`project-detail.invoices.pay_amount.${inv.id}`}
+                                  />
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-7 text-xs shrink-0"
+                                    disabled={payingInvoiceId === inv.id}
+                                    onClick={() =>
+                                      handleRecordPaymentInline(inv)
+                                    }
+                                    data-ocid={`project-detail.invoices.record_payment.${inv.id}`}
+                                  >
+                                    Record Payment
+                                  </Button>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })
+                      )}
+                    </CardContent>
+                  </Card>
+
+                  {/* Cost Breakdown */}
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
+                      Cost Breakdown
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <Card>
+                        <CardContent className="pt-4">
+                          <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                            Material Cost
+                          </p>
+                          <p className="text-xl font-bold mt-1">
+                            {fmt(materialCost)}
+                          </p>
+                          <p className="text-[10px] text-muted-foreground mt-0.5">
+                            Based on material usage × last purchase price
+                          </p>
+                        </CardContent>
+                      </Card>
+                      <Card>
+                        <CardContent className="pt-4">
+                          <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                            Labour Cost
+                          </p>
+                          <p className="text-xl font-bold mt-1">
+                            {fmt(labourCost)}
+                          </p>
+                          {labourCost === 0 && (
+                            <p className="text-[10px] text-warning mt-0.5">
+                              Enter in Internal Costing tab
+                            </p>
+                          )}
+                        </CardContent>
+                      </Card>
+                      <Card>
+                        <CardContent className="pt-4">
+                          <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                            Outsource Cost
+                          </p>
+                          <p className="text-xl font-bold mt-1">
+                            {fmt(outsourceCost)}
+                          </p>
+                          <p className="text-[10px] text-muted-foreground mt-0.5">
+                            From {projOutsourced.length} outsourced work entries
+                          </p>
+                        </CardContent>
+                      </Card>
+                      <Card>
+                        <CardContent className="pt-4">
+                          <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                            Transport Cost
+                          </p>
+                          <p className="text-xl font-bold mt-1">
+                            {fmt(transportCost)}
+                          </p>
+                          {transportCost === 0 && (
+                            <p className="text-[10px] text-warning mt-0.5">
+                              Enter in Internal Costing tab
+                            </p>
+                          )}
+                        </CardContent>
+                      </Card>
+                      {customCostExtra > 0 && (
+                        <Card>
+                          <CardContent className="pt-4">
+                            <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                              Custom Costs
+                            </p>
+                            <p className="text-xl font-bold mt-1">
+                              {fmt(customCostExtra)}
+                            </p>
+                            <p className="text-[10px] text-muted-foreground mt-0.5">
+                              From {(projectCosting?.extraCosts || []).length}{" "}
+                              custom entries
+                            </p>
+                          </CardContent>
+                        </Card>
+                      )}
+                      {pettyExpenseCost > 0 && (
+                        <Card>
+                          <CardContent className="pt-4">
+                            <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                              Petty Expenses
+                            </p>
+                            <p className="text-xl font-bold mt-1">
+                              {fmt(pettyExpenseCost)}
+                            </p>
+                            <p className="text-[10px] text-muted-foreground mt-0.5">
+                              Company expenses for this project
+                            </p>
+                          </CardContent>
+                        </Card>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Manual Adjustments Section */}
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <div className="flex items-center justify-between">
+                        <CardTitle className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+                          Manual Adjustments
+                        </CardTitle>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setShowAdjForm((f) => !f)}
+                          data-ocid="project-detail.profit.open_modal_button"
+                        >
+                          <Plus className="w-3.5 h-3.5 mr-1" /> Add Adjustment
+                        </Button>
+                      </div>
+                    </CardHeader>
+                    <CardContent className="space-y-3">
+                      {showAdjForm && (
+                        <div className="flex flex-wrap gap-2 p-3 bg-muted/30 rounded-md items-end">
+                          <div className="flex-1 min-w-[140px] space-y-1">
+                            <Label className="text-xs">Name</Label>
+                            <Input
+                              placeholder="Adjustment name"
+                              value={adjForm.name}
+                              onChange={(e) =>
+                                setAdjForm((f) => ({
+                                  ...f,
+                                  name: e.target.value,
+                                }))
+                              }
+                              className="h-8"
+                              data-ocid="project-detail.profit.input"
+                            />
+                          </div>
+                          <div className="w-28 space-y-1">
+                            <Label className="text-xs">Amount (₹)</Label>
+                            <Input
+                              type="number"
+                              min={0}
+                              placeholder="0"
+                              value={adjForm.amount}
+                              onChange={(e) =>
+                                setAdjForm((f) => ({
+                                  ...f,
+                                  amount: e.target.value,
+                                }))
+                              }
+                              className="h-8"
+                            />
+                          </div>
+                          <div className="w-36 space-y-1">
+                            <Label className="text-xs">Type</Label>
+                            <Select
+                              value={adjForm.type}
+                              onValueChange={(v) =>
+                                setAdjForm((f) => ({
+                                  ...f,
+                                  type: v as "Add Cost" | "Reduce Cost",
+                                }))
+                              }
+                            >
+                              <SelectTrigger
+                                className="h-8"
+                                data-ocid="project-detail.profit.select"
+                              >
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="Add Cost">
+                                  Add Cost
+                                </SelectItem>
+                                <SelectItem value="Reduce Cost">
+                                  Reduce Cost
+                                </SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <Button
+                            size="sm"
+                            className="h-8"
+                            data-ocid="project-detail.profit.submit_button"
+                            onClick={() => {
+                              if (
+                                !adjForm.name.trim() ||
+                                !adjForm.amount ||
+                                Number(adjForm.amount) <= 0
+                              ) {
+                                toast.error(
+                                  "Name and a positive amount are required.",
+                                );
+                                return;
+                              }
+                              const newAdj: ManualAdjustment = {
+                                id: crypto.randomUUID(),
+                                name: adjForm.name.trim(),
+                                amount: Number(adjForm.amount),
+                                type: adjForm.type,
+                              };
+                              const existing = internalCostings.find(
+                                (c) => c.projectId === projectId,
+                              );
+                              const updated = {
+                                ...(existing ?? {
+                                  id: `ic-${Date.now()}`,
+                                  projectId,
+                                  rawMaterialCost: 0,
+                                  cncCost: 0,
+                                  hardwareCost: 0,
+                                  powderCoatingCost: 0,
+                                  assemblyCost: 0,
+                                  packingCost: 0,
+                                }),
+                                manualAdjustments: [
+                                  ...(existing?.manualAdjustments || []),
+                                  newAdj,
+                                ],
+                              };
+                              upsertInternalCosting(updated);
+                              setAdjForm({
+                                name: "",
+                                amount: "",
+                                type: "Add Cost",
+                              });
+                              setShowAdjForm(false);
+                              toast.success("Adjustment added.");
+                            }}
+                          >
+                            Save
+                          </Button>
+                        </div>
+                      )}
+                      {manualAdjustments.length === 0 ? (
+                        <p
+                          className="text-xs text-muted-foreground text-center py-2"
+                          data-ocid="project-detail.profit.empty_state"
+                        >
+                          No adjustments yet.
+                        </p>
+                      ) : (
+                        <table className="w-full text-sm">
+                          <thead>
+                            <tr className="text-xs text-muted-foreground border-b">
+                              <th className="text-left pb-1">Name</th>
+                              <th className="text-right pb-1">Amount</th>
+                              <th className="text-center pb-1">Type</th>
+                              <th className="w-8 pb-1" />
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {manualAdjustments.map((adj, adjIdx) => (
+                              <tr
+                                key={adj.id}
+                                className="border-b border-border/50 last:border-0"
+                                data-ocid={`project-detail.profit.item.${adjIdx + 1}`}
+                              >
+                                <td className="py-1.5">{adj.name}</td>
+                                <td className="py-1.5 text-right font-medium">
+                                  {fmt(adj.amount)}
+                                </td>
+                                <td className="py-1.5 text-center">
+                                  <span
+                                    className={`text-xs px-2 py-0.5 rounded-full font-medium ${adj.type === "Add Cost" ? "bg-destructive/10 text-destructive" : "bg-success/10 text-success"}`}
+                                  >
+                                    {adj.type}
+                                  </span>
+                                </td>
+                                <td className="py-1.5 text-right">
+                                  <button
+                                    type="button"
+                                    data-ocid={`project-detail.profit.delete_button.${adjIdx + 1}`}
+                                    onClick={() => {
+                                      const existing = internalCostings.find(
+                                        (c) => c.projectId === projectId,
+                                      );
+                                      if (!existing) return;
+                                      upsertInternalCosting({
+                                        ...existing,
+                                        manualAdjustments: (
+                                          existing.manualAdjustments || []
+                                        ).filter((a) => a.id !== adj.id),
+                                      });
+                                      toast.success("Adjustment removed.");
+                                    }}
+                                    className="text-destructive hover:text-destructive/80"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
+                      {manualAdjustments.length > 0 && (
+                        <div className="flex justify-between text-xs pt-1 border-t">
+                          <span className="text-success">
+                            Reduce Cost: -{fmt(reduceCostTotal)}
+                          </span>
+                          <span className="text-destructive">
+                            Add Cost: +{fmt(addCostTotal)}
+                          </span>
+                          <span className="font-semibold">
+                            Net: {addCostTotal >= reduceCostTotal ? "+" : ""}
+                            {fmt(addCostTotal - reduceCostTotal)}
+                          </span>
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+
+                  {/* Summary */}
+                  <Card className="border-2">
+                    <CardContent className="pt-4 space-y-3">
+                      <div className="flex items-center justify-between py-2 border-b border-border">
+                        <span className="text-sm text-muted-foreground">
+                          Auto Cost
                         </span>
-                        <span className="font-semibold">
-                          Net: {addCostTotal >= reduceCostTotal ? "+" : ""}
-                          {fmt(addCostTotal - reduceCostTotal)}
+                        <span className="text-lg font-bold">
+                          {fmt(autoCost)}
                         </span>
                       </div>
-                    )}
-                  </CardContent>
-                </Card>
-
-                {/* Summary */}
-                <Card className="border-2">
-                  <CardContent className="pt-4 space-y-3">
-                    <div className="flex items-center justify-between py-2 border-b border-border">
-                      <span className="text-sm text-muted-foreground">
-                        Auto Cost
-                      </span>
-                      <span className="text-lg font-bold">{fmt(autoCost)}</span>
-                    </div>
-                    {hasAdjustments && (
-                      <>
-                        <div className="flex items-center justify-between py-1 text-sm">
-                          <span className="text-muted-foreground">
-                            + Adjustments (Add)
+                      {hasAdjustments && (
+                        <>
+                          <div className="flex items-center justify-between py-1 text-sm">
+                            <span className="text-muted-foreground">
+                              + Adjustments (Add)
+                            </span>
+                            <span className="text-destructive">
+                              +{fmt(addCostTotal)}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between py-1 text-sm border-b">
+                            <span className="text-muted-foreground">
+                              - Adjustments (Reduce)
+                            </span>
+                            <span className="text-success">
+                              -{fmt(reduceCostTotal)}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between py-1 text-sm border-b">
+                            <span className="font-medium">Adjusted Cost</span>
+                            <span
+                              className="font-bold"
+                              data-ocid="project-detail.profit.total_cost"
+                            >
+                              {fmt(adjustedCost)}
+                            </span>
+                          </div>
+                        </>
+                      )}
+                      {!hasAdjustments && (
+                        <div className="flex items-center justify-between py-2 border-b border-border">
+                          <span className="text-sm text-muted-foreground">
+                            Total Cost
                           </span>
-                          <span className="text-red-600">
-                            +{fmt(addCostTotal)}
-                          </span>
-                        </div>
-                        <div className="flex items-center justify-between py-1 text-sm border-b">
-                          <span className="text-muted-foreground">
-                            - Adjustments (Reduce)
-                          </span>
-                          <span className="text-green-600">
-                            -{fmt(reduceCostTotal)}
-                          </span>
-                        </div>
-                        <div className="flex items-center justify-between py-1 text-sm border-b">
-                          <span className="font-medium">Adjusted Cost</span>
                           <span
-                            className="font-bold"
+                            className="text-lg font-bold"
                             data-ocid="project-detail.profit.total_cost"
                           >
                             {fmt(adjustedCost)}
                           </span>
                         </div>
-                      </>
-                    )}
-                    {!hasAdjustments && (
-                      <div className="flex items-center justify-between py-2 border-b border-border">
-                        <span className="text-sm text-muted-foreground">
-                          Total Cost
+                      )}
+                      <div className="flex items-center justify-between py-2">
+                        <span className="text-sm font-semibold">
+                          {isProfit ? "Profit" : "Loss"}
                         </span>
                         <span
-                          className="text-lg font-bold"
-                          data-ocid="project-detail.profit.total_cost"
+                          className={`text-2xl font-bold ${isProfit ? "text-success" : "text-destructive"}`}
+                          data-ocid="project-detail.profit.profit_value"
                         >
-                          {fmt(adjustedCost)}
+                          {isProfit ? "+" : "-"}
+                          {fmt(Math.abs(profit))}
                         </span>
                       </div>
-                    )}
-                    <div className="flex items-center justify-between py-2">
-                      <span className="text-sm font-semibold">
-                        {isProfit ? "Profit" : "Loss"}
-                      </span>
-                      <span
-                        className={`text-2xl font-bold ${isProfit ? "text-green-600" : "text-destructive"}`}
-                        data-ocid="project-detail.profit.profit_value"
-                      >
-                        {isProfit ? "+" : "-"}
-                        {fmt(Math.abs(profit))}
-                      </span>
-                    </div>
-                    <div className="flex items-center justify-between py-2 bg-muted/30 rounded-md px-3">
-                      <span className="text-sm text-muted-foreground">
-                        Profit %
-                      </span>
-                      <span
-                        className={`text-xl font-bold ${isProfit ? "text-green-600" : "text-destructive"}`}
-                        data-ocid="project-detail.profit.profit_pct"
-                      >
-                        {totalRevenue > 0 ? `${profitPct.toFixed(1)}%` : "N/A"}
-                      </span>
-                    </div>
-                    {totalRevenue === 0 && (
-                      <p className="text-xs text-muted-foreground text-center py-1">
-                        No invoices raised yet — revenue will appear once tax
-                        invoices are created.
-                      </p>
-                    )}
-                  </CardContent>
-                </Card>
-              </div>
-            );
-          })()}
-        </TabsContent>
-
-        {/* Timeline Tab */}
-        <TabsContent value="timeline" className="mt-4">
-          {(() => {
-            const activities = [...(project.activityLog || [])].sort(
-              (a, b) => b.timestamp - a.timestamp,
-            );
-            const ACTIVITY_ICONS: Record<string, string> = {
-              project_created: "🗂",
-              quotation_created: "📋",
-              quotation_approved: "✅",
-              po_received: "📦",
-              production_started: "⚙️",
-              production_stage_update: "🔄",
-              material_purchased: "🛒",
-              material_requisition: "📝",
-              qc_passed: "✔️",
-              qc_failed: "❌",
-              dispatch: "🚛",
-              invoice_generated: "🧾",
-              payment_received: "💰",
-              machine_breakdown: "⚠️",
-              report_exported: "📊",
-              note: "💬",
-            };
-            return (
-              <div className="space-y-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-sm font-semibold">Project Timeline</h2>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      {activities.length} event
-                      {activities.length !== 1 ? "s" : ""} recorded
-                    </p>
-                  </div>
-                  {pEdit && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => {
-                        const note = window.prompt(
-                          "Add a note to this project's timeline:",
-                        );
-                        if (note?.trim()) {
-                          addProjectActivity(
-                            projectId,
-                            "note",
-                            note.trim(),
-                            currentUser?.username ?? "unknown",
-                          );
-                        }
-                      }}
-                    >
-                      + Add Note
-                    </Button>
-                  )}
+                      <div className="flex items-center justify-between py-2 bg-muted/30 rounded-md px-3">
+                        <span className="text-sm text-muted-foreground">
+                          Profit %
+                        </span>
+                        <span
+                          className={`text-xl font-bold ${isProfit ? "text-success" : "text-destructive"}`}
+                          data-ocid="project-detail.profit.profit_pct"
+                        >
+                          {totalRevenue > 0
+                            ? `${profitPct.toFixed(1)}%`
+                            : "N/A"}
+                        </span>
+                      </div>
+                      {totalRevenue === 0 && (
+                        <p className="text-xs text-muted-foreground text-center py-1">
+                          No invoices raised yet — revenue will appear once tax
+                          invoices are created.
+                        </p>
+                      )}
+                    </CardContent>
+                  </Card>
                 </div>
-                {activities.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center py-16 text-center border rounded-lg bg-muted/20">
-                    <span className="text-3xl mb-3">📋</span>
-                    <p className="text-sm font-medium text-muted-foreground">
-                      No activity recorded yet.
-                    </p>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      Activity is logged automatically as the project
-                      progresses.
-                    </p>
+              );
+            })()}
+          </section>
+
+          {/* Timeline Tab */}
+          <section id="section-timeline" className="mt-4 scroll-mt-24">
+            {(() => {
+              const activities = [...(project.activityLog || [])].sort(
+                (a, b) => b.timestamp - a.timestamp,
+              );
+              const ACTIVITY_ICONS: Record<string, string> = {
+                project_created: "🗂",
+                quotation_created: "📋",
+                quotation_approved: "✅",
+                po_received: "📦",
+                production_started: "⚙️",
+                production_stage_update: "🔄",
+                material_purchased: "🛒",
+                material_requisition: "📝",
+                qc_passed: "✔️",
+                qc_failed: "❌",
+                dispatch: "🚛",
+                invoice_generated: "🧾",
+                payment_received: "💰",
+                machine_breakdown: "⚠️",
+                report_exported: "📊",
+                note: "💬",
+              };
+              return (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h2 className="text-sm font-semibold">
+                        Project Timeline
+                      </h2>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        {activities.length} event
+                        {activities.length !== 1 ? "s" : ""} recorded
+                      </p>
+                    </div>
+                    {pEdit && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          const note = window.prompt(
+                            "Add a note to this project's timeline:",
+                          );
+                          if (note?.trim()) {
+                            addProjectActivity(
+                              projectId,
+                              "note",
+                              note.trim(),
+                              currentUser?.username ?? "unknown",
+                            );
+                          }
+                        }}
+                      >
+                        + Add Note
+                      </Button>
+                    )}
                   </div>
-                ) : (
-                  <div className="relative">
-                    <div className="absolute left-4 top-0 bottom-0 w-0.5 bg-border" />
-                    <div className="space-y-0">
-                      {activities.map((act) => (
-                        <div key={act.id} className="relative flex gap-4 pb-4">
-                          <div className="relative z-10 flex items-center justify-center w-8 h-8 rounded-full bg-card border-2 border-border text-sm shrink-0">
-                            {ACTIVITY_ICONS[act.type] ?? "•"}
-                          </div>
-                          <div className="flex-1 min-w-0 bg-card border rounded-lg px-3 py-2.5">
-                            <p className="text-xs font-medium">
-                              {act.description}
-                            </p>
-                            <div className="flex items-center gap-2 mt-1">
-                              <span className="text-[11px] text-muted-foreground">
-                                {new Date(act.timestamp).toLocaleDateString(
-                                  "en-IN",
-                                  {
-                                    day: "numeric",
-                                    month: "short",
-                                    year: "numeric",
-                                    hour: "2-digit",
-                                    minute: "2-digit",
-                                  },
-                                )}
-                              </span>
-                              {act.performedBy && (
+                  {activities.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-16 text-center border rounded-lg bg-muted/20">
+                      <span className="text-3xl mb-3">📋</span>
+                      <p className="text-sm font-medium text-muted-foreground">
+                        No activity recorded yet.
+                      </p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Activity is logged automatically as the project
+                        progresses.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="relative">
+                      <div className="absolute left-4 top-0 bottom-0 w-0.5 bg-border" />
+                      <div className="space-y-0">
+                        {activities.map((act) => (
+                          <div
+                            key={act.id}
+                            className="relative flex gap-4 pb-4"
+                          >
+                            <div className="relative z-10 flex items-center justify-center w-8 h-8 rounded-full bg-card border-2 border-border text-sm shrink-0">
+                              {ACTIVITY_ICONS[act.type] ?? "•"}
+                            </div>
+                            <div className="flex-1 min-w-0 bg-card border rounded-lg px-3 py-2.5">
+                              <p className="text-xs font-medium">
+                                {act.description}
+                              </p>
+                              <div className="flex items-center gap-2 mt-1">
                                 <span className="text-[11px] text-muted-foreground">
-                                  · {act.performedBy}
+                                  {new Date(act.timestamp).toLocaleDateString(
+                                    "en-IN",
+                                    {
+                                      day: "numeric",
+                                      month: "short",
+                                      year: "numeric",
+                                      hour: "2-digit",
+                                      minute: "2-digit",
+                                    },
+                                  )}
                                 </span>
-                              )}
+                                {act.performedBy && (
+                                  <span className="text-[11px] text-muted-foreground">
+                                    · {act.performedBy}
+                                  </span>
+                                )}
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      ))}
-                      {/* Project creation as last item */}
-                      <div className="relative flex gap-4 pb-4">
-                        <div className="relative z-10 flex items-center justify-center w-8 h-8 rounded-full bg-blue-100 border-2 border-blue-300 text-sm shrink-0">
-                          🗂
-                        </div>
-                        <div className="flex-1 min-w-0 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2.5">
-                          <p className="text-xs font-medium text-blue-700">
-                            Project created — {project.projectNo}
-                          </p>
-                          <p className="text-[11px] text-blue-500 mt-1">
-                            {new Date(project.createdAt).toLocaleDateString(
-                              "en-IN",
-                              {
-                                day: "numeric",
-                                month: "short",
-                                year: "numeric",
-                              },
-                            )}
-                          </p>
+                        ))}
+                        {/* Project creation as last item */}
+                        <div className="relative flex gap-4 pb-4">
+                          <div className="relative z-10 flex items-center justify-center w-8 h-8 rounded-full bg-info/10 border-2 border-info/30 text-sm shrink-0">
+                            🗂
+                          </div>
+                          <div className="flex-1 min-w-0 bg-info/10 border border-info/30 rounded-lg px-3 py-2.5">
+                            <p className="text-xs font-medium text-info">
+                              Project created — {project.projectNo}
+                            </p>
+                            <p className="text-[11px] text-info/80 mt-1">
+                              {new Date(project.createdAt).toLocaleDateString(
+                                "en-IN",
+                                {
+                                  day: "numeric",
+                                  month: "short",
+                                  year: "numeric",
+                                },
+                              )}
+                            </p>
+                          </div>
                         </div>
                       </div>
                     </div>
-                  </div>
-                )}
-              </div>
-            );
-          })()}
-        </TabsContent>
-      </Tabs>
+                  )}
+                </div>
+              );
+            })()}
+          </section>
+        </div>
+      </div>
 
       {/* Repeat Order Dialog */}
       <Dialog open={repeatDialog} onOpenChange={setRepeatDialog}>
@@ -6148,7 +6668,7 @@ export function ProjectDetail({
                 </label>
               ))}
             </div>
-            <div className="rounded-lg bg-amber-50 border border-amber-200 p-3 text-xs text-amber-800 space-y-0.5">
+            <div className="rounded-lg bg-warning/15 border border-warning/30 p-3 text-xs text-warning space-y-0.5">
               <p className="font-semibold">
                 The following will always be reset:
               </p>
@@ -6308,9 +6828,36 @@ export function ProjectDetail({
         onOpenChange={(o) => !o && setDeletePurchaseTarget(null)}
         title="Delete purchase record?"
         description="This material purchase record will be permanently deleted."
-        onConfirm={() => {
-          if (deletePurchaseTarget)
-            deleteMaterialPurchase(deletePurchaseTarget);
+        onConfirm={async () => {
+          if (deletePurchaseTarget) {
+            const existing = materialPurchases.find(
+              (x) => x.id === deletePurchaseTarget,
+            );
+            if (!existing?.inventoryItemId) {
+              toast.error(
+                "This purchase has no linked inventory item — cannot delete.",
+              );
+              setDeletePurchaseTarget(null);
+              return;
+            }
+            const result = await deleteInventoryPurchaseRemote(
+              deletePurchaseTarget,
+              existing.inventoryItemId,
+            );
+            if (result.status === "unauthenticated") {
+              toast.error(
+                "Not signed in to the server - purchase was not deleted",
+              );
+            } else if (
+              result.status === "denied" ||
+              result.status === "error"
+            ) {
+              toast.error(result.error ?? "Could not delete purchase");
+            } else {
+              deleteMaterialPurchase(deletePurchaseTarget);
+              toast.success("Purchase deleted — stock reconciled");
+            }
+          }
           setDeletePurchaseTarget(null);
         }}
       />

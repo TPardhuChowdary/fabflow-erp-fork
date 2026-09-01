@@ -93,7 +93,7 @@ function getSuggestion(inv: any): { label: string; color: string } {
   if (!inv)
     return {
       label: "Gentle Reminder",
-      color: "text-green-700 bg-green-50 border-green-200",
+      color: "text-success bg-success/10 border-success/30",
     };
   const today = new Date();
   const due = new Date(inv.dueDate || new Date());
@@ -104,16 +104,16 @@ function getSuggestion(inv: any): { label: string; color: string } {
   if (count >= 2 || overdue > 5)
     return {
       label: "Final Notice",
-      color: "text-red-700 bg-red-50 border-red-200",
+      color: "text-destructive bg-destructive/10 border-destructive/30",
     };
   if (count === 1 || overdue > 0)
     return {
       label: "Follow-up",
-      color: "text-yellow-700 bg-yellow-50 border-yellow-200",
+      color: "text-warning bg-warning/15 border-warning/30",
     };
   return {
     label: "Gentle Reminder",
-    color: "text-green-700 bg-green-50 border-green-200",
+    color: "text-success bg-success/10 border-success/30",
   };
 }
 
@@ -210,13 +210,13 @@ function getMethodIcon(method: ReminderMethod) {
 function getStatusColor(status: string) {
   switch (status) {
     case "Sent":
-      return "bg-green-100 text-green-700 border-green-200";
+      return "bg-success/10 text-success border-success/30";
     case "Failed":
-      return "bg-red-100 text-red-700 border-red-200";
+      return "bg-destructive/10 text-destructive border-destructive/30";
     case "Not Configured":
-      return "bg-gray-100 text-gray-600 border-gray-200";
+      return "bg-muted text-muted-foreground border-border";
     default:
-      return "bg-blue-100 text-blue-700 border-blue-200";
+      return "bg-info/10 text-info border-info/30";
   }
 }
 
@@ -283,9 +283,6 @@ function PaymentsInner() {
 
   // Expanded rows for reminder log sub-panel
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
-
-  console.log("Invoices:", invoices);
-  console.log("Payments:", payments);
 
   if (
     !Array.isArray(payments) ||
@@ -512,24 +509,24 @@ function PaymentsInner() {
   const getStatusBadge = (inv: (typeof invoices)[0]) => {
     if (inv.status === "Paid")
       return (
-        <Badge className="bg-green-100 text-green-800 border-green-200 text-xs">
+        <Badge className="bg-success/10 text-success border-success/30 text-xs">
           Paid
         </Badge>
       );
     if (isOverdue(inv))
       return (
-        <Badge className="bg-red-100 text-red-800 border-red-200 text-xs">
+        <Badge className="bg-destructive/10 text-destructive border-destructive/30 text-xs">
           Overdue
         </Badge>
       );
     if (inv.status === "PartiallyPaid")
       return (
-        <Badge className="bg-amber-100 text-amber-800 border-amber-200 text-xs">
+        <Badge className="bg-warning/15 text-warning border-warning/30 text-xs">
           Partial
         </Badge>
       );
     return (
-      <Badge className="bg-blue-100 text-blue-800 border-blue-200 text-xs">
+      <Badge className="bg-info/10 text-info border-info/30 text-xs">
         Unpaid
       </Badge>
     );
@@ -593,8 +590,8 @@ function PaymentsInner() {
         <TabsContent value="payments" className="mt-3 space-y-3">
           {/* Pending invoices summary */}
           {unpaid.length > 0 && (
-            <div className="rounded-md border p-3 bg-amber-50 border-amber-200">
-              <div className="text-xs font-semibold text-amber-800 mb-2">
+            <div className="rounded-md border p-3 bg-warning/15 border-warning/30">
+              <div className="text-xs font-semibold text-warning mb-2">
                 {unpaid.length} invoice(s) with pending payment
               </div>
               <div className="flex flex-wrap gap-2">
@@ -605,7 +602,7 @@ function PaymentsInner() {
                   return (
                     <div
                       key={inv.id}
-                      className="text-xs bg-white rounded border border-amber-200 px-2 py-1"
+                      className="text-xs bg-card rounded border border-warning/30 px-2 py-1"
                     >
                       <span className="font-mono font-semibold">
                         {inv.invNo}
@@ -613,7 +610,7 @@ function PaymentsInner() {
                       <span className="text-muted-foreground ml-1">
                         {cust?.name}
                       </span>
-                      <span className="text-red-600 font-semibold ml-2">
+                      <span className="text-destructive font-semibold ml-2">
                         {fmt(balance)}
                       </span>
                     </div>
@@ -654,14 +651,14 @@ function PaymentsInner() {
                       <div className="text-xs text-muted-foreground">
                         Amount
                       </div>
-                      <div className="text-sm font-semibold text-green-700">
+                      <div className="text-sm font-semibold text-success">
                         {fmt(p.amount)}
                       </div>
                     </div>
                     <div>
                       <div className="text-xs text-muted-foreground">Mode</div>
                       <div className="text-sm">
-                        <span className="bg-blue-50 text-blue-700 border border-blue-200 rounded px-1.5 py-0.5 text-xs">
+                        <span className="bg-info/10 text-info border border-info/30 rounded px-1.5 py-0.5 text-xs">
                           {p.mode}
                         </span>
                       </div>
@@ -743,11 +740,11 @@ function PaymentsInner() {
                         <TableCell className="text-sm">
                           {cust?.name ?? "—"}
                         </TableCell>
-                        <TableCell className="text-sm font-semibold text-green-700">
+                        <TableCell className="text-sm font-semibold text-success">
                           {fmt(p.amount)}
                         </TableCell>
                         <TableCell>
-                          <span className="text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded px-1.5 py-0.5">
+                          <span className="text-xs bg-info/10 text-info border border-info/30 rounded px-1.5 py-0.5">
                             {p.mode}
                           </span>
                         </TableCell>
@@ -766,7 +763,7 @@ function PaymentsInner() {
                                   href={f.url}
                                   target="_blank"
                                   rel="noopener noreferrer"
-                                  className="text-xs text-blue-600 hover:underline flex items-center gap-0.5"
+                                  className="text-xs text-info hover:underline flex items-center gap-0.5"
                                 >
                                   <Paperclip className="w-3 h-3" />
                                   View
@@ -816,15 +813,15 @@ function PaymentsInner() {
               </div>
             </div>
             <div
-              className={`rounded-lg border p-3 shadow-sm ${reminderOverdueCount > 0 ? "bg-red-50 border-red-200" : "bg-card"}`}
+              className={`rounded-lg border p-3 shadow-sm ${reminderOverdueCount > 0 ? "bg-destructive/10 border-destructive/30" : "bg-card"}`}
             >
               <div
-                className={`text-xs font-medium ${reminderOverdueCount > 0 ? "text-red-700" : "text-muted-foreground"}`}
+                className={`text-xs font-medium ${reminderOverdueCount > 0 ? "text-destructive" : "text-muted-foreground"}`}
               >
                 Overdue Invoices
               </div>
               <div
-                className={`text-2xl font-bold mt-1 ${reminderOverdueCount > 0 ? "text-red-700" : ""}`}
+                className={`text-2xl font-bold mt-1 ${reminderOverdueCount > 0 ? "text-destructive" : ""}`}
               >
                 {reminderOverdueCount}
               </div>
@@ -833,15 +830,15 @@ function PaymentsInner() {
               </div>
             </div>
             <div
-              className={`rounded-lg border p-3 shadow-sm ${highReminderCases > 0 ? "bg-amber-50 border-amber-200" : "bg-card"}`}
+              className={`rounded-lg border p-3 shadow-sm ${highReminderCases > 0 ? "bg-warning/15 border-warning/30" : "bg-card"}`}
             >
               <div
-                className={`text-xs font-medium ${highReminderCases > 0 ? "text-amber-700" : "text-muted-foreground"}`}
+                className={`text-xs font-medium ${highReminderCases > 0 ? "text-warning" : "text-muted-foreground"}`}
               >
                 High Reminder Cases
               </div>
               <div
-                className={`text-2xl font-bold mt-1 ${highReminderCases > 0 ? "text-amber-700" : ""}`}
+                className={`text-2xl font-bold mt-1 ${highReminderCases > 0 ? "text-warning" : ""}`}
               >
                 {highReminderCases}
               </div>
@@ -859,27 +856,31 @@ function PaymentsInner() {
               </div>
               <div className="text-xl font-bold mt-0.5">{invoices.length}</div>
             </div>
-            <div className="rounded-md border p-3 bg-amber-50 border-amber-200">
-              <div className="text-xs text-amber-700">Pending / Partial</div>
-              <div className="text-xl font-bold mt-0.5 text-amber-800">
+            <div className="rounded-md border p-3 bg-warning/15 border-warning/30">
+              <div className="text-xs text-warning">Pending / Partial</div>
+              <div className="text-xl font-bold mt-0.5 text-warning">
                 {pendingCount}
               </div>
             </div>
             <div
               className={`rounded-md border p-3 ${
-                overdueCount > 0 ? "bg-red-50 border-red-200" : "bg-muted/30"
+                overdueCount > 0
+                  ? "bg-destructive/10 border-destructive/30"
+                  : "bg-muted/30"
               }`}
             >
               <div
                 className={`text-xs ${
-                  overdueCount > 0 ? "text-red-700" : "text-muted-foreground"
+                  overdueCount > 0
+                    ? "text-destructive"
+                    : "text-muted-foreground"
                 }`}
               >
                 Overdue
               </div>
               <div
                 className={`text-xl font-bold mt-0.5 ${
-                  overdueCount > 0 ? "text-red-800" : ""
+                  overdueCount > 0 ? "text-destructive" : ""
                 }`}
               >
                 {overdueCount}
@@ -893,7 +894,7 @@ function PaymentsInner() {
               .filter((inv) => (inv.invoiceType ?? "tax") !== "proforma")
               .filter(isDueToday).length;
             return dueTodayCount > 0 ? (
-              <div className="mb-3 flex items-center gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+              <div className="mb-3 flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
                 <Bell className="w-4 h-4 flex-shrink-0" />
                 <span>
                   🔔 <strong>{dueTodayCount}</strong> reminder
@@ -909,7 +910,7 @@ function PaymentsInner() {
               .filter((inv) => (inv.invoiceType ?? "tax") !== "proforma")
               .filter(isReminderDue).length;
             return dueCount > 0 ? (
-              <div className="mb-3 flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              <div className="mb-3 flex items-center gap-2 rounded-md border border-warning/30 bg-warning/15 px-3 py-2 text-sm text-warning">
                 <Bell className="w-4 h-4 flex-shrink-0" />
                 <span>
                   You have <strong>{dueCount}</strong> pending reminder
@@ -999,8 +1000,8 @@ function PaymentsInner() {
                             className={
                               isReminderDue(inv)
                                 ? isDueToday(inv)
-                                  ? "bg-amber-50"
-                                  : "bg-red-50"
+                                  ? "bg-warning/15"
+                                  : "bg-destructive/10"
                                 : ""
                             }
                           >
@@ -1021,12 +1022,12 @@ function PaymentsInner() {
                             <TableCell className="text-xs font-mono font-bold">
                               {inv.invNo}
                               {isReminderDue(inv) && (
-                                <span className="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700 border border-red-200">
+                                <span className="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-destructive/10 text-destructive border border-destructive/30">
                                   Reminder Due
                                 </span>
                               )}
                               {isDueToday(inv) && (
-                                <span className="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700 border border-amber-200">
+                                <span className="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-warning/15 text-warning border border-warning/30">
                                   Due Today
                                 </span>
                               )}
@@ -1037,13 +1038,13 @@ function PaymentsInner() {
                             <TableCell className="text-sm font-semibold">
                               {fmt(inv.totalAmount)}
                             </TableCell>
-                            <TableCell className="text-sm text-green-700 font-semibold">
+                            <TableCell className="text-sm text-success font-semibold">
                               {fmt(inv.paidAmount)}
                             </TableCell>
                             <TableCell
                               className={`text-sm font-semibold ${
                                 balance > 0
-                                  ? "text-red-600"
+                                  ? "text-destructive"
                                   : "text-muted-foreground"
                               }`}
                             >
@@ -1097,7 +1098,7 @@ function PaymentsInner() {
                                       <span className="flex items-center gap-1 flex-wrap">
                                         {nextDate.toLocaleDateString()}
                                         {hasCustom && (
-                                          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-700 border border-blue-200">
+                                          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-info/10 text-info border border-info/30">
                                             Custom
                                           </span>
                                         )}
@@ -1206,7 +1207,7 @@ function PaymentsInner() {
                                                 {log.status}
                                               </span>
                                               {log.error && (
-                                                <span className="ml-1.5 text-red-500 text-[10px]">
+                                                <span className="ml-1.5 text-destructive text-[10px]">
                                                   {log.error}
                                                 </span>
                                               )}
@@ -1237,7 +1238,6 @@ function PaymentsInner() {
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              console.log("FORM SUBMITTED");
               if (!pCreate) {
                 toast.error("Access restricted: create permission required");
                 return;
@@ -1649,7 +1649,7 @@ function PaymentsInner() {
                 data-ocid="reminder.custom_date_input"
               />
               {customReminderDate && (
-                <p className="text-xs text-blue-600 mt-1">
+                <p className="text-xs text-info mt-1">
                   Custom date set — overrides frequency schedule
                 </p>
               )}

@@ -6,12 +6,20 @@
 // frontend has no singular projectId/quantity on DeliveryChallan at all
 // - only projectEntries: DCProjectEntry[]), never written either.
 //
-// No numbering race: dc_no carries no UNIQUE constraint (confirmed via
-// \d), so there is nothing to bounded-retry against. The frontend's
-// existing local duplicate-scan (checked against currently-hydrated
-// state before calling createDeliveryChallanRemote) is preserved exactly
-// as today's soft, unenforced guard - not upgraded, since there is no
-// DB constraint to retry on a real collision.
+// Phase C.1 — dc_no now carries a real UNIQUE (organization_id, dc_no)
+// constraint (see database/phase-c1/). createDeliveryChallanRemote below
+// bounded-retries on a 23505 conflict against that constraint specifically,
+// mirroring createProjectRemote (lib/projectsApi.ts) and
+// createQuotationRemote (lib/quotationsApi.ts) exactly: re-derive the
+// candidate from fresh server state on conflict, never from stale local
+// state, never by re-invoking any local counter. autoRenumberOnConflict
+// controls whether a conflict is silently retried with a fresh number
+// (auto-generated candidates - the Agent, or an untouched UI preview) or
+// surfaced as a plain error (a user explicitly typed a specific number in
+// DeliveryChallans.tsx's editable Challan Number field - DC is the only
+// one of FabFlow's four numbered-document create forms where the number
+// is user-editable, so silently substituting a different one would be
+// wrong there).
 
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
 import type { DeliveryChallan } from "@/types";
@@ -20,6 +28,22 @@ import {
   transformDeliveryChallanRow,
 } from "./hydration";
 import type { DeliveryChallanRow } from "./hydration";
+
+// Same DC-YYYY-NNN format as DeliveryChallans.tsx's own previewDcNo() —
+// mirrors that exact existing client-side computation rather than
+// inventing a new numbering scheme. Pure calculation over supplied
+// existing numbers, never a local counter. Also used by
+// createDeliveryChallanRemote to compute a fresh candidate after a
+// dc_no collision (see header comment).
+export function computeNextDcNumber(existingDcNumbers: string[]): string {
+  const year = new Date().getFullYear();
+  const nums = existingDcNumbers.map((n) => {
+    const m = (n || "").match(/DC-\d{4}-(\d+)/);
+    return m ? Number.parseInt(m[1], 10) : 0;
+  });
+  const next = nums.length > 0 ? Math.max(...nums) + 1 : 1;
+  return `DC-${year}-${String(next).padStart(3, "0")}`;
+}
 
 export type WriteStatus = "success" | "denied" | "error" | "unauthenticated";
 
@@ -82,22 +106,85 @@ async function requireSession() {
   return { ok: true as const, client };
 }
 
+async function fetchExistingDcNumbers(
+  client: ReturnType<typeof getSupabase>,
+): Promise<string[] | null> {
+  const { data, error } = await client
+    .from("delivery_challans")
+    .select("dc_no");
+  if (error || !data) return null;
+  return (data as unknown as { dc_no: string | null }[]).map(
+    (r) => r.dc_no ?? "",
+  );
+}
+
+// Postgres unique_violation on uq_delivery_challans_org_dcno specifically -
+// same check shape as isProjectNumberConflict/isQtNumberConflict.
+function isDcNumberConflict(error: { code?: string; message?: string }) {
+  return (
+    error.code === "23505" &&
+    (error.message?.includes("uq_delivery_challans_org_dcno") ||
+      error.message?.includes("dc_no"))
+  );
+}
+
+const MAX_DC_NUMBER_ATTEMPTS = 3;
+
 export async function createDeliveryChallanRemote(
   dc: DeliveryChallanWritable,
+  options?: { autoRenumberOnConflict?: boolean },
 ): Promise<WriteResult<DeliveryChallan>> {
   const gate = await requireSession();
   if (!gate.ok) return gate.result;
+  const { client } = gate;
+  const autoRenumberOnConflict = options?.autoRenumberOnConflict ?? true;
 
-  const { data, error } = await gate.client
-    .from("delivery_challans")
-    .insert(toDeliveryChallanFields(dc))
-    .select(DELIVERY_CHALLAN_COLUMNS)
-    .single();
+  let candidate = dc;
 
-  if (error) return { status: "error", error: error.message };
+  for (let attempt = 1; attempt <= MAX_DC_NUMBER_ATTEMPTS; attempt++) {
+    const { data, error } = await client
+      .from("delivery_challans")
+      .insert(toDeliveryChallanFields(candidate))
+      .select(DELIVERY_CHALLAN_COLUMNS)
+      .single();
+
+    if (!error) {
+      return {
+        status: "success",
+        data: transformDeliveryChallanRow(
+          data as unknown as DeliveryChallanRow,
+        ),
+      };
+    }
+
+    if (!isDcNumberConflict(error)) {
+      return { status: "error", error: error.message };
+    }
+
+    if (!autoRenumberOnConflict || attempt === MAX_DC_NUMBER_ATTEMPTS) {
+      return {
+        status: "error",
+        error: `Challan number ${candidate.dcNo} already exists. Please use a different number.`,
+      };
+    }
+
+    // Collision on dc_no specifically - re-derive the next number from
+    // actual server state (never from stale local state, never by
+    // re-invoking computeNextDcNumber's caller) and retry.
+    const freshNumbers = await fetchExistingDcNumbers(client);
+    if (freshNumbers === null) {
+      return {
+        status: "error",
+        error: `Challan number ${candidate.dcNo} already exists. Please use a different number.`,
+      };
+    }
+    candidate = { ...candidate, dcNo: computeNextDcNumber(freshNumbers) };
+  }
+
   return {
-    status: "success",
-    data: transformDeliveryChallanRow(data as unknown as DeliveryChallanRow),
+    status: "error",
+    error:
+      "This challan number was just used by another session. Please try saving again.",
   };
 }
 

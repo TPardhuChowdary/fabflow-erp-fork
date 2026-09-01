@@ -36,21 +36,28 @@ import {
   hydrateEmployeeDocuments,
   hydrateEmployees,
   hydrateExpenseFloats,
+  hydrateInspectionSheets,
+  hydrateInternalCostings,
   hydrateInventoryItems,
   hydrateInventoryPurchases,
   hydrateInventoryUsages,
   hydrateInvoices,
+  hydrateJobCards,
   hydrateMachineDies,
   hydrateMachineServiceRates,
   hydrateMachineServiceUsage,
   hydrateMachineSpareParts,
   hydrateMachines,
   hydrateMasterPOs,
+  hydrateMaterialPurchases,
   hydrateOutsourcedWorks,
+  hydratePayablePayments,
+  hydratePayables,
   hydratePayments,
   hydratePettyExpenses,
   hydrateProjectDies,
   hydrateProjectEmployees,
+  hydrateProjectItems,
   hydrateProjectMachinery,
   hydrateProjectProductionStages,
   hydrateProjectPurchaseOrders,
@@ -59,10 +66,12 @@ import {
   hydrateProjectQmsInspectionOverrides,
   hydrateProjectQmsInspections,
   hydrateProjects,
+  hydrateQmsStageCompletions,
   hydrateQuotationPurchaseOrders,
   hydrateQuotationRevisions,
   hydrateQuotations,
   hydrateSalaryPayments,
+  hydrateScrapRecords,
   hydrateToolAssignmentHistory,
   hydrateTools,
   hydrateVendors,
@@ -158,9 +167,23 @@ export function useSupabaseHydration() {
   const setVendorsHydrationStatus = useStore(
     (s) => s.setVendorsHydrationStatus,
   );
+  const setJobCardsFromServer = useStore((s) => s.setJobCardsFromServer);
+  const setJobCardsHydrationStatus = useStore(
+    (s) => s.setJobCardsHydrationStatus,
+  );
   const setCompanyPOsFromServer = useStore((s) => s.setCompanyPOsFromServer);
   const setCompanyPOsHydrationStatus = useStore(
     (s) => s.setCompanyPOsHydrationStatus,
+  );
+  const setPayablesFromServer = useStore((s) => s.setPayablesFromServer);
+  const setPayablesHydrationStatus = useStore(
+    (s) => s.setPayablesHydrationStatus,
+  );
+  const setPayablePaymentsFromServer = useStore(
+    (s) => s.setPayablePaymentsFromServer,
+  );
+  const setPayablePaymentsHydrationStatus = useStore(
+    (s) => s.setPayablePaymentsHydrationStatus,
   );
   const setProjectsFromServer = useStore((s) => s.setProjectsFromServer);
   const setProjectsHydrationStatus = useStore(
@@ -203,9 +226,27 @@ export function useSupabaseHydration() {
     authKey,
   );
   useHydrationEffect(
+    hydrateJobCards,
+    setJobCardsHydrationStatus,
+    setJobCardsFromServer,
+    authKey,
+  );
+  useHydrationEffect(
     hydrateCompanyPOs,
     setCompanyPOsHydrationStatus,
     setCompanyPOsFromServer,
+    authKey,
+  );
+  useHydrationEffect(
+    hydratePayables,
+    setPayablesHydrationStatus,
+    setPayablesFromServer,
+    authKey,
+  );
+  useHydrationEffect(
+    hydratePayablePayments,
+    setPayablePaymentsHydrationStatus,
+    setPayablePaymentsFromServer,
     authKey,
   );
   useHydrationEffect(
@@ -306,6 +347,12 @@ export function useSupabaseHydration() {
     authKey,
   );
   useHydrationEffect(
+    hydrateMaterialPurchases,
+    useStore((s) => s.setMaterialPurchasesHydrationStatus),
+    useStore((s) => s.setMaterialPurchasesFromServer),
+    authKey,
+  );
+  useHydrationEffect(
     hydrateInventoryUsages,
     useStore((s) => s.setInventoryUsagesHydrationStatus),
     useStore((s) => s.setInventoryUsagesFromServer),
@@ -321,6 +368,24 @@ export function useSupabaseHydration() {
     hydrateBomRequisitions,
     useStore((s) => s.setBomRequisitionsHydrationStatus),
     useStore((s) => s.setBomRequisitionsFromServer),
+    authKey,
+  );
+  useHydrationEffect(
+    hydrateScrapRecords,
+    useStore((s) => s.setScrapRecordsHydrationStatus),
+    useStore((s) => s.setScrapRecordsFromServer),
+    authKey,
+  );
+  useHydrationEffect(
+    hydrateProjectItems,
+    useStore((s) => s.setProjectItemsHydrationStatus),
+    useStore((s) => s.setProjectItemsFromServer),
+    authKey,
+  );
+  useHydrationEffect(
+    hydrateInternalCostings,
+    useStore((s) => s.setInternalCostingsHydrationStatus),
+    useStore((s) => s.setInternalCostingsFromServer),
     authKey,
   );
   useHydrationEffect(
@@ -458,6 +523,27 @@ export function useSupabaseHydration() {
     hydrateProjectQmsInspectionOverrides,
     useQmsStore((s) => s.setProjectQmsInspectionOverridesHydrationStatus),
     useQmsStore((s) => s.setProjectQmsInspectionOverridesFromServer),
+    authKey,
+  );
+
+  // Phase P1.1 — QMS Inspection Sheets (inspection_sheets,
+  // qms_stage_completions). Proactive app-boot hydration into the same
+  // inspectionSheets/stageCompletions fields useQmsStore's own
+  // loadInspectionSheets()/loadStageCompletions() already populate
+  // on-demand — see hydration.ts's own comment on this section for why
+  // inspection_stage_entries/inspection_documents/inspection_history are
+  // deliberately not hydrated here (per-sheet, on-demand only, same as
+  // project_qms_inspection_attempt_photos above).
+  useHydrationEffect(
+    hydrateInspectionSheets,
+    useQmsStore((s) => s.setInspectionSheetsHydrationStatus),
+    useQmsStore((s) => s.setInspectionSheetsFromServer),
+    authKey,
+  );
+  useHydrationEffect(
+    hydrateQmsStageCompletions,
+    useQmsStore((s) => s.setStageCompletionsHydrationStatus),
+    useQmsStore((s) => s.setStageCompletionsFromServer),
     authKey,
   );
 }

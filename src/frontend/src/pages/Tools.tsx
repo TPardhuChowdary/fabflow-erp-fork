@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { RowActions } from "@/components/ui/row-actions";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import {
   Select,
@@ -66,11 +67,11 @@ const CONDITIONS: MachineCondition[] = [
 ];
 
 const STATUS_COLOR: Record<ToolStatus, string> = {
-  Available: "bg-green-100 text-green-700 border-green-200",
-  "In Use": "bg-blue-100 text-blue-700 border-blue-200",
-  "Under Repair": "bg-yellow-100 text-yellow-700 border-yellow-200",
-  Lost: "bg-red-100 text-red-700 border-red-200",
-  Retired: "bg-slate-100 text-slate-500 border-slate-200",
+  Available: "bg-success/10 text-success border-success/30",
+  "In Use": "bg-info/10 text-info border-info/30",
+  "Under Repair": "bg-warning/15 text-warning border-warning/30",
+  Lost: "bg-destructive/10 text-destructive border-destructive/30",
+  Retired: "bg-muted text-muted-foreground border-border",
 };
 
 export function Tools() {
@@ -350,6 +351,42 @@ export function Tools() {
     );
   }
 
+  const ToolRowActions = ({ t, i }: { t: Tool; i: number }) => (
+    <RowActions
+      primary={[
+        {
+          label: "History",
+          icon: History,
+          onClick: () => openHistory(t),
+          "data-ocid": `tools.history_button.${i + 1}`,
+        },
+        ...(pEdit
+          ? [
+              {
+                label: "Edit",
+                icon: Pencil,
+                onClick: () => openEdit(t),
+                "data-ocid": `tools.edit_button.${i + 1}`,
+              },
+            ]
+          : []),
+      ]}
+      overflow={[
+        ...(pDelete
+          ? [
+              {
+                label: "Delete",
+                icon: Trash2,
+                destructive: true,
+                onClick: () => setDeleteTarget(t),
+                "data-ocid": `tools.delete_button.${i + 1}`,
+              },
+            ]
+          : []),
+      ]}
+    />
+  );
+
   return (
     <div className="p-6 space-y-6" data-ocid="tools.panel">
       <div className="flex items-center justify-between">
@@ -384,7 +421,7 @@ export function Tools() {
           <div className="text-xs text-muted-foreground uppercase font-semibold">
             Available
           </div>
-          <div className="text-2xl font-bold mt-1 text-green-600">
+          <div className="text-2xl font-bold mt-1 text-success">
             {kpis.available}
           </div>
         </div>
@@ -392,15 +429,13 @@ export function Tools() {
           <div className="text-xs text-muted-foreground uppercase font-semibold">
             In Use
           </div>
-          <div className="text-2xl font-bold mt-1 text-blue-600">
-            {kpis.inUse}
-          </div>
+          <div className="text-2xl font-bold mt-1 text-info">{kpis.inUse}</div>
         </div>
         <div className="rounded-lg border p-4">
           <div className="text-xs text-muted-foreground uppercase font-semibold">
             Under Repair
           </div>
-          <div className="text-2xl font-bold mt-1 text-amber-600">
+          <div className="text-2xl font-bold mt-1 text-warning">
             {kpis.underRepair}
           </div>
         </div>
@@ -518,39 +553,7 @@ export function Tools() {
                       </Badge>
                     </td>
                     <td className="p-2">
-                      <div className="flex items-center gap-1">
-                        <button
-                          type="button"
-                          className="p-1 rounded hover:bg-muted transition-colors"
-                          onClick={() => openHistory(t)}
-                          title="Tool history"
-                          data-ocid={`tools.history_button.${i + 1}`}
-                        >
-                          <History className="w-3.5 h-3.5 text-muted-foreground hover:text-foreground" />
-                        </button>
-                        {pEdit && (
-                          <button
-                            type="button"
-                            className="p-1 rounded hover:bg-muted transition-colors"
-                            onClick={() => openEdit(t)}
-                            title="Edit tool"
-                            data-ocid={`tools.edit_button.${i + 1}`}
-                          >
-                            <Pencil className="w-3.5 h-3.5 text-muted-foreground hover:text-foreground" />
-                          </button>
-                        )}
-                        {pDelete && (
-                          <button
-                            type="button"
-                            className="p-1 rounded hover:bg-muted transition-colors"
-                            onClick={() => setDeleteTarget(t)}
-                            title="Delete tool"
-                            data-ocid={`tools.delete_button.${i + 1}`}
-                          >
-                            <Trash2 className="w-3.5 h-3.5 text-muted-foreground hover:text-destructive" />
-                          </button>
-                        )}
-                      </div>
+                      <ToolRowActions t={t} i={i} />
                     </td>
                   </tr>
                 ))}
@@ -933,8 +936,8 @@ export function Tools() {
                                 variant="outline"
                                 className={
                                   h.action === "issued"
-                                    ? "bg-blue-100 text-blue-700 border-blue-200"
-                                    : "bg-slate-100 text-slate-600 border-slate-200"
+                                    ? "bg-info/10 text-info border-info/30"
+                                    : "bg-muted text-muted-foreground border-border"
                                 }
                               >
                                 {h.action === "issued" ? "Issued" : "Returned"}

@@ -48,6 +48,7 @@ import { CompanyPOPrintView } from "../components/CompanyPOPrintView";
 import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import { ReceiveCompanyPoItemDialog } from "../components/ReceiveCompanyPoItemDialog";
 import { VendorSelect } from "../components/VendorSelect";
+import { RowActions } from "../components/ui/row-actions";
 import {
   createCompanyPORemote,
   deleteCompanyPORemote,
@@ -79,8 +80,8 @@ import type {
 
 const STATUS_COLORS: Record<CompanyPOStatus, string> = {
   Draft: "bg-muted text-muted-foreground",
-  Sent: "bg-blue-100 text-blue-700",
-  Received: "bg-green-100 text-green-700",
+  Sent: "bg-info/10 text-info",
+  Received: "bg-success/10 text-success",
 };
 
 type FormState = {
@@ -489,6 +490,88 @@ function CompanyPOsInner() {
       maximumFractionDigits: 2,
     });
 
+  const CompanyPoRowActions = ({
+    po,
+    idx,
+  }: {
+    po: CompanyPO;
+    idx: number;
+  }) => (
+    <RowActions
+      primary={[
+        {
+          label: "View",
+          icon: Eye,
+          onClick: () => setViewPO(po),
+          "data-ocid": `company-po.view_button.${idx + 1}`,
+        },
+        ...(pEdit
+          ? [
+              {
+                label: "Edit",
+                icon: Pencil,
+                onClick: () => openEdit(po),
+                "data-ocid": `company-po.edit_button.${idx + 1}`,
+              },
+            ]
+          : []),
+      ]}
+      overflow={[
+        ...(pEdit && po.status === "Received"
+          ? [
+              {
+                label: "Receive Items",
+                icon: Package,
+                onClick: () => setReceivingPO(po),
+                "data-ocid": `company-po.receive_button.${idx + 1}`,
+              },
+            ]
+          : []),
+        ...(pPrint
+          ? [
+              {
+                label: "Print",
+                icon: Printer,
+                onClick: () => handlePrint(po),
+                "data-ocid": `company-po.print_button.${idx + 1}`,
+              },
+            ]
+          : []),
+        ...(pDownload
+          ? [
+              {
+                label: "Download PDF",
+                icon: Download,
+                onClick: () => handleDownload(po),
+                "data-ocid": `company-po.download_button.${idx + 1}`,
+              },
+            ]
+          : []),
+        ...(pShare
+          ? [
+              {
+                label: "Share",
+                icon: Share2,
+                onClick: () => handleShare(po),
+                "data-ocid": `company-po.share_button.${idx + 1}`,
+              },
+            ]
+          : []),
+        ...(pDelete
+          ? [
+              {
+                label: "Delete",
+                icon: Trash2,
+                destructive: true,
+                onClick: () => handleDelete(po.id),
+                "data-ocid": `company-po.delete_button.${idx + 1}`,
+              },
+            ]
+          : []),
+      ]}
+    />
+  );
+
   if (!canView(currentUser, "company_po")) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
@@ -592,98 +675,7 @@ function CompanyPOsInner() {
                   </div>
                 </div>
                 <div className="flex items-center justify-end gap-1 border-t pt-3">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-10 w-10"
-                    onClick={() => {
-                      setViewPO(po);
-                    }}
-                    title="View"
-                    data-ocid={`company-po.view_button.${idx + 1}`}
-                  >
-                    <Eye className="w-4 h-4" />
-                  </Button>
-                  {pEdit && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-10 w-10"
-                      onClick={() => openEdit(po)}
-                      title="Edit"
-                      data-ocid={`company-po.edit_button.${idx + 1}`}
-                    >
-                      <Pencil className="w-4 h-4" />
-                    </Button>
-                  )}
-                  {pEdit && po.status === "Received" && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-10 w-10"
-                      onClick={() => setReceivingPO(po)}
-                      title="Receive Items"
-                      data-ocid={`company-po.receive_button.${idx + 1}`}
-                    >
-                      <Package className="w-4 h-4" />
-                    </Button>
-                  )}
-                  {pPrint && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-10 w-10"
-                      onClick={() => {
-                        handlePrint(po);
-                      }}
-                      title="Print"
-                      data-ocid={`company-po.print_button.${idx + 1}`}
-                    >
-                      <Printer className="w-4 h-4" />
-                    </Button>
-                  )}
-                  {pDownload && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-10 w-10"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleDownload(po);
-                      }}
-                      title="Download PDF"
-                      data-ocid={`company-po.download_button.${idx + 1}`}
-                    >
-                      <Download className="w-4 h-4" />
-                    </Button>
-                  )}
-                  {pShare && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-10 w-10"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleShare(po);
-                      }}
-                      title="Share"
-                      data-ocid={`company-po.share_button.${idx + 1}`}
-                    >
-                      <Share2 className="w-4 h-4" />
-                    </Button>
-                  )}
-                  {pDelete && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-10 w-10 text-destructive hover:text-destructive"
-                      onClick={() => handleDelete(po.id)}
-                      title="Delete"
-                      data-ocid={`company-po.delete_button.${idx + 1}`}
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </Button>
-                  )}
+                  <CompanyPoRowActions po={po} idx={idx} />
                 </div>
               </div>
             ))}
@@ -758,95 +750,7 @@ function CompanyPOsInner() {
                         )}
                       </TableCell>
                       <TableCell>
-                        <div className="flex gap-1">
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7"
-                            onClick={() => {
-                              setViewPO(po);
-                            }}
-                            title="View"
-                            data-ocid={`company-po.edit_button.${idx + 1}`}
-                          >
-                            <Eye className="w-3.5 h-3.5" />
-                          </Button>
-                          {pEdit && (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7"
-                              onClick={() => openEdit(po)}
-                              title="Edit"
-                            >
-                              <Pencil className="w-3.5 h-3.5" />
-                            </Button>
-                          )}
-                          {pEdit && po.status === "Received" && (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7"
-                              onClick={() => setReceivingPO(po)}
-                              title="Receive Items"
-                            >
-                              <Package className="w-3.5 h-3.5" />
-                            </Button>
-                          )}
-                          {pPrint && (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7"
-                              onClick={() => {
-                                handlePrint(po);
-                              }}
-                              title="Print"
-                            >
-                              <Printer className="w-3.5 h-3.5" />
-                            </Button>
-                          )}
-                          {pDownload && (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleDownload(po);
-                              }}
-                              title="Download PDF"
-                            >
-                              <Download className="w-3.5 h-3.5" />
-                            </Button>
-                          )}
-                          {pShare && (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleShare(po);
-                              }}
-                              title="Share"
-                            >
-                              <Share2 className="w-3.5 h-3.5" />
-                            </Button>
-                          )}
-                          {pDelete && (
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7 text-destructive hover:text-destructive"
-                              onClick={() => handleDelete(po.id)}
-                              title="Delete"
-                              data-ocid={`company-po.delete_button.${idx + 1}`}
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </Button>
-                          )}
-                        </div>
+                        <CompanyPoRowActions po={po} idx={idx} />
                       </TableCell>
                     </TableRow>
                   ))}
@@ -889,7 +793,6 @@ function CompanyPOsInner() {
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              console.log("FORM SUBMITTED");
               handleSave();
             }}
           >
@@ -1091,6 +994,8 @@ function CompanyPOsInner() {
                                 size="icon"
                                 className="h-7 w-7 text-destructive hover:text-destructive"
                                 onClick={() => removeItem(item.id)}
+                                title="Remove item"
+                                aria-label="Remove item"
                               >
                                 <X className="w-3.5 h-3.5" />
                               </Button>

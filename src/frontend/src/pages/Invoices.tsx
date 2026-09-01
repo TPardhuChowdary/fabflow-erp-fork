@@ -33,6 +33,7 @@ import {
   Search,
   Share2,
   Trash2,
+  X,
 } from "lucide-react";
 import { ShieldOff } from "lucide-react";
 import { useState } from "react";
@@ -43,6 +44,7 @@ import { useAuth } from "../AuthContext";
 import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import { InvoicePrintView } from "../components/InvoicePrintView";
 import { StatusBadge } from "../components/StatusBadge";
+import { RowActions } from "../components/ui/row-actions";
 import { InvoiceDocContent } from "../lib/documentRenderers";
 import {
   openShareModalV2,
@@ -72,7 +74,12 @@ import {
   canView,
 } from "../permissions";
 import { useStore } from "../store";
-import type { InvLineItem, Invoice, InvoiceStatus } from "../types";
+import type {
+  InvLineItem,
+  Invoice,
+  InvoicePurchaseOrder,
+  InvoiceStatus,
+} from "../types";
 
 const newItem = (): InvLineItem => ({
   desc: "",
@@ -97,9 +104,7 @@ const emptyForm = () => ({
   paymentTerms: "30 days",
   deliveryVehicleNo: "",
   deliveryDestination: "",
-  poNumber: "",
-  poDate: "",
-  linkedPoId: "",
+  purchaseOrders: [] as InvoicePurchaseOrder[],
   invoiceType: "tax" as "tax" | "proforma",
   buyerGstin: "",
   buyerAddress: "",
@@ -304,9 +309,23 @@ export function Invoices() {
       paymentTerms: inv.paymentTerms ?? "30 days",
       deliveryVehicleNo: inv.deliveryVehicleNo ?? "",
       deliveryDestination: inv.deliveryDestination ?? "",
-      poNumber: inv.poNumber ?? "",
-      poDate: inv.poDate ?? "",
-      linkedPoId: (inv as any).linkedPoId ?? "",
+      // Real one-to-many list (Phase 48). Falls back to the legacy single
+      // poNumber/poDate only as defensive belt-and-suspenders — every
+      // real invoice already has this backfilled into purchaseOrders by
+      // the phase-48 migration, so this fallback should never actually
+      // fire for real data.
+      purchaseOrders:
+        inv.purchaseOrders && inv.purchaseOrders.length > 0
+          ? inv.purchaseOrders
+          : inv.poNumber
+            ? [
+                {
+                  id: crypto.randomUUID(),
+                  poNumber: inv.poNumber,
+                  poDate: inv.poDate,
+                },
+              ]
+            : [],
       invoiceType: inv.invoiceType ?? "tax",
       buyerGstin: inv.buyerGstin ?? "",
       buyerAddress: inv.buyerAddress ?? "",
@@ -416,8 +435,12 @@ export function Invoices() {
           paidAmount: editingInvoice.paidAmount,
           deliveryVehicleNo: form.deliveryVehicleNo,
           deliveryDestination: form.deliveryDestination,
-          poNumber: form.poNumber,
-          poDate: form.poDate,
+          // Legacy single-PO fields kept in sync as a snapshot of the
+          // first real PO (backward compatibility - never left silently
+          // null just because the UI now saves through the list below).
+          poNumber: form.purchaseOrders[0]?.poNumber || "",
+          poDate: form.purchaseOrders[0]?.poDate || "",
+          purchaseOrders: form.purchaseOrders,
           buyerGstin: form.buyerGstin,
           buyerAddress: form.buyerAddress,
           buyerStateName: form.buyerStateName,
@@ -448,43 +471,58 @@ export function Invoices() {
         updateInvoice(result.data);
         toast.success("Invoice updated");
       } else {
-        const result = await createInvoiceRemote({
-          invNo: invNoToUse,
-          dcId: form.dcId,
-          customerId: form.customerId,
-          projectId: form.projectId,
-          lineItems: form.lineItems,
-          subtotal,
-          cgstRate: form.cgstRate,
-          sgstRate: form.sgstRate,
-          igstRate: form.igstRate,
-          cgstAmt,
-          sgstAmt,
-          igstAmt,
-          totalAmount: total,
-          invoiceDate: form.invoiceDate,
-          dueDate: resolvedDueDate,
-          paymentTerms: form.paymentTerms,
-          status: "Unpaid",
-          paidAmount: 0,
-          deliveryVehicleNo: form.deliveryVehicleNo,
-          deliveryDestination: form.deliveryDestination,
-          poNumber: form.poNumber,
-          poDate: form.poDate,
-          buyerGstin: form.buyerGstin,
-          buyerAddress: form.buyerAddress,
-          buyerStateName: form.buyerStateName,
-          buyerStateCode: form.buyerStateCode,
-          invoiceType: form.invoiceType ?? "tax",
-          selectedEmail: selectedEmailToSave,
-          reminderEnabled: (form as any).reminderEnabled ?? true,
-          reminderIntervalDays: (form as any).reminderIntervalDays ?? 5,
-          reminderFrequencyDays: (form as any).reminderFrequencyDays ?? 5,
-          nextReminderAt: resolvedDueDate || new Date().toISOString(),
-          lastReminderSentAt: null,
-          reminderCount: 0,
-          nextReminderCustomDate: null,
-        });
+        const result = await createInvoiceRemote(
+          {
+            invNo: invNoToUse,
+            dcId: form.dcId,
+            customerId: form.customerId,
+            projectId: form.projectId,
+            lineItems: form.lineItems,
+            subtotal,
+            cgstRate: form.cgstRate,
+            sgstRate: form.sgstRate,
+            igstRate: form.igstRate,
+            cgstAmt,
+            sgstAmt,
+            igstAmt,
+            totalAmount: total,
+            invoiceDate: form.invoiceDate,
+            dueDate: resolvedDueDate,
+            paymentTerms: form.paymentTerms,
+            status: "Unpaid",
+            paidAmount: 0,
+            deliveryVehicleNo: form.deliveryVehicleNo,
+            deliveryDestination: form.deliveryDestination,
+            poNumber: form.purchaseOrders[0]?.poNumber || "",
+            poDate: form.purchaseOrders[0]?.poDate || "",
+            purchaseOrders: form.purchaseOrders,
+            buyerGstin: form.buyerGstin,
+            buyerAddress: form.buyerAddress,
+            buyerStateName: form.buyerStateName,
+            buyerStateCode: form.buyerStateCode,
+            invoiceType: form.invoiceType ?? "tax",
+            selectedEmail: selectedEmailToSave,
+            reminderEnabled: (form as any).reminderEnabled ?? true,
+            reminderIntervalDays: (form as any).reminderIntervalDays ?? 5,
+            reminderFrequencyDays: (form as any).reminderFrequencyDays ?? 5,
+            nextReminderAt: resolvedDueDate || new Date().toISOString(),
+            lastReminderSentAt: null,
+            reminderCount: 0,
+            nextReminderCustomDate: null,
+          },
+          // Unlike DeliveryChallans.tsx's dcNumber (a separate state that
+          // genuinely stays "" until the user types), the "New Invoice"
+          // button seeds form.invoiceNumber with previewInvNo()'s actual
+          // text at open time (see its onClick) - so form.invoiceNumber is
+          // never truly empty here, and a blank-string check would always
+          // read as "user typed it". Instead compare the submitted
+          // candidate against a freshly recomputed preview: still equal to
+          // that means the field was left as its auto-generated value
+          // (safe to silently retry on a collision); different means the
+          // user deliberately typed something else (must not be swapped
+          // out silently).
+          { autoRenumberOnConflict: invNoToUse === previewInvNo() },
+        );
 
         if (result.status === "unauthenticated") {
           toast.error("You must be signed in to create an invoice");
@@ -500,12 +538,12 @@ export function Invoices() {
         }
 
         addInvoice(result.data);
-        toast.success(`Invoice ${invNoToUse} created`);
+        toast.success(`Invoice ${result.data.invNo} created`);
         if (form.projectId) {
           addProjectActivity(
             form.projectId,
             "invoice_generated",
-            `Invoice ${invNoToUse} generated — ${fmt(total)}`,
+            `Invoice ${result.data.invNo} generated — ${fmt(total)}`,
             currentUser?.username ?? "system",
           );
         }
@@ -597,6 +635,80 @@ export function Invoices() {
       </div>
     );
   }
+
+  // Component I's table-action rule: this row was 6 bare icon-only
+  // buttons (View/Edit/Print/Download/Share/Delete) duplicated once for
+  // the desktop table and once for the mobile card — the same real "icon
+  // soup" pattern already fixed on Quotations/DeliveryChallans this
+  // phase. Every handler and permission gate is unchanged; extracting one
+  // shared component (matching QuotationRowActions' own precedent) also
+  // removes the duplicate-maintenance risk of two copies drifting apart.
+  const InvoiceRowActions = ({ inv, i }: { inv: Invoice; i: number }) => (
+    <RowActions
+      primary={[
+        {
+          label: "View",
+          icon: Eye,
+          onClick: () => setViewInvoice(inv),
+          "data-ocid": `invoices.view_button.${i + 1}`,
+        },
+        ...(pEdit
+          ? [
+              {
+                label: "Edit",
+                icon: Pencil,
+                onClick: () => handleEdit(inv),
+                "data-ocid": `invoices.edit_button.${i + 1}`,
+              },
+            ]
+          : []),
+      ]}
+      overflow={[
+        ...(pPrint
+          ? [
+              {
+                label: "Print",
+                icon: Printer,
+                onClick: () => handlePrint(inv),
+                "data-ocid": `invoices.print_button.${i + 1}`,
+              },
+            ]
+          : []),
+        ...(pDownload
+          ? [
+              {
+                label: "Download PDF",
+                icon: Download,
+                onClick: () => handleDownload(inv),
+                "data-ocid": `invoices.download_button.${i + 1}`,
+              },
+            ]
+          : []),
+        ...(pShare
+          ? [
+              {
+                label: "Share",
+                icon: Share2,
+                onClick: () => handleShare(inv),
+                "data-ocid": `invoices.share_button.${i + 1}`,
+              },
+            ]
+          : []),
+        ...(pDelete
+          ? [
+              {
+                label: "Delete",
+                icon: Trash2,
+                destructive: true,
+                onClick: () => setDeleteInvoiceId(inv.id),
+                "data-ocid": `invoices.delete_button.${i + 1}`,
+              },
+            ]
+          : []),
+      ]}
+    />
+  );
+
   return (
     <div className="space-y-4" data-ocid="invoices.page">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -668,20 +780,26 @@ export function Invoices() {
                 </div>
                 <div>
                   <div className="text-xs text-muted-foreground">Paid</div>
-                  <div className="text-sm font-medium text-green-600">
+                  <div className="text-sm font-medium text-success">
                     {fmt(inv.paidAmount ?? 0)}
                   </div>
                 </div>
                 <div>
-                  <div className="text-xs text-muted-foreground">PO No.</div>
-                  <div className="text-sm font-mono">{inv.poNumber || "—"}</div>
+                  <div className="text-xs text-muted-foreground">
+                    PO No.{(inv.purchaseOrders?.length ?? 0) > 1 ? "s" : ""}
+                  </div>
+                  <div className="text-sm font-mono truncate max-w-[10rem]">
+                    {inv.purchaseOrders && inv.purchaseOrders.length > 0
+                      ? inv.purchaseOrders.map((po) => po.poNumber).join(", ")
+                      : inv.poNumber || "—"}
+                  </div>
                 </div>
               </div>
               {(() => {
                 const daysAfterDue = daysBetween(inv.dueDate);
                 if (daysAfterDue > 0 && inv.status !== "Paid") {
                   return (
-                    <div className="text-xs text-red-600 font-medium mt-1">
+                    <div className="text-xs text-destructive font-medium mt-1">
                       {daysAfterDue} days overdue
                     </div>
                   );
@@ -715,93 +833,8 @@ export function Invoices() {
                     </SelectContent>
                   </Select>
                 )}
-                <div className="flex gap-1 ml-auto">
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-10 w-10"
-                    onClick={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      setViewInvoice(inv);
-                    }}
-                    title="View"
-                    data-ocid={`invoices.view_button.${i + 1}`}
-                  >
-                    <Eye className="w-4 h-4" />
-                  </Button>
-                  {pEdit && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-10 w-10"
-                      onClick={() => handleEdit(inv)}
-                      title="Edit"
-                      data-ocid={`invoices.edit_button.${i + 1}`}
-                    >
-                      <Pencil className="w-4 h-4" />
-                    </Button>
-                  )}
-                  {pPrint && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-10 w-10"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        handlePrint(inv);
-                      }}
-                      title="Print"
-                      data-ocid={`invoices.print_button.${i + 1}`}
-                    >
-                      <Printer className="w-4 h-4" />
-                    </Button>
-                  )}
-                  {pDownload && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-10 w-10"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        handleDownload(inv);
-                      }}
-                      title="Download PDF"
-                      data-ocid={`invoices.download_button.${i + 1}`}
-                    >
-                      <Download className="w-4 h-4" />
-                    </Button>
-                  )}
-                  {pShare && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-10 w-10"
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        handleShare(inv);
-                      }}
-                      title="Share"
-                      data-ocid={`invoices.share_button.${i + 1}`}
-                    >
-                      <Share2 className="w-4 h-4" />
-                    </Button>
-                  )}
-                  {pDelete && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-10 w-10 text-destructive hover:text-destructive"
-                      onClick={() => setDeleteInvoiceId(inv.id)}
-                      title="Delete"
-                      data-ocid={`invoices.delete_button.${i + 1}`}
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </Button>
-                  )}
+                <div className="ml-auto">
+                  <InvoiceRowActions inv={inv} i={i} />
                 </div>
               </div>
             </div>
@@ -863,8 +896,15 @@ export function Invoices() {
                     <TableCell className="text-sm">
                       {cust?.name ?? "\u2014"}
                     </TableCell>
-                    <TableCell className="text-xs font-mono">
-                      {inv.poNumber || "\u2014"}
+                    <TableCell
+                      className="text-xs font-mono truncate max-w-[10rem]"
+                      title={inv.purchaseOrders
+                        ?.map((po) => po.poNumber)
+                        .join(", ")}
+                    >
+                      {inv.purchaseOrders && inv.purchaseOrders.length > 0
+                        ? inv.purchaseOrders.map((po) => po.poNumber).join(", ")
+                        : inv.poNumber || "\u2014"}
                     </TableCell>
                     <TableCell className="text-xs">
                       {inv.invoiceDate ?? "\u2014"}
@@ -886,7 +926,7 @@ export function Invoices() {
                               </div>
                             )}
                             {daysAfterDue > 0 && inv.status !== "Paid" && (
-                              <div className="text-red-600 font-medium">
+                              <div className="text-destructive font-medium">
                                 {daysAfterDue}d overdue
                               </div>
                             )}
@@ -900,7 +940,7 @@ export function Invoices() {
                     <TableCell className="text-sm font-semibold">
                       {fmt(inv.totalAmount ?? 0)}
                     </TableCell>
-                    <TableCell className="text-sm text-green-600">
+                    <TableCell className="text-sm text-success">
                       {fmt(inv.paidAmount ?? 0)}
                     </TableCell>
                     <TableCell>
@@ -943,89 +983,7 @@ export function Invoices() {
                       )}
                     </TableCell>
                     <TableCell onClick={(e) => e.stopPropagation()}>
-                      <div className="flex gap-1">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            setViewInvoice(inv);
-                          }}
-                          title="View"
-                          data-ocid={`invoices.list.edit_button.${i + 1}`}
-                        >
-                          <Eye className="w-3.5 h-3.5" />
-                        </Button>
-                        {pEdit && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7"
-                            onClick={() => handleEdit(inv)}
-                            title="Edit"
-                          >
-                            <Pencil className="w-3.5 h-3.5" />
-                          </Button>
-                        )}
-                        {pPrint && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7"
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              handlePrint(inv);
-                            }}
-                            title="Print"
-                          >
-                            <Printer className="w-3.5 h-3.5" />
-                          </Button>
-                        )}
-                        {pDownload && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7"
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              handleDownload(inv);
-                            }}
-                            title="Download PDF"
-                          >
-                            <Download className="w-3.5 h-3.5" />
-                          </Button>
-                        )}
-                        {pShare && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7"
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              handleShare(inv);
-                            }}
-                            title="Share"
-                          >
-                            <Share2 className="w-3.5 h-3.5" />
-                          </Button>
-                        )}
-                        {pDelete && (
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7 text-destructive hover:text-destructive"
-                            onClick={() => setDeleteInvoiceId(inv.id)}
-                            title="Delete"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </Button>
-                        )}
-                      </div>
+                      <InvoiceRowActions inv={inv} i={i} />
                     </TableCell>
                   </TableRow>
                 );
@@ -1119,7 +1077,7 @@ export function Invoices() {
                       onClick={() =>
                         setForm((p) => ({ ...p, invoiceType: "proforma" }))
                       }
-                      className={`px-4 py-1.5 rounded text-xs font-semibold border transition-colors ${form.invoiceType === "proforma" ? "bg-orange-500 text-white border-orange-500" : "bg-background text-muted-foreground border-border hover:bg-muted"}`}
+                      className={`px-4 py-1.5 rounded text-xs font-semibold border transition-colors ${form.invoiceType === "proforma" ? "bg-warning text-warning-foreground border-warning" : "bg-background text-muted-foreground border-border hover:bg-muted"}`}
                       data-ocid="invoices.form.proforma_invoice.toggle"
                     >
                       Proforma Invoice
@@ -1141,10 +1099,26 @@ export function Invoices() {
                       const qtPOs = (quotationPurchaseOrders || [])
                         .filter((po) => po.quotationId === qt.id)
                         .sort((a, b) => b.createdAt - a.createdAt);
-                      const poNumber =
-                        qtPOs[0]?.poNumber || qt.recordedPO?.poNumber || "";
-                      const poDate =
-                        qtPOs[0]?.poDate || qt.recordedPO?.poDate || "";
+                      // Invoice multi-PO feature (see chat) — when a real
+                      // QuotationPurchaseOrder record exists, add it as a
+                      // real-linked PO entry (quotationPurchaseOrderId
+                      // set); the legacy quotation.recordedPO fallback has
+                      // no real backing record, so it's added as a plain
+                      // text snapshot instead.
+                      const newPO: InvoicePurchaseOrder | null = qtPOs[0]
+                        ? {
+                            id: crypto.randomUUID(),
+                            poNumber: qtPOs[0].poNumber,
+                            poDate: qtPOs[0].poDate,
+                            quotationPurchaseOrderId: qtPOs[0].id,
+                          }
+                        : qt.recordedPO
+                          ? {
+                              id: crypto.randomUUID(),
+                              poNumber: qt.recordedPO.poNumber,
+                              poDate: qt.recordedPO.poDate,
+                            }
+                          : null;
                       const newItems =
                         (qt.lineItems || []).length > 0
                           ? (qt.lineItems || []).map((li) => ({
@@ -1164,8 +1138,13 @@ export function Invoices() {
                         );
                         return {
                           ...p,
-                          poNumber,
-                          poDate,
+                          purchaseOrders:
+                            newPO &&
+                            !p.purchaseOrders.some(
+                              (x) => x.poNumber === newPO.poNumber,
+                            )
+                              ? [...p.purchaseOrders, newPO]
+                              : p.purchaseOrders,
                           lineItems: newItems ?? p.lineItems,
                           customerId: custId,
                           deliveryDestination:
@@ -1349,29 +1328,98 @@ export function Invoices() {
                     }
                   />
                 </div>
-                <div>
-                  <Label className="text-xs">PO Number</Label>
-                  <Input
-                    data-ocid="invoices.form.poNumber.input"
-                    className="mt-1 h-8 text-sm"
-                    placeholder="Customer PO number"
-                    value={form.poNumber}
-                    onChange={(e) =>
-                      setForm((p) => ({ ...p, poNumber: e.target.value }))
-                    }
-                  />
-                </div>
-                <div>
-                  <Label className="text-xs">PO Date</Label>
-                  <Input
-                    data-ocid="invoices.form.poDate.input"
-                    type="date"
-                    className="mt-1 h-8 text-sm"
-                    value={form.poDate}
-                    onChange={(e) =>
-                      setForm((p) => ({ ...p, poDate: e.target.value }))
-                    }
-                  />
+                {/* Invoice multi-PO feature (see chat) — replaces the old
+                    single PO Number/PO Date pair with a real add/remove
+                    list, one invoice → many Customer POs. Each row is
+                    plain poNumber/poDate text unless it was auto-filled
+                    from a real QuotationPurchaseOrder record above (see
+                    the quotation Select's onValueChange), in which case
+                    quotationPurchaseOrderId carries the real link. */}
+                <div className="col-span-3">
+                  <Label className="text-xs">Purchase Orders</Label>
+                  <div className="mt-1 space-y-1.5">
+                    {form.purchaseOrders.length === 0 && (
+                      <p className="text-xs text-muted-foreground italic">
+                        No purchase orders added.
+                      </p>
+                    )}
+                    {form.purchaseOrders.map((po, idx) => (
+                      <div key={po.id} className="flex items-center gap-2">
+                        <Input
+                          data-ocid={`invoices.form.po.${idx}.number`}
+                          className="h-8 text-sm flex-1"
+                          placeholder="Customer PO number"
+                          value={po.poNumber}
+                          onChange={(e) =>
+                            setForm((p) => ({
+                              ...p,
+                              purchaseOrders: p.purchaseOrders.map((x, i) =>
+                                i === idx
+                                  ? { ...x, poNumber: e.target.value }
+                                  : x,
+                              ),
+                            }))
+                          }
+                        />
+                        <Input
+                          data-ocid={`invoices.form.po.${idx}.date`}
+                          type="date"
+                          className="h-8 text-sm basis-40 shrink-0"
+                          value={po.poDate ?? ""}
+                          onChange={(e) =>
+                            setForm((p) => ({
+                              ...p,
+                              purchaseOrders: p.purchaseOrders.map((x, i) =>
+                                i === idx
+                                  ? { ...x, poDate: e.target.value }
+                                  : x,
+                              ),
+                            }))
+                          }
+                        />
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 w-8 p-0 text-muted-foreground hover:text-destructive"
+                          onClick={() =>
+                            setForm((p) => ({
+                              ...p,
+                              purchaseOrders: p.purchaseOrders.filter(
+                                (_, i) => i !== idx,
+                              ),
+                            }))
+                          }
+                          aria-label="Remove PO"
+                          data-ocid={`invoices.form.po.${idx}.remove`}
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </Button>
+                      </div>
+                    ))}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 text-xs"
+                      onClick={() =>
+                        setForm((p) => ({
+                          ...p,
+                          purchaseOrders: [
+                            ...p.purchaseOrders,
+                            {
+                              id: crypto.randomUUID(),
+                              poNumber: "",
+                              poDate: "",
+                            },
+                          ],
+                        }))
+                      }
+                      data-ocid="invoices.form.po.add"
+                    >
+                      <Plus className="w-3.5 h-3.5 mr-1" /> Add PO
+                    </Button>
+                  </div>
                 </div>
                 <div>
                   <Label className="text-xs">Reminder Frequency</Label>
@@ -1653,13 +1701,13 @@ export function Invoices() {
                   )}
                   <div className="font-bold text-base">Total: {fmt(total)}</div>
                   {total > 50000 && (
-                    <div className="mt-3 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    <div className="mt-3 flex items-start gap-2 rounded-md border border-warning/30 bg-warning/15 px-3 py-2 text-xs text-warning">
                       <span className="mt-0.5 text-base leading-none">
                         &#9888;&#65039;
                       </span>
                       <div className="flex-1">
                         <p className="font-semibold">E-Way Bill Required</p>
-                        <p className="mt-0.5 text-amber-700">
+                        <p className="mt-0.5 text-warning/90">
                           Invoice amount exceeds ₹50,000. An E-Way Bill is
                           mandatory for this shipment.
                         </p>
@@ -1668,7 +1716,7 @@ export function Invoices() {
                         href="https://ewaybillgst.gov.in"
                         target="_blank"
                         rel="noopener noreferrer"
-                        className="ml-2 shrink-0 rounded bg-amber-600 px-2 py-1 text-xs font-semibold text-white hover:bg-amber-700"
+                        className="ml-2 shrink-0 rounded bg-warning px-2 py-1 text-xs font-semibold text-warning-foreground hover:bg-warning/90"
                       >
                         Generate E-Way Bill ↗
                       </a>

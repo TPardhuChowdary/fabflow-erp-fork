@@ -99,13 +99,13 @@ export function CharacteristicTable({
                 <button
                   type="button"
                   onClick={() => onToggleFavorite(c.id)}
-                  className="text-muted-foreground hover:text-amber-500 transition-colors"
+                  className="text-muted-foreground hover:text-warning transition-colors"
                   data-ocid={`qms.characteristics.favorite.${i + 1}`}
                 >
                   <Star
                     className={cn(
                       "w-3.5 h-3.5",
-                      favoriteIds.has(c.id) && "fill-amber-400 text-amber-500",
+                      favoriteIds.has(c.id) && "fill-warning text-warning",
                     )}
                   />
                 </button>
@@ -143,8 +143,8 @@ export function CharacteristicTable({
                   className={cn(
                     "text-[10px] px-1.5 py-0.5",
                     c.status === "Active"
-                      ? "bg-green-100 text-green-700 border-green-200"
-                      : "bg-gray-100 text-gray-600 border-gray-200",
+                      ? "bg-success/10 text-success border-success/30"
+                      : "bg-muted text-muted-foreground border-border",
                   )}
                 >
                   {c.status}
@@ -158,6 +158,8 @@ export function CharacteristicTable({
                     variant="ghost"
                     className="h-6 w-6 p-0"
                     onClick={() => onEdit(c)}
+                    title="Edit characteristic"
+                    aria-label="Edit characteristic"
                     data-ocid={`qms.characteristics.edit.${i + 1}`}
                   >
                     <Pencil className="w-3.5 h-3.5" />

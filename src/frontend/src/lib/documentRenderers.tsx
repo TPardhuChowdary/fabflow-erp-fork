@@ -222,16 +222,22 @@ export function InvoiceDocContent({
           <div style={{ fontSize: "11px", color: "#444" }}>
             <strong>Date:</strong> {invoice.invoiceDate || "\u2014"}
           </div>
-          {invoice.poNumber && (
-            <div style={{ fontSize: "11px", color: "#444" }}>
-              <strong>PO No:</strong> {invoice.poNumber}
-            </div>
-          )}
-          {invoice.poDate && (
-            <div style={{ fontSize: "11px", color: "#444" }}>
-              <strong>PO Date:</strong> {invoice.poDate}
-            </div>
-          )}
+          {/* Invoice multi-PO feature (see chat) — same real list this
+              document-generation path shares with InvoicePrintView.tsx;
+              see that file's own comment for the fallback reasoning. */}
+          {invoice.purchaseOrders && invoice.purchaseOrders.length > 0
+            ? invoice.purchaseOrders.map((po) => (
+                <div key={po.id} style={{ fontSize: "11px", color: "#444" }}>
+                  <strong>PO No:</strong> {po.poNumber}
+                  {po.poDate ? ` (${po.poDate})` : ""}
+                </div>
+              ))
+            : invoice.poNumber && (
+                <div style={{ fontSize: "11px", color: "#444" }}>
+                  <strong>PO No:</strong> {invoice.poNumber}
+                  {invoice.poDate ? ` (${invoice.poDate})` : ""}
+                </div>
+              )}
         </div>
       </div>
 

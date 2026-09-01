@@ -2,6 +2,7 @@ import { InternetIdentityProvider } from "@caffeineai/core-infrastructure";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { RecentWorkspacesProvider } from "./RecentWorkspacesContext";
 import { ThemeProvider } from "./ThemeContext";
 import "./index.css";
 
@@ -19,10 +20,12 @@ const queryClient = new QueryClient();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <ThemeProvider>
-    <QueryClientProvider client={queryClient}>
-      <InternetIdentityProvider>
-        <App />
-      </InternetIdentityProvider>
-    </QueryClientProvider>
+    <RecentWorkspacesProvider>
+      <QueryClientProvider client={queryClient}>
+        <InternetIdentityProvider>
+          <App />
+        </InternetIdentityProvider>
+      </QueryClientProvider>
+    </RecentWorkspacesProvider>
   </ThemeProvider>,
 );

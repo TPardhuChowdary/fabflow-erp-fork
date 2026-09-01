@@ -14,13 +14,17 @@ export const CRITICALITY_LABELS: Record<QmsCriticality, string> = {
   Cosmetic: "Cosmetic",
 };
 
+// Only 5 severity tokens exist (success/warning/destructive/info/muted), so
+// the 6 criticality levels collapse pairwise onto them — Safety is the one
+// genuinely destructive level; the rest share warning/info by how close
+// their original hue was, purely a palette constraint, not a meaning change.
 export const CRITICALITY_BADGE_CLASS: Record<QmsCriticality, string> = {
-  SafetyCritical: "bg-red-100 text-red-800 border-red-200",
-  FunctionalCritical: "bg-orange-100 text-orange-700 border-orange-200",
-  RegulatoryCritical: "bg-purple-100 text-purple-700 border-purple-200",
-  CustomerCritical: "bg-blue-100 text-blue-700 border-blue-200",
-  ProcessCritical: "bg-yellow-100 text-yellow-800 border-yellow-200",
-  Cosmetic: "bg-gray-100 text-gray-600 border-gray-200",
+  SafetyCritical: "bg-destructive/10 text-destructive border-destructive/30",
+  FunctionalCritical: "bg-warning/15 text-warning border-warning/30",
+  RegulatoryCritical: "bg-info/10 text-info border-info/30",
+  CustomerCritical: "bg-info/10 text-info border-info/30",
+  ProcessCritical: "bg-warning/15 text-warning border-warning/30",
+  Cosmetic: "bg-muted text-muted-foreground border-border",
 };
 
 export const INSPECTION_METHOD_TYPE_LABELS: Record<
@@ -73,22 +77,26 @@ export const INSPECTION_SHEET_STATUS_LABELS: Record<
   Closed: "Closed",
 };
 
+// Same 5-token constraint as CRITICALITY_BADGE_CLASS above — this 12-step
+// pipeline collapses onto success/warning/info/muted by proximity to each
+// step's original hue and by pipeline stage (early=muted, active=info,
+// needs-attention=warning, terminal=success).
 export const INSPECTION_SHEET_STATUS_BADGE_CLASS: Record<
   InspectionSheetStatus,
   string
 > = {
-  Draft: "bg-gray-100 text-gray-600 border-gray-200",
-  Generated: "bg-slate-100 text-slate-700 border-slate-200",
-  Printed: "bg-indigo-100 text-indigo-700 border-indigo-200",
-  InspectionStarted: "bg-blue-100 text-blue-700 border-blue-200",
-  InProgress: "bg-yellow-100 text-yellow-800 border-yellow-200",
-  Completed: "bg-cyan-100 text-cyan-700 border-cyan-200",
-  Signed: "bg-purple-100 text-purple-700 border-purple-200",
-  AwaitingUpload: "bg-amber-100 text-amber-700 border-amber-200",
-  Uploaded: "bg-teal-100 text-teal-700 border-teal-200",
-  Reviewed: "bg-orange-100 text-orange-700 border-orange-200",
-  Approved: "bg-green-100 text-green-700 border-green-200",
-  Closed: "bg-green-100 text-green-800 border-green-300",
+  Draft: "bg-muted text-muted-foreground border-border",
+  Generated: "bg-muted text-muted-foreground border-border",
+  Printed: "bg-info/10 text-info border-info/30",
+  InspectionStarted: "bg-info/10 text-info border-info/30",
+  InProgress: "bg-warning/15 text-warning border-warning/30",
+  Completed: "bg-info/10 text-info border-info/30",
+  Signed: "bg-info/10 text-info border-info/30",
+  AwaitingUpload: "bg-warning/15 text-warning border-warning/30",
+  Uploaded: "bg-info/10 text-info border-info/30",
+  Reviewed: "bg-warning/15 text-warning border-warning/30",
+  Approved: "bg-success/10 text-success border-success/30",
+  Closed: "bg-success/10 text-success border-success/30",
 };
 
 export const INSPECTION_MODE_LABELS: Record<InspectionMode, string> = {

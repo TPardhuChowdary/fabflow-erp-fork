@@ -26,6 +26,20 @@ export interface WriteResult<T> {
   error?: string;
 }
 
+// Canonical "current rate" lookup — the latest (by effectiveFrom) rate row
+// for a service. Extracted from pages/MachineRevenue.tsx's local
+// currentRate() (Master directive) so the Agent (queries.ts) and the UI
+// never compute this independently.
+export function getCurrentServiceRate(
+  serviceId: string,
+  rates: MachineServiceRate[],
+): number {
+  const sorted = (rates || [])
+    .filter((r) => r.billableServiceId === serviceId)
+    .sort((a, b) => b.effectiveFrom - a.effectiveFrom);
+  return sorted[0]?.rate ?? 0;
+}
+
 async function requireSession() {
   if (!isSupabaseConfigured) {
     return {

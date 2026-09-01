@@ -677,11 +677,11 @@ export function QuotationPrintView({
         </div>
 
         {/* Mobile sticky bottom */}
-        <div className="fixed bottom-0 left-0 right-0 flex sm:hidden bg-white border-t border-gray-200 p-3 gap-2 z-50 no-print print:hidden">
+        <div className="fixed bottom-0 left-0 right-0 flex sm:hidden bg-background border-t border-border p-3 gap-2 z-50 no-print print:hidden">
           <button
             type="button"
             onClick={onClose}
-            className="flex-1 flex items-center justify-center gap-1.5 py-3 rounded-lg border border-gray-300 text-sm font-medium min-h-[48px]"
+            className="flex-1 flex items-center justify-center gap-1.5 py-3 rounded-lg border border-border text-sm font-medium min-h-[48px]"
             data-ocid="quotation-print.mobile.close.button"
           >
             <X className="w-4 h-4" /> Close

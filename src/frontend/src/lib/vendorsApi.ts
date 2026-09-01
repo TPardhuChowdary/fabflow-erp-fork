@@ -23,6 +23,7 @@
 //     distinguishes that from a real thrown "error".
 
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
+import { normalizeBusinessName } from "@/lib/utils";
 import type { Vendor } from "@/types";
 
 export type WriteStatus = "success" | "denied" | "error" | "unauthenticated";
@@ -57,7 +58,7 @@ function rowToVendor(row: VendorRow): Vendor {
 // update/delete) and createdAt (DB-managed created_at).
 function toVendorFields(v: Omit<Vendor, "id" | "createdAt">) {
   return {
-    name: v.name,
+    name: normalizeBusinessName(v.name),
     phone: v.phone || null,
     address: v.address || null,
     gstin: v.gstNumber ?? null,

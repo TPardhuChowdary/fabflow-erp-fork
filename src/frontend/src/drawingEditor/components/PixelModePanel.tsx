@@ -23,7 +23,7 @@ export function PixelModePanel({
       <Button
         type="button"
         size="sm"
-        className="w-full h-8 text-[10px] bg-amber-500 hover:bg-amber-600 text-black"
+        className="w-full h-8 text-[10px] bg-warning hover:bg-warning/90 text-warning-foreground"
         onClick={onAutoStrip}
         data-ocid="drawing_editor.pixel.auto_strip"
       >
@@ -32,7 +32,7 @@ export function PixelModePanel({
       <Button
         type="button"
         size="sm"
-        className="w-full h-8 text-[10px] bg-[#ff3366] hover:bg-[#e02d5a] text-white"
+        className="w-full h-8 text-[10px] bg-destructive hover:bg-destructive/90 text-destructive-foreground"
         onClick={onNukeStrip}
         data-ocid="drawing_editor.pixel.nuke_strip"
       >
@@ -69,7 +69,7 @@ export function PixelModePanel({
           {calibrating ? "CANCEL CALIBRATION" : "SET 1mm SCALE →"}
         </Button>
         {calibrationStatus && (
-          <div className="text-[10px] text-green-600">{calibrationStatus}</div>
+          <div className="text-[10px] text-success">{calibrationStatus}</div>
         )}
       </div>
     </div>

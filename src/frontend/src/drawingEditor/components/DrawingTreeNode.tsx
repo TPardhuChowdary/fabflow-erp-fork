@@ -108,7 +108,7 @@ export function DrawingTreeRow({
   return (
     <>
       <TableRow
-        className={cn(isHighlighted && "bg-amber-50 dark:bg-amber-950/30")}
+        className={cn(isHighlighted && "bg-warning/15")}
         data-ocid={`drawing_editor.tree_row.${drawing.id}`}
       >
         <TableCell className="text-xs font-medium max-w-[180px] sm:max-w-[320px]">
@@ -123,6 +123,8 @@ export function DrawingTreeRow({
                 variant="ghost"
                 className="h-5 w-5 p-0 shrink-0"
                 onClick={() => setExpanded((e) => !e)}
+                title={expanded ? "Collapse" : "Expand"}
+                aria-label={expanded ? "Collapse" : "Expand"}
                 data-ocid={`drawing_editor.tree_toggle.${drawing.id}`}
               >
                 {expanded ? (
@@ -135,7 +137,7 @@ export function DrawingTreeRow({
               <span className="w-5 shrink-0" />
             )}
             {drawing.sourceDesignFileId ? (
-              <Layers className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+              <Layers className="w-3.5 h-3.5 text-info shrink-0" />
             ) : drawing.parentDrawingId ? (
               <FileOutput className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
             ) : (
@@ -157,7 +159,7 @@ export function DrawingTreeRow({
             {drawing.sourceDesignFileId && (
               <Badge
                 variant="outline"
-                className="text-[10px] px-1 py-0 border-blue-400 text-blue-600 shrink-0"
+                className="text-[10px] px-1 py-0 border-info/40 text-info shrink-0"
               >
                 Master
               </Badge>
@@ -176,7 +178,7 @@ export function DrawingTreeRow({
               !drawing.originalDrawingId && (
                 <Badge
                   variant="outline"
-                  className="text-[10px] px-1 py-0 border-emerald-400 text-emerald-600 shrink-0"
+                  className="text-[10px] px-1 py-0 border-success/40 text-success shrink-0"
                 >
                   Original
                 </Badge>
@@ -185,7 +187,7 @@ export function DrawingTreeRow({
               workingDrawingOriginalIds?.has(drawing.id) && (
                 <Badge
                   variant="outline"
-                  className="text-[10px] px-1 py-0 border-amber-400 text-amber-600 shrink-0"
+                  className="text-[10px] px-1 py-0 border-warning/40 text-warning shrink-0"
                 >
                   Edited
                 </Badge>
@@ -322,6 +324,8 @@ export function DrawingTreeRow({
               variant="ghost"
               className="h-7 w-7 p-0 text-destructive"
               onClick={() => onDelete(drawing)}
+              title="Delete"
+              aria-label="Delete"
               data-ocid={`drawing_editor.tree_delete.${drawing.id}`}
             >
               <Trash2 className="w-3.5 h-3.5" />

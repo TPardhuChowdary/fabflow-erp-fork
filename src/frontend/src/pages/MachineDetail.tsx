@@ -105,22 +105,26 @@ const CONDITIONS: MachineCondition[] = [
   "Critical",
 ];
 
+// Instrument's severity set has 3 tones (success/warning/destructive) for
+// this 5-point real condition scale — the two best ratings share success,
+// the two worst share destructive, Fair takes warning. Labels themselves
+// are unchanged; only the color mapping moved off literal Tailwind hues.
 const CONDITION_COLOR: Record<MachineCondition, string> = {
-  Excellent: "bg-green-100 text-green-700",
-  Good: "bg-blue-100 text-blue-700",
-  Fair: "bg-yellow-100 text-yellow-700",
-  Poor: "bg-orange-100 text-orange-700",
-  Critical: "bg-red-100 text-red-700",
+  Excellent: "bg-success/10 text-success",
+  Good: "bg-success/10 text-success",
+  Fair: "bg-warning/15 text-warning",
+  Poor: "bg-destructive/10 text-destructive",
+  Critical: "bg-destructive/10 text-destructive",
 };
 
 const SERVICE_TYPE_COLOR: Record<ServiceType, string> = {
-  Preventive: "bg-green-50 text-green-700",
-  Corrective: "bg-orange-50 text-orange-700",
-  Breakdown: "bg-red-50 text-red-700",
-  Calibration: "bg-purple-50 text-purple-700",
-  AMC: "bg-blue-50 text-blue-700",
-  Inspection: "bg-cyan-50 text-cyan-700",
-  Other: "bg-gray-50 text-gray-600",
+  Preventive: "bg-success/10 text-success",
+  Corrective: "bg-warning/15 text-warning",
+  Breakdown: "bg-destructive/10 text-destructive",
+  Calibration: "bg-info/10 text-info",
+  AMC: "bg-info/10 text-info",
+  Inspection: "bg-info/10 text-info",
+  Other: "bg-muted text-muted-foreground",
 };
 
 interface Props {
@@ -192,6 +196,9 @@ export function MachineDetail({
   const dView = canView(currentUser, "drawing_editor");
   const dEdit = canEdit(currentUser, "drawing_editor");
   const dDelete = canDelete(currentUser, "drawing_editor");
+  // drawings_insert RLS requires drawing_editor.create specifically, not
+  // .edit — see DrawingsListPanel.tsx's canCreate prop.
+  const dCreate = canCreate(currentUser, "drawing_editor");
   const revView = canView(currentUser, "machine_revenue");
   const revManageRates = hasPermission(
     currentUser,
@@ -926,12 +933,12 @@ export function MachineDetail({
               variant="outline"
               className={
                 machine.currentStatus === "Operational"
-                  ? "bg-green-50 text-green-700 border-green-200"
+                  ? "bg-success/10 text-success border-success/30"
                   : machine.currentStatus === "Breakdown"
-                    ? "bg-red-50 text-red-700 border-red-200"
+                    ? "bg-destructive/10 text-destructive border-destructive/30"
                     : machine.currentStatus === "Under Maintenance"
-                      ? "bg-yellow-50 text-yellow-700 border-yellow-200"
-                      : "bg-gray-50 text-gray-600 border-gray-200"
+                      ? "bg-warning/15 text-warning border-warning/30"
+                      : "bg-muted text-muted-foreground border-border"
               }
             >
               {machine.currentStatus}
@@ -961,7 +968,7 @@ export function MachineDetail({
             <Button
               variant="outline"
               size="sm"
-              className="gap-1.5 border-green-300 text-green-700 hover:bg-green-50"
+              className="gap-1.5 border-success/40 text-success hover:bg-success/10"
               onClick={async () => {
                 const openSvc = (serviceRecords || []).find(
                   (r) =>
@@ -1013,14 +1020,15 @@ export function MachineDetail({
 
       {/* Machine photo + key stats row */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Photo */}
-        <div
+        {/* Photo — a real <label> wrapping the file input, not a div role
+            simulating a button: native label/input pairing gives click AND
+            keyboard (Enter/Space via the input's own focus) activation for
+            free, which the manual onClick+onKeyDown it replaces had to
+            hand-roll (and which can't correctly contain the input as a
+            <button> would, since interactive controls can't nest). */}
+        <label
           className="relative rounded-xl border overflow-hidden bg-muted/30 flex items-center justify-center cursor-pointer group"
           style={{ minHeight: 200 }}
-          onClick={() => photoInputRef.current?.click()}
-          onKeyDown={(e) => e.key === "Enter" && photoInputRef.current?.click()}
-          role="button"
-          tabIndex={0}
           title="Click to upload machine photo"
         >
           {machine.primaryImageData ? (
@@ -1047,7 +1055,7 @@ export function MachineDetail({
             className="hidden"
             onChange={handlePhotoUpload}
           />
-        </div>
+        </label>
 
         {/* Key metrics */}
         <div className="lg:col-span-2 grid grid-cols-2 sm:grid-cols-3 gap-3">
@@ -1102,7 +1110,7 @@ export function MachineDetail({
       {/* AMC / warranty alerts */}
       {amcDaysLeft !== null && amcDaysLeft <= 30 && (
         <div
-          className={`flex items-center gap-3 p-3 rounded-lg border ${amcDaysLeft < 0 ? "bg-red-50 border-red-200 text-red-700" : "bg-amber-50 border-amber-200 text-amber-700"}`}
+          className={`flex items-center gap-3 p-3 rounded-lg border ${amcDaysLeft < 0 ? "bg-destructive/10 border-destructive/30 text-destructive" : "bg-warning/15 border-warning/30 text-warning"}`}
         >
           <AlertTriangle className="w-4 h-4 shrink-0" />
           <p className="text-sm font-medium">
@@ -1388,16 +1396,16 @@ export function MachineDetail({
                     </div>
 
                     {r.breakdownCause && (
-                      <div className="text-sm bg-red-50 border border-red-100 rounded p-2">
-                        <p className="text-xs text-red-600 font-medium mb-0.5">
+                      <div className="text-sm bg-destructive/10 border border-destructive/20 rounded p-2">
+                        <p className="text-xs text-destructive font-medium mb-0.5">
                           Breakdown Cause
                         </p>
                         <p>{r.breakdownCause}</p>
                       </div>
                     )}
                     {r.resolutionDetails && (
-                      <div className="text-sm bg-green-50 border border-green-100 rounded p-2">
-                        <p className="text-xs text-green-600 font-medium mb-0.5">
+                      <div className="text-sm bg-success/10 border border-success/20 rounded p-2">
+                        <p className="text-xs text-success font-medium mb-0.5">
                           Resolution
                         </p>
                         <p>{r.resolutionDetails}</p>
@@ -1870,6 +1878,7 @@ export function MachineDetail({
               customers={drawingCustomerOptions}
               canDelete={dDelete}
               canEdit={dEdit}
+              canCreate={dCreate}
               focusedMachineId={machineId}
               onUpload={handleDrawingUpload}
               onOpen={(d) =>
@@ -2313,7 +2322,7 @@ export function MachineDetail({
             <DialogTitle>Report Breakdown — {machine.name}</DialogTitle>
           </DialogHeader>
           <div className="py-2 space-y-3">
-            <div className="flex items-center gap-2 p-3 bg-red-50 rounded-lg border border-red-100 text-red-700 text-sm">
+            <div className="flex items-center gap-2 p-3 bg-destructive/10 rounded-lg border border-destructive/20 text-destructive text-sm">
               <AlertTriangle className="w-4 h-4 shrink-0" />
               <p>
                 This will set the machine status to <strong>Breakdown</strong>{" "}

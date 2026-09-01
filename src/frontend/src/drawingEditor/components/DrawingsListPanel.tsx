@@ -86,6 +86,11 @@ interface Props {
   customers?: ProjectOption[];
   canDelete: boolean;
   canEdit: boolean;
+  /** drawings_insert RLS (database/phase-14/phase14_drawing_repository_
+   * FINAL.sql) requires drawing_editor.create specifically, not .edit —
+   * gates the "Upload Drawing" button below, which previously had no
+   * permission check at all. */
+  canCreate: boolean;
   onUpload: (
     file: File,
     ownerType: OwnerType,
@@ -145,6 +150,7 @@ export function DrawingsListPanel({
   customers = [],
   canDelete,
   canEdit,
+  canCreate,
   onUpload,
   onOpen,
   openLabel = "Open",
@@ -521,15 +527,17 @@ export function DrawingsListPanel({
           </SelectContent>
         </Select>
 
-        <Button
-          type="button"
-          size="sm"
-          className="h-8 text-xs gap-1"
-          onClick={() => fileInputRef.current?.click()}
-          data-ocid="drawing_editor.list.upload_button"
-        >
-          <Plus className="w-3.5 h-3.5" /> Upload Drawing
-        </Button>
+        {canCreate && (
+          <Button
+            type="button"
+            size="sm"
+            className="h-8 text-xs gap-1"
+            onClick={() => fileInputRef.current?.click()}
+            data-ocid="drawing_editor.list.upload_button"
+          >
+            <Plus className="w-3.5 h-3.5" /> Upload Drawing
+          </Button>
+        )}
         <input
           ref={fileInputRef}
           type="file"
@@ -1007,6 +1015,8 @@ export function DrawingsListPanel({
                         variant="ghost"
                         className="h-5 w-5 p-0"
                         onClick={() => onRemoveLink(l.id)}
+                        title="Remove link"
+                        aria-label="Remove link"
                         data-ocid={`drawing_editor.link_dialog.remove.${l.id}`}
                       >
                         <X className="w-3 h-3" />

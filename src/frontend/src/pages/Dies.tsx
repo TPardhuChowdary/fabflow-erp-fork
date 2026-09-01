@@ -58,10 +58,10 @@ const CONDITIONS: MachineCondition[] = [
 ];
 
 const STATUS_COLOR: Record<DieStatus, string> = {
-  Available: "bg-green-100 text-green-700 border-green-200",
-  "In Use": "bg-blue-100 text-blue-700 border-blue-200",
-  "Under Maintenance": "bg-yellow-100 text-yellow-700 border-yellow-200",
-  Retired: "bg-slate-100 text-slate-500 border-slate-200",
+  Available: "bg-success/10 text-success border-success/30",
+  "In Use": "bg-info/10 text-info border-info/30",
+  "Under Maintenance": "bg-warning/15 text-warning border-warning/30",
+  Retired: "bg-muted text-muted-foreground border-border",
 };
 
 export function Dies() {
@@ -367,7 +367,7 @@ export function Dies() {
           <div className="text-xs text-muted-foreground uppercase font-semibold">
             Available
           </div>
-          <div className="text-2xl font-bold mt-1 text-green-600">
+          <div className="text-2xl font-bold mt-1 text-success">
             {kpis.available}
           </div>
         </div>
@@ -375,15 +375,13 @@ export function Dies() {
           <div className="text-xs text-muted-foreground uppercase font-semibold">
             In Use
           </div>
-          <div className="text-2xl font-bold mt-1 text-blue-600">
-            {kpis.inUse}
-          </div>
+          <div className="text-2xl font-bold mt-1 text-info">{kpis.inUse}</div>
         </div>
         <div className="rounded-lg border p-4">
           <div className="text-xs text-muted-foreground uppercase font-semibold">
             Under Maintenance
           </div>
-          <div className="text-2xl font-bold mt-1 text-amber-600">
+          <div className="text-2xl font-bold mt-1 text-warning">
             {kpis.underMaintenance}
           </div>
         </div>

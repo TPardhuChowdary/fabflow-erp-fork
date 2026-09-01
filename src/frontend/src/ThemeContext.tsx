@@ -1,8 +1,10 @@
 // Phase — Multi-Theme Design System. Mirrors AuthContext.tsx's convention
 // (createContext with a safe default, a Provider component, a paired
-// useTheme() hook). Owns exactly two pieces of state: which of the 11
-// ThemePreset palettes is active, and which of light/dark/system mode is
-// active. Persisted to a single standalone localStorage key
+// useTheme() hook). Owns exactly two pieces of state: which of the 12
+// ThemePreset palettes is active (11 original + "Instrument", the
+// approved Phase 3 Visual System Lab recommendation — see
+// scripts/generate-theme-tokens.mjs), and which of light/dark/system
+// mode is active. Persisted to a single standalone localStorage key
 // ("fabflow-theme") — deliberately NOT folded into the existing Zustand
 // `fabflow-erp-store` persist(), since this is a UI-only client
 // preference, not application/business data (see plan §A).
@@ -25,6 +27,7 @@ import {
   DEFAULT_THEME_ID,
   THEME_PRESETS,
   type ThemePreset,
+  applyThemeFonts,
   applyThemeTokens,
   getThemePreset,
 } from "./lib/themes/tokens";
@@ -124,6 +127,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     const root = document.documentElement;
     root.classList.toggle("dark", resolved === "dark");
     applyThemeTokens(root, activePreset[resolved]);
+    applyThemeFonts(root, activePreset);
   }, [activePreset, mode]);
 
   // Only actively listen for OS scheme changes while in "system" mode -
@@ -143,6 +147,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
       const root = document.documentElement;
       root.classList.toggle("dark", resolved === "dark");
       applyThemeTokens(root, activePreset[resolved]);
+      applyThemeFonts(root, activePreset);
     };
     mql.addEventListener("change", handleChange);
     return () => mql.removeEventListener("change", handleChange);

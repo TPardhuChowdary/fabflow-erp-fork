@@ -22,6 +22,7 @@
 //     distinguishes that from a real thrown "error".
 
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
+import { normalizeBusinessName } from "@/lib/utils";
 import type { Customer } from "@/types";
 
 export type WriteStatus = "success" | "denied" | "error" | "unauthenticated";
@@ -72,7 +73,7 @@ function rowToCustomer(row: CustomerRow): Customer {
 // row's creation time).
 function toCustomerFields(c: Omit<Customer, "id" | "createdAt">) {
   return {
-    name: c.name,
+    name: normalizeBusinessName(c.name),
     contact_person: c.contactPerson || null,
     phone: c.phone || null,
     email: c.email || null,

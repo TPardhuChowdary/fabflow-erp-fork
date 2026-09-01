@@ -48,10 +48,10 @@ import { useStore } from "../store";
 const fmt = (n: number) => `₹${(Number(n) || 0).toLocaleString("en-IN")}`;
 
 const PAYABLE_STATUS_COLOR: Record<string, string> = {
-  Pending: "bg-gray-100 text-gray-600 border-gray-200",
-  Partial: "bg-amber-100 text-amber-700 border-amber-200",
-  Paid: "bg-green-100 text-green-700 border-green-200",
-  Overdue: "bg-red-100 text-red-700 border-red-200",
+  Pending: "bg-muted text-muted-foreground border-border",
+  Partial: "bg-warning/15 text-warning border-warning/30",
+  Paid: "bg-success/10 text-success border-success/30",
+  Overdue: "bg-destructive/10 text-destructive border-destructive/30",
 };
 
 const DATE_PRESETS: { value: DateRangePreset; label: string }[] = [
@@ -503,7 +503,7 @@ export function Ledger() {
               <p className="text-xs text-muted-foreground uppercase tracking-wide">
                 {accountType === "customer" ? "Total Debit" : "Total Payables"}
               </p>
-              <p className="text-lg font-bold mt-1 text-red-600">
+              <p className="text-lg font-bold mt-1 text-destructive">
                 {fmt(computation.totalDebit)}
               </p>
             </div>
@@ -511,7 +511,7 @@ export function Ledger() {
               <p className="text-xs text-muted-foreground uppercase tracking-wide">
                 {accountType === "customer" ? "Total Credit" : "Total Payments"}
               </p>
-              <p className="text-lg font-bold mt-1 text-green-600">
+              <p className="text-lg font-bold mt-1 text-success">
                 {fmt(computation.totalCredit)}
               </p>
             </div>
@@ -531,7 +531,7 @@ export function Ledger() {
                 className={cn(
                   "text-lg font-bold mt-1",
                   computation.outstanding > 0
-                    ? "text-red-600"
+                    ? "text-destructive"
                     : "text-muted-foreground",
                 )}
               >

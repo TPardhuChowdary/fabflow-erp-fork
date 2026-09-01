@@ -78,6 +78,9 @@ export function FloatingNumberToolbar({
           variant={bold ? "default" : "outline"}
           className="h-7 w-7 p-0"
           onClick={onToggleBold}
+          title="Bold"
+          aria-label="Bold"
+          aria-pressed={bold}
           data-ocid="drawing_editor.float.bold"
         >
           <Bold className="w-3.5 h-3.5" />
@@ -88,6 +91,8 @@ export function FloatingNumberToolbar({
           variant="ghost"
           className="h-7 w-7 p-0"
           onClick={onClose}
+          title="Close"
+          aria-label="Close"
           data-ocid="drawing_editor.float.close"
         >
           <X className="w-3.5 h-3.5" />

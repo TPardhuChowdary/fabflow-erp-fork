@@ -213,7 +213,7 @@ export function ProductionStageInspectionControl({
           ) : (
             <Badge
               variant="outline"
-              className="text-[11px] gap-1 border-blue-300 bg-blue-50 text-blue-700"
+              className="text-[11px] gap-1 border-info/30 bg-info/10 text-info"
             >
               Inspection Required: {linked.libraryInspectionName}
             </Badge>
@@ -251,7 +251,7 @@ export function ProductionStageInspectionControl({
                 type="button"
                 size="sm"
                 variant="ghost"
-                className="h-6 px-2 text-[11px] text-red-600 hover:text-red-700"
+                className="h-6 px-2 text-[11px] text-destructive hover:text-destructive/80"
                 disabled={saving}
                 onClick={handleRemoveLink}
               >

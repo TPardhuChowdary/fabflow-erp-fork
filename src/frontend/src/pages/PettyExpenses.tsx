@@ -1026,10 +1026,14 @@ function PettyExpensesInner({
         }
       }
       if (returned > 0) {
-        const newReturnedAmount = f.returnedAmount + returned;
+        // settleExpenseFloatRemote takes the delta being returned in this
+        // action (matching settleForm.returnedAmount / `returned` above)
+        // and applies it atomically server-side — never compute an
+        // absolute new total from local state here (see the function's
+        // own header comment for why that used to be a lost-update race).
         const settleResult = await settleExpenseFloatRemote(
           settleTargetId,
-          newReturnedAmount,
+          returned,
           settleForm.notes,
         );
         if (settleResult.status === "unauthenticated") {
@@ -1153,8 +1157,8 @@ function PettyExpensesInner({
 
   const historyToneClass: Record<string, string> = {
     default: "bg-muted text-muted-foreground hover:bg-muted",
-    success: "bg-green-100 text-green-700 hover:bg-green-100",
-    warning: "bg-amber-100 text-amber-700 hover:bg-amber-100",
+    success: "bg-success/10 text-success hover:bg-success/10",
+    warning: "bg-warning/15 text-warning hover:bg-warning/15",
   };
 
   const historyTabContent = (
@@ -1500,7 +1504,7 @@ function PettyExpensesInner({
                 <p className="text-xs text-muted-foreground uppercase tracking-wide">
                   Company Expenses
                 </p>
-                <p className="text-2xl font-bold mt-1 text-blue-600">
+                <p className="text-2xl font-bold mt-1 text-info">
                   {fmt(totalCompany)}
                 </p>
                 <p className="text-xs text-muted-foreground mt-0.5">
@@ -1513,7 +1517,7 @@ function PettyExpensesInner({
                 <p className="text-xs text-muted-foreground uppercase tracking-wide">
                   Personal Expenses
                 </p>
-                <p className="text-2xl font-bold mt-1 text-orange-600">
+                <p className="text-2xl font-bold mt-1 text-warning">
                   {fmt(totalPersonal)}
                 </p>
                 <p className="text-xs text-muted-foreground mt-0.5">
@@ -1526,7 +1530,7 @@ function PettyExpensesInner({
                 <p className="text-xs text-muted-foreground uppercase tracking-wide">
                   Open Floats
                 </p>
-                <p className="text-2xl font-bold mt-1 text-amber-600">
+                <p className="text-2xl font-bold mt-1 text-destructive">
                   {fmt(totalOpenFloat)}
                 </p>
                 <p className="text-xs text-muted-foreground mt-0.5">
@@ -1597,8 +1601,8 @@ function PettyExpensesInner({
                             <Badge
                               className={
                                 expense.expenseMode === "Company Expense"
-                                  ? "bg-blue-100 text-blue-700 hover:bg-blue-100"
-                                  : "bg-orange-100 text-orange-700 hover:bg-orange-100"
+                                  ? "bg-info/10 text-info hover:bg-info/10"
+                                  : "bg-warning/15 text-warning hover:bg-warning/15"
                               }
                             >
                               {expense.expenseMode}
@@ -1698,8 +1702,8 @@ function PettyExpensesInner({
                         <Badge
                           className={
                             expense.expenseMode === "Company Expense"
-                              ? "bg-blue-100 text-blue-700 hover:bg-blue-100 text-xs"
-                              : "bg-orange-100 text-orange-700 hover:bg-orange-100 text-xs"
+                              ? "bg-info/10 text-info hover:bg-info/10 text-xs"
+                              : "bg-warning/15 text-warning hover:bg-warning/15 text-xs"
                           }
                         >
                           {expense.expenseMode}
@@ -1799,13 +1803,13 @@ function PettyExpensesInner({
                           <TableCell className="font-medium">
                             {eb.employee.name}
                           </TableCell>
-                          <TableCell className="text-right font-semibold text-amber-600">
+                          <TableCell className="text-right font-semibold text-warning">
                             {eb.cashHeld > 0 ? fmt(eb.cashHeld) : "-"}
                           </TableCell>
                           <TableCell className="text-right">
                             {fmt(eb.companySpent)}
                           </TableCell>
-                          <TableCell className="text-right text-orange-600">
+                          <TableCell className="text-right text-warning">
                             {eb.personalDue > 0 ? fmt(eb.personalDue) : "-"}
                           </TableCell>
                         </TableRow>
@@ -1828,7 +1832,7 @@ function PettyExpensesInner({
             <CardHeader>
               <div className="flex items-center justify-between">
                 <CardTitle className="text-base flex items-center gap-2">
-                  <Banknote className="w-4 h-4 text-amber-600" />
+                  <Banknote className="w-4 h-4 text-warning" />
                   Expense Floats
                 </CardTitle>
                 {canIssueFloat && (
@@ -1891,23 +1895,23 @@ function PettyExpensesInner({
                         <TableCell className="text-right font-semibold">
                           {fmt(f.issuedAmount)}
                         </TableCell>
-                        <TableCell className="text-right text-red-600">
+                        <TableCell className="text-right text-destructive">
                           {fmt(f.spentAmount)}
                         </TableCell>
-                        <TableCell className="text-right text-green-600">
+                        <TableCell className="text-right text-success">
                           {fmt(f.returnedAmount)}
                         </TableCell>
-                        <TableCell className="text-right font-bold text-amber-600">
+                        <TableCell className="text-right font-bold text-warning">
                           {fmt(f.balanceAmount)}
                         </TableCell>
                         <TableCell>
                           <Badge
                             className={
                               f.status === "Fully Settled"
-                                ? "bg-green-100 text-green-700 hover:bg-green-100"
+                                ? "bg-success/10 text-success hover:bg-success/10"
                                 : f.status === "Partially Settled"
-                                  ? "bg-amber-100 text-amber-700 hover:bg-amber-100"
-                                  : "bg-blue-100 text-blue-700 hover:bg-blue-100"
+                                  ? "bg-warning/15 text-warning hover:bg-warning/15"
+                                  : "bg-info/10 text-info hover:bg-info/10"
                             }
                           >
                             {f.status}
@@ -1919,7 +1923,7 @@ function PettyExpensesInner({
                               <button
                                 type="button"
                                 onClick={() => openSettle(f.id)}
-                                className="text-amber-600 hover:text-amber-700"
+                                className="text-warning hover:text-warning/80"
                                 title="Settle Float"
                               >
                                 <CheckCircle2 className="w-4 h-4" />
@@ -2124,21 +2128,21 @@ function PettyExpensesInner({
                     <span className="text-muted-foreground">
                       Already spent:
                     </span>
-                    <span className="text-red-600">{fmt(f.spentAmount)}</span>
+                    <span className="text-destructive">
+                      {fmt(f.spentAmount)}
+                    </span>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-muted-foreground">
                       Already returned:
                     </span>
-                    <span className="text-green-600">
+                    <span className="text-success">
                       {fmt(f.returnedAmount)}
                     </span>
                   </div>
                   <div className="flex justify-between font-semibold border-t pt-1 mt-1">
                     <span>Balance:</span>
-                    <span className="text-amber-600">
-                      {fmt(f.balanceAmount)}
-                    </span>
+                    <span className="text-warning">{fmt(f.balanceAmount)}</span>
                   </div>
                 </div>
 
@@ -2571,9 +2575,7 @@ function PettyExpensesInner({
                   </div>
                   <div className="flex justify-between text-sm font-semibold">
                     <span>Remaining Float</span>
-                    <span className="text-amber-600">
-                      {fmt(remainingFloat)}
-                    </span>
+                    <span className="text-warning">{fmt(remainingFloat)}</span>
                   </div>
                 </div>
 
@@ -2795,7 +2797,6 @@ function PettyExpensesInner({
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                console.log("FORM SUBMITTED");
                 handleSave();
               }}
             >

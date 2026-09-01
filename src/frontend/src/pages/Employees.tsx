@@ -54,11 +54,15 @@ import { useStore } from "../store";
 import type { Employee, EmploymentType, UserRole } from "../types";
 import { uploadPhoto } from "../utils/photoStorage";
 
+// Same chart-token role-identity mapping as components/Layout.tsx's
+// ROLE_BADGE — one consistent set of role colors across the whole app,
+// not the severity (success/warning/destructive) set, since a role isn't
+// good or bad.
 const ROLE_COLORS: Record<string, string> = {
-  Admin: "bg-red-100 text-red-700",
-  Accountant: "bg-blue-100 text-blue-700",
-  Designer: "bg-purple-100 text-purple-700",
-  Worker: "bg-green-100 text-green-700",
+  Admin: "bg-chart-4/15 text-chart-4",
+  Accountant: "bg-chart-2/15 text-chart-2",
+  Designer: "bg-chart-5/15 text-chart-5",
+  Worker: "bg-chart-3/15 text-chart-3",
 };
 
 // A joining date has no business being more than a year out — catches a
@@ -174,7 +178,6 @@ export function Employees({ onViewEmployee }: Props) {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    console.log("FORM SUBMITTED");
     if (isSaving) return;
     setIsSaving(true);
     try {
@@ -313,7 +316,6 @@ export function Employees({ onViewEmployee }: Props) {
     }
 
     addEmployee(newEmp);
-    console.log("SAVE COMPLETE");
     toast.success(`Employee ${newEmp.name} added`);
     setDialogOpen(false);
     setPhotoFile(null);
@@ -373,7 +375,6 @@ export function Employees({ onViewEmployee }: Props) {
 
   const handleEditSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    console.log("FORM SUBMITTED");
     if (isEditSaving) return;
     setIsEditSaving(true);
     try {
@@ -463,7 +464,6 @@ export function Employees({ onViewEmployee }: Props) {
     // Preserve the local-only userId link (no DB representation - Phase
     // 18A/18B mapping) since the returned row can't carry it.
     updateEmployee({ ...result.data, userId: editingEmployee.userId });
-    console.log("SAVE COMPLETE");
     toast.success("Employee updated");
     setEditDialogOpen(false);
     setEditingEmployee(null);

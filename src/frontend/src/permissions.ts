@@ -48,6 +48,11 @@ export const MODULE_PERMISSIONS: Record<
     category: "Production",
     actions: ["view", "create", "edit", "delete"],
   },
+  job_cards: {
+    label: "Job Cards",
+    category: "Production",
+    actions: ["view", "create", "edit", "delete"],
+  },
   material_requisitions: {
     label: "Material Requisitions",
     category: "Production",
@@ -205,6 +210,19 @@ export const MODULE_PERMISSIONS: Record<
       "deactivate",
       "assign_roles",
     ],
+  },
+  // security_audit_log's own RLS (phase1_auth_permissions_rls_v5_FINAL.sql)
+  // already gates on has_permission('audit_log','view') and agent/audit.ts
+  // already writes to it via log_security_event() — this entry was simply
+  // missing from the frontend registry, same class of gap as `users`
+  // above, so nothing could ever check or grant this permission and no
+  // viewer existed. No ROLE_DEFAULTS grants it by default (matches
+  // inspection_sheets.override's convention above) - only admin (which
+  // bypasses all checks) has it until explicitly assigned to a user.
+  audit_log: {
+    label: "Security Audit Log",
+    category: "System",
+    actions: ["view"],
   },
 };
 
@@ -401,6 +419,21 @@ export function canDelete(
   moduleKey: string,
 ): boolean {
   return hasPermission(user, `${moduleKey}.delete`);
+}
+
+// Monster-1 — for modules whose RLS policy gates a specific write on
+// "approve" rather than the general "edit" (e.g. bom_requisitions_approve
+// requires material_requisitions.approve, not .edit). Under every current
+// ROLE_DEFAULTS entry this is a no-op (either both are granted via a
+// wildcard, or neither is), but it matters for orgs with custom per-user
+// permission overrides — without this, a user given .edit but not
+// .approve would see the action's button/Agent action succeed the
+// permission gate and then be silently denied by RLS.
+export function canApprove(
+  user: { role?: string; permissions?: Record<string, boolean> } | null,
+  moduleKey: string,
+): boolean {
+  return hasPermission(user, `${moduleKey}.approve`);
 }
 
 export function canUpload(

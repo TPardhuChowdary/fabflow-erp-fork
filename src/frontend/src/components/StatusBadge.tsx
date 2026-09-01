@@ -1,45 +1,51 @@
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
+// Every raw hue collapses onto the app's 5 semantic tokens (success /
+// warning / destructive / info / muted) — purple/indigo statuses (Quoted,
+// ReadyToDispatch, Dispatched, Ordered) read as "communicated/in transit"
+// so they share the info token with the blue statuses; each status list
+// renders in its own view, so token reuse across unrelated flows never
+// puts two same-colored badges side by side.
 const colorMap: Record<string, string> = {
   // Enquiry
-  New: "bg-blue-100 text-blue-700 border-blue-200",
-  InProgress: "bg-amber-100 text-amber-700 border-amber-200",
-  Quoted: "bg-purple-100 text-purple-700 border-purple-200",
-  Closed: "bg-gray-100 text-gray-600 border-gray-200",
+  New: "bg-info/10 text-info border-info/30",
+  InProgress: "bg-warning/15 text-warning border-warning/30",
+  Quoted: "bg-info/10 text-info border-info/30",
+  Closed: "bg-muted text-muted-foreground border-border",
   // Quotation
-  Draft: "bg-gray-100 text-gray-600 border-gray-200",
-  Sent: "bg-blue-100 text-blue-700 border-blue-200",
-  Accepted: "bg-green-100 text-green-700 border-green-200",
-  Rejected: "bg-red-100 text-red-700 border-red-200",
+  Draft: "bg-muted text-muted-foreground border-border",
+  Sent: "bg-info/10 text-info border-info/30",
+  Accepted: "bg-success/10 text-success border-success/30",
+  Rejected: "bg-destructive/10 text-destructive border-destructive/30",
   // PO
-  Received: "bg-blue-100 text-blue-700 border-blue-200",
-  Confirmed: "bg-green-100 text-green-700 border-green-200",
-  Cancelled: "bg-red-100 text-red-700 border-red-200",
+  Received: "bg-info/10 text-info border-info/30",
+  Confirmed: "bg-success/10 text-success border-success/30",
+  Cancelled: "bg-destructive/10 text-destructive border-destructive/30",
   // SO
-  Open: "bg-blue-100 text-blue-700 border-blue-200",
-  InProduction: "bg-amber-100 text-amber-700 border-amber-200",
-  ReadyToDispatch: "bg-purple-100 text-purple-700 border-purple-200",
-  Dispatched: "bg-indigo-100 text-indigo-700 border-indigo-200",
+  Open: "bg-info/10 text-info border-info/30",
+  InProduction: "bg-warning/15 text-warning border-warning/30",
+  ReadyToDispatch: "bg-info/10 text-info border-info/30",
+  Dispatched: "bg-info/10 text-info border-info/30",
   // Stage
-  Pending: "bg-gray-100 text-gray-500 border-gray-200",
-  Complete: "bg-green-100 text-green-700 border-green-200",
+  Pending: "bg-muted text-muted-foreground border-border",
+  Complete: "bg-success/10 text-success border-success/30",
   // QC
-  Pass: "bg-green-100 text-green-700 border-green-200",
-  Fail: "bg-red-100 text-red-700 border-red-200",
-  Rework: "bg-orange-100 text-orange-700 border-orange-200",
+  Pass: "bg-success/10 text-success border-success/30",
+  Fail: "bg-destructive/10 text-destructive border-destructive/30",
+  Rework: "bg-warning/15 text-warning border-warning/30",
   // MR
-  Approved: "bg-green-100 text-green-700 border-green-200",
-  Ordered: "bg-indigo-100 text-indigo-700 border-indigo-200",
-  Fulfilled: "bg-green-100 text-green-700 border-green-200",
-  Raised: "bg-blue-100 text-blue-700 border-blue-200",
+  Approved: "bg-success/10 text-success border-success/30",
+  Ordered: "bg-info/10 text-info border-info/30",
+  Fulfilled: "bg-success/10 text-success border-success/30",
+  Raised: "bg-info/10 text-info border-info/30",
   // DC
-  Prepared: "bg-amber-100 text-amber-700 border-amber-200",
-  Delivered: "bg-green-100 text-green-700 border-green-200",
+  Prepared: "bg-warning/15 text-warning border-warning/30",
+  Delivered: "bg-success/10 text-success border-success/30",
   // Invoice
-  Unpaid: "bg-red-100 text-red-700 border-red-200",
-  PartiallyPaid: "bg-amber-100 text-amber-700 border-amber-200",
-  Paid: "bg-green-100 text-green-700 border-green-200",
+  Unpaid: "bg-destructive/10 text-destructive border-destructive/30",
+  PartiallyPaid: "bg-warning/15 text-warning border-warning/30",
+  Paid: "bg-success/10 text-success border-success/30",
 };
 
 export function StatusBadge({ status }: { status: string }) {
@@ -48,7 +54,7 @@ export function StatusBadge({ status }: { status: string }) {
       variant="outline"
       className={cn(
         "text-xs font-medium px-2 py-0.5",
-        colorMap[status] ?? "bg-gray-100 text-gray-600",
+        colorMap[status] ?? "bg-muted text-muted-foreground",
       )}
     >
       {status === "InProgress"

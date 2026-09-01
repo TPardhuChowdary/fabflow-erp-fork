@@ -30,6 +30,11 @@ import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
 import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import { ProjectSelect } from "../components/ProjectSelect";
+import {
+  createScrapRecordRemote,
+  deleteScrapRecordRemote,
+  updateScrapRecordRemote,
+} from "../lib/scrapApi";
 import { canCreate, canDelete, canEdit, canView } from "../permissions";
 import { useStore } from "../store";
 import type { ScrapRecord, ScrapStatus } from "../types";
@@ -75,35 +80,92 @@ export function ScrapManagement() {
     setShowForm(true);
   }
 
-  function handleSave() {
+  const [isSaving, setIsSaving] = useState(false);
+
+  // Monster-1 — remote-first, same shape as every other <domain>Api.ts
+  // caller in this codebase: the write goes to Supabase first, and only
+  // the server-confirmed row is written into local state. id/createdAt
+  // are now server-generated, never fabricated here.
+  async function handleSave() {
+    if (isSaving) return;
     if (!form.materialType?.trim()) {
       toast.error("Material type required");
       return;
     }
-    if (editing) {
-      updateScrapRecord({ ...editing, ...form } as ScrapRecord);
-      toast.success("Scrap record updated");
-    } else {
-      addScrapRecord({
-        id: crypto.randomUUID(),
-        materialType: form.materialType ?? "",
-        unit: form.unit ?? "kg",
-        generatedQty: form.generatedQty ?? 0,
-        reusableQty: form.reusableQty ?? 0,
-        soldQty: form.soldQty ?? 0,
-        disposedQty: form.disposedQty ?? 0,
-        scrapValue: form.scrapValue,
-        status: form.status ?? "In Stock",
-        projectId: form.projectId,
-        projectName: projects.find((p) => p.id === form.projectId)?.projectName,
-        stage: form.stage,
-        notes: form.notes,
-        recordedBy: currentUser?.username ?? "unknown",
-        createdAt: Date.now(),
-      });
-      toast.success("Scrap record added");
+    setIsSaving(true);
+    try {
+      if (editing) {
+        const result = await updateScrapRecordRemote({
+          id: editing.id,
+          materialType: form.materialType ?? "",
+          unit: form.unit ?? "kg",
+          generatedQty: form.generatedQty ?? 0,
+          reusableQty: form.reusableQty ?? 0,
+          soldQty: form.soldQty ?? 0,
+          disposedQty: form.disposedQty ?? 0,
+          scrapValue: form.scrapValue,
+          status: form.status ?? "In Stock",
+          projectId: form.projectId,
+          stage: form.stage,
+          notes: form.notes,
+          recordedBy: editing.recordedBy,
+        });
+        if (result.status === "unauthenticated") {
+          toast.error("Not signed in to the server - record was not saved");
+          return;
+        }
+        if (result.status === "denied" || result.status === "error") {
+          toast.error(result.error ?? "Could not update scrap record");
+          return;
+        }
+        if (!result.data) {
+          toast.error("Could not update scrap record");
+          return;
+        }
+        updateScrapRecord({
+          ...result.data,
+          projectName: projects.find((p) => p.id === result.data?.projectId)
+            ?.projectName,
+        });
+        toast.success("Scrap record updated");
+      } else {
+        const result = await createScrapRecordRemote({
+          materialType: form.materialType ?? "",
+          unit: form.unit ?? "kg",
+          generatedQty: form.generatedQty ?? 0,
+          reusableQty: form.reusableQty ?? 0,
+          soldQty: form.soldQty ?? 0,
+          disposedQty: form.disposedQty ?? 0,
+          scrapValue: form.scrapValue,
+          status: form.status ?? "In Stock",
+          projectId: form.projectId,
+          stage: form.stage,
+          notes: form.notes,
+          recordedBy: currentUser?.username ?? "unknown",
+        });
+        if (result.status === "unauthenticated") {
+          toast.error("Not signed in to the server - record was not saved");
+          return;
+        }
+        if (result.status === "denied" || result.status === "error") {
+          toast.error(result.error ?? "Could not save scrap record");
+          return;
+        }
+        if (!result.data) {
+          toast.error("Could not save scrap record");
+          return;
+        }
+        addScrapRecord({
+          ...result.data,
+          projectName: projects.find((p) => p.id === result.data?.projectId)
+            ?.projectName,
+        });
+        toast.success("Scrap record added");
+      }
+      setShowForm(false);
+    } finally {
+      setIsSaving(false);
     }
-    setShowForm(false);
   }
 
   // KPIs
@@ -133,7 +195,7 @@ export function ScrapManagement() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="flex items-center justify-center w-9 h-9 rounded-lg bg-orange-100 text-orange-600">
+          <div className="flex items-center justify-center w-9 h-9 rounded-lg bg-primary/10 text-primary">
             <Package className="w-5 h-5" />
           </div>
           <div>
@@ -162,7 +224,7 @@ export function ScrapManagement() {
           <p className="text-xs text-muted-foreground uppercase tracking-wide">
             Reusable
           </p>
-          <p className="text-2xl font-bold mt-1 text-green-600">
+          <p className="text-2xl font-bold mt-1 text-success">
             {totalReusable} kg
           </p>
         </div>
@@ -170,15 +232,13 @@ export function ScrapManagement() {
           <p className="text-xs text-muted-foreground uppercase tracking-wide">
             Sold
           </p>
-          <p className="text-2xl font-bold mt-1 text-blue-600">
-            {totalSold} kg
-          </p>
+          <p className="text-2xl font-bold mt-1 text-info">{totalSold} kg</p>
         </div>
         <div className="rounded-lg border bg-card p-4">
           <p className="text-xs text-muted-foreground uppercase tracking-wide">
             Scrap Value
           </p>
-          <p className="text-2xl font-bold mt-1 text-amber-600">
+          <p className="text-2xl font-bold mt-1 text-warning">
             {fmt(totalValue)}
           </p>
         </div>
@@ -223,7 +283,12 @@ export function ScrapManagement() {
                     {r.materialType}
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
-                    {r.projectName || "—"}
+                    {/* Fallback resolves live in case hydration set this
+                        before projects had hydrated too — see
+                        setScrapRecordsFromServer in store.ts. */}
+                    {r.projectName ||
+                      projects.find((p) => p.id === r.projectId)?.projectName ||
+                      "—"}
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">
                     {r.stage || "—"}
@@ -231,10 +296,10 @@ export function ScrapManagement() {
                   <TableCell className="text-sm">
                     {r.generatedQty} {r.unit}
                   </TableCell>
-                  <TableCell className="text-sm text-green-600">
+                  <TableCell className="text-sm text-success">
                     {r.reusableQty} {r.unit}
                   </TableCell>
-                  <TableCell className="text-sm text-blue-600">
+                  <TableCell className="text-sm text-info">
                     {r.soldQty} {r.unit}
                   </TableCell>
                   <TableCell className="text-sm">
@@ -243,7 +308,7 @@ export function ScrapManagement() {
                   <TableCell>
                     <Badge
                       variant="outline"
-                      className={`text-xs ${r.status === "In Stock" ? "bg-green-50 text-green-700 border-green-200" : r.status === "Sold" ? "bg-blue-50 text-blue-700 border-blue-200" : "bg-gray-50 text-gray-600 border-gray-200"}`}
+                      className={`text-xs ${r.status === "In Stock" ? "bg-success/10 text-success border-success/30" : r.status === "Sold" ? "bg-info/10 text-info border-info/30" : "bg-muted text-muted-foreground border-border"}`}
                     >
                       {r.status}
                     </Badge>
@@ -255,6 +320,8 @@ export function ScrapManagement() {
                         size="icon"
                         className="h-7 w-7 text-destructive hover:text-destructive"
                         onClick={() => setDeleteTarget(r)}
+                        title="Delete"
+                        aria-label="Delete"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </Button>
@@ -413,8 +480,23 @@ export function ScrapManagement() {
         onOpenChange={(o) => !o && setDeleteTarget(null)}
         title="Delete scrap record?"
         description="This scrap record will be permanently deleted."
-        onConfirm={() => {
-          if (deleteTarget) deleteScrapRecord(deleteTarget.id);
+        onConfirm={async () => {
+          if (deleteTarget) {
+            const result = await deleteScrapRecordRemote(deleteTarget.id);
+            if (result.status === "unauthenticated") {
+              toast.error(
+                "Not signed in to the server - record was not deleted",
+              );
+            } else if (
+              result.status === "denied" ||
+              result.status === "error"
+            ) {
+              toast.error(result.error ?? "Could not delete scrap record");
+            } else {
+              deleteScrapRecord(deleteTarget.id);
+              toast.success("Scrap record deleted");
+            }
+          }
           setDeleteTarget(null);
         }}
       />

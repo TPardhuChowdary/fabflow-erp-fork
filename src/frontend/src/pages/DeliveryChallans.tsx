@@ -44,6 +44,7 @@ import { useAuth } from "../AuthContext";
 import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import { DeliveryChallanPrintView } from "../components/DeliveryChallanPrintView";
 import { StatusBadge } from "../components/StatusBadge";
+import { RowActions } from "../components/ui/row-actions";
 import { SearchableSelect } from "../components/ui/searchable-select";
 import { ChallanDocContent } from "../lib/documentRenderers";
 import {
@@ -724,22 +725,30 @@ export function DeliveryChallans() {
         return;
       }
       const dcNo = dcNoToUse;
-      const result = await createDeliveryChallanRemote({
-        dcNo,
-        customerId: form.customerId,
-        projectEntries,
-        ...buildDispatchFields(form.dispatchMethod, form),
-        dispatchDate: form.dispatchDate,
-        receiverName: form.receiverName,
-        status: "Prepared",
-        items: [],
-        deliveryAddress: {
-          type: form.useCustomerAddress ? "customer" : "custom",
-          value: form.useCustomerAddress
-            ? selectedCustomer?.address || ""
-            : form.customDeliveryAddress,
+      const result = await createDeliveryChallanRemote(
+        {
+          dcNo,
+          customerId: form.customerId,
+          projectEntries,
+          ...buildDispatchFields(form.dispatchMethod, form),
+          dispatchDate: form.dispatchDate,
+          receiverName: form.receiverName,
+          status: "Prepared",
+          items: [],
+          deliveryAddress: {
+            type: form.useCustomerAddress ? "customer" : "custom",
+            value: form.useCustomerAddress
+              ? selectedCustomer?.address || ""
+              : form.customDeliveryAddress,
+          },
         },
-      });
+        // The user only typed a specific number if dcNumber (the raw form
+        // field) is non-empty - an untouched field falls back to
+        // previewDcNo() above, so it's safe to silently retry with a
+        // fresh server-derived number on a real collision. A number the
+        // user deliberately typed must not be silently swapped out.
+        { autoRenumberOnConflict: dcNumber.trim() === "" },
+      );
 
       if (result.status === "unauthenticated") {
         toast.error("You must be signed in to create a delivery challan");
@@ -756,7 +765,7 @@ export function DeliveryChallans() {
 
       addDeliveryChallan(result.data);
 
-      toast.success(`Delivery Challan ${dcNo} created`);
+      toast.success(`Delivery Challan ${result.data.dcNo} created`);
       setOpen(false);
       setForm(emptyForm());
       setDcNumber("");
@@ -881,82 +890,91 @@ export function DeliveryChallans() {
                         onClick={(e) => e.stopPropagation()}
                         onKeyDown={(e) => e.stopPropagation()}
                       >
-                        {/* Eye — View */}
-                        <button
-                          type="button"
-                          title="View"
-                          className="p-1 rounded hover:bg-muted text-blue-600"
-                          onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            openPreview(dc);
-                          }}
-                          data-ocid={`delivery_challans.view.button.${i + 1}`}
-                        >
-                          <Eye className="w-4 h-4" />
-                        </button>
-
-                        {/* Edit */}
-                        {pEdit && (
-                          <button
-                            type="button"
-                            title="Edit"
-                            className="p-1 rounded hover:bg-muted text-gray-600"
-                            onClick={() => handleOpenEdit(dc)}
-                            data-ocid={`delivery_challans.edit_button.${i + 1}`}
-                          >
-                            <Pencil className="w-4 h-4" />
-                          </button>
-                        )}
-
-                        {/* Print */}
-                        {pPrint && (
-                          <button
-                            type="button"
-                            title="Print"
-                            className="p-1 rounded hover:bg-muted text-gray-600"
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              handlePrint(dc);
-                            }}
-                            data-ocid={`delivery_challans.print.button.${i + 1}`}
-                          >
-                            <Printer className="w-4 h-4" />
-                          </button>
-                        )}
-
-                        {/* Download */}
-                        {pDownload && (
-                          <button
-                            type="button"
-                            title="Download PDF"
-                            className="p-1 rounded hover:bg-muted text-gray-600"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDownload(dc);
-                            }}
-                            data-ocid={`delivery_challans.download.button.${i + 1}`}
-                          >
-                            <Download className="w-4 h-4" />
-                          </button>
-                        )}
-
-                        {/* Share */}
-                        {pShare && (
-                          <button
-                            type="button"
-                            title="Share"
-                            className="p-1 rounded hover:bg-muted text-green-600"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleShare(dc);
-                            }}
-                            data-ocid={`delivery_challans.share.button.${i + 1}`}
-                          >
-                            <Share2 className="w-4 h-4" />
-                          </button>
-                        )}
+                        {/* Component I's table-action rule: 1-2 explicit
+                            primary actions, everything else in one labeled
+                            overflow menu — this row used to be 6 bare
+                            icon-only buttons (View/Edit/Print/Download/
+                            Share/Delete) with no visible label anywhere,
+                            the exact "icon soup" pattern the blueprint's
+                            audit flagged. Every action and permission
+                            check below is the same one that existed
+                            before; only the chrome changed. */}
+                        <RowActions
+                          primary={[
+                            {
+                              label: "View",
+                              icon: Eye,
+                              onClick: () => openPreview(dc),
+                              "data-ocid": `delivery_challans.view.button.${i + 1}`,
+                            },
+                            ...(pEdit
+                              ? [
+                                  {
+                                    label: "Edit",
+                                    icon: Pencil,
+                                    onClick: () => handleOpenEdit(dc),
+                                    "data-ocid": `delivery_challans.edit_button.${i + 1}`,
+                                  },
+                                ]
+                              : []),
+                          ]}
+                          overflow={[
+                            ...(pPrint
+                              ? [
+                                  {
+                                    label: "Print",
+                                    icon: Printer,
+                                    onClick: () => handlePrint(dc),
+                                    "data-ocid": `delivery_challans.print.button.${i + 1}`,
+                                  },
+                                ]
+                              : []),
+                            ...(pDownload
+                              ? [
+                                  {
+                                    label: "Download PDF",
+                                    icon: Download,
+                                    onClick: () => handleDownload(dc),
+                                    "data-ocid": `delivery_challans.download.button.${i + 1}`,
+                                  },
+                                ]
+                              : []),
+                            ...(pShare
+                              ? [
+                                  {
+                                    label: "Share",
+                                    icon: Share2,
+                                    onClick: () => handleShare(dc),
+                                    "data-ocid": `delivery_challans.share.button.${i + 1}`,
+                                  },
+                                ]
+                              : []),
+                            ...(pDelete
+                              ? [
+                                  {
+                                    label: "Delete",
+                                    icon: Trash2,
+                                    destructive: true,
+                                    onClick: () => {
+                                      // Same real business rule as before,
+                                      // relocated verbatim, not touched.
+                                      const hasInvoices = (invoices || []).some(
+                                        (inv) => inv.dcId === dc.id,
+                                      );
+                                      if (hasInvoices) {
+                                        toast.error(
+                                          "Cannot delete delivery challan. Linked invoices exist.",
+                                        );
+                                        return;
+                                      }
+                                      setDeleteDCTarget(dc);
+                                    },
+                                    "data-ocid": `delivery_challans.delete_button.${i + 1}`,
+                                  },
+                                ]
+                              : []),
+                          ]}
+                        />
 
                         {/* Status */}
                         <Select
@@ -987,34 +1005,6 @@ export function DeliveryChallans() {
                             ))}
                           </SelectContent>
                         </Select>
-
-                        {/* Delete */}
-                        {pDelete && (
-                          <button
-                            type="button"
-                            title="Delete"
-                            className="p-1 rounded hover:bg-muted text-red-500"
-                            onClick={() => {
-                              // Relocated from the store's deleteDeliveryChallan
-                              // action (now a pure local sync) - this is still
-                              // a local business rule, checked before even
-                              // offering the confirm dialog.
-                              const hasInvoices = (invoices || []).some(
-                                (inv) => inv.dcId === dc.id,
-                              );
-                              if (hasInvoices) {
-                                toast.error(
-                                  "Cannot delete delivery challan. Linked invoices exist.",
-                                );
-                                return;
-                              }
-                              setDeleteDCTarget(dc);
-                            }}
-                            data-ocid={`delivery_challans.delete_button.${i + 1}`}
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        )}
                       </div>
                     </TableCell>
                   </TableRow>
@@ -1075,7 +1065,6 @@ export function DeliveryChallans() {
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                console.log("FORM SUBMITTED");
                 handleSaveEdit();
               }}
             >
@@ -1424,7 +1413,6 @@ export function DeliveryChallans() {
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              console.log("FORM SUBMITTED");
               handleSave();
             }}
           >
@@ -1573,12 +1561,12 @@ export function DeliveryChallans() {
                                 <TableCell className="text-xs font-medium">
                                   {getCustomerVisibleName(p)}
                                   {p.internalOrderCode && (
-                                    <span className="ml-1 font-mono text-[10px] text-amber-600">
+                                    <span className="ml-1 font-mono text-[10px] text-warning">
                                       ({p.internalOrderCode})
                                     </span>
                                   )}
                                   {p.totalQty == null && (
-                                    <span className="ml-1 text-amber-600">
+                                    <span className="ml-1 text-warning">
                                       (\u26A0 no total qty)
                                     </span>
                                   )}

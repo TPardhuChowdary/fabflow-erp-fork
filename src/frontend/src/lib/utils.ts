@@ -7,6 +7,29 @@ export function cn(...inputs: ClassValue[]): string {
 }
 
 /**
+ * Normalizes a business/entity name for consistent storage and display:
+ * trims surrounding whitespace and uppercases. Applied once, at the API
+ * write boundary (see customersApi.ts, vendorsApi.ts, projectsApi.ts,
+ * inventoryApi.ts's toXFields() functions — the single place every
+ * create AND update already funnels through), so "metal rods" /
+ * "Metal Rods" / "METAL RODS" always end up stored as the same value
+ * instead of drifting per how each user happened to type it. Existing
+ * case-insensitive duplicate checks elsewhere in the app (store.ts,
+ * VendorSelect.tsx, MaterialDetailDrawer.tsx) are unaffected — they
+ * lowercase both sides before comparing, which still works the same way
+ * against normalized values.
+ *
+ * Deliberately narrow in scope: only for company/customer/vendor/project/
+ * product-item names. Never apply this to email addresses, personal
+ * (employee) names, free-text fields (notes/descriptions/remarks/work
+ * descriptions), URLs, or file names — excluded on purpose, not by
+ * oversight.
+ */
+export function normalizeBusinessName(name: string): string {
+  return name.trim().toUpperCase();
+}
+
+/**
  * Returns the customer-visible project name.
  * ALWAYS use this for invoices, quotations, DCs, PDFs, exports — never show internal ORD-xxx codes.
  * Falls back to projectName for backward compatibility with existing data.

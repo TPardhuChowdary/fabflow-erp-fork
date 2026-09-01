@@ -1,4 +1,10 @@
 import {
+  DEFAULT_VOICE_LANGUAGE,
+  SUPPORTED_VOICE_LANGUAGES,
+  isSpeechRecognitionSupported,
+  isSpeechSynthesisSupported,
+} from "@/agent/voice";
+import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -29,20 +35,24 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import {
   AlertTriangle,
+  Bot,
   Building2,
   CheckCircle2,
   Copy,
   Edit2,
   Eye,
+  History,
   Info,
   Loader2,
   Lock,
   Mail,
   MessageSquare,
+  Mic,
   Monitor,
   Moon,
   Palette,
@@ -53,6 +63,7 @@ import {
   Shield,
   Sun,
   UserCog,
+  Volume2,
   XCircle,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -83,9 +94,11 @@ import {
 } from "../lib/qmsInspectionsMigration";
 import {
   type OrgUserRow,
+  type SecurityAuditLogEntry,
   createOrgUser,
   getRoleDefaultPermissions,
   listOrgUsers,
+  listSecurityAuditLog,
   listUserOverrides,
   saveUserOverrides,
   setUserActive,
@@ -131,6 +144,27 @@ export function Settings() {
     twilioFromNumber: settings.twilioFromNumber,
   });
 
+  // AI Agent redesign (see chat) — the assistant's configurable display
+  // name plus voice settings. Same local-form + Save pattern as Company
+  // Profile above; AgentPage.tsx reads these fields directly from the
+  // store (no new context/mechanism), falling back to sane defaults
+  // (name "FabFlow Copilot", voice off, browser default language) when
+  // unset.
+  const [aiAssistantForm, setAiAssistantForm] = useState({
+    aiAssistantName: settings.aiAssistantName || "",
+    voiceEnabled: settings.voiceEnabled ?? false,
+    voiceInputLanguage: settings.voiceInputLanguage || DEFAULT_VOICE_LANGUAGE,
+    voiceOutputLanguage: settings.voiceOutputLanguage || DEFAULT_VOICE_LANGUAGE,
+    autoSpeakResponses: settings.autoSpeakResponses ?? false,
+  });
+  // AI Agent redesign (see chat) — computed once per render from the
+  // actual browser capability, not a stored setting: a control for a
+  // capability this browser genuinely lacks is disabled with an
+  // explanatory note rather than silently offered.
+  const sttSupported = isSpeechRecognitionSupported();
+  const ttsSupported = isSpeechSynthesisSupported();
+  const speechSupported = sttSupported || ttsSupported;
+
   const [emailForm, setEmailForm] = useState({
     gmailSenderEmail: settings.gmailSenderEmail,
     gmailAppPassword: settings.gmailAppPassword,
@@ -169,6 +203,18 @@ export function Settings() {
   const handleSaveCompany = () => {
     updateSettings({ ...settings, ...companyForm });
     toast.success("Company profile saved");
+  };
+
+  const handleSaveAiAssistant = () => {
+    updateSettings({
+      ...settings,
+      aiAssistantName: aiAssistantForm.aiAssistantName.trim() || undefined,
+      voiceEnabled: aiAssistantForm.voiceEnabled,
+      voiceInputLanguage: aiAssistantForm.voiceInputLanguage,
+      voiceOutputLanguage: aiAssistantForm.voiceOutputLanguage,
+      autoSpeakResponses: aiAssistantForm.autoSpeakResponses,
+    });
+    toast.success("AI Assistant settings saved");
   };
 
   const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -218,11 +264,11 @@ export function Settings() {
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
             <CardTitle className="text-sm font-semibold flex items-center gap-2">
-              <Building2 className="w-4 h-4 text-blue-600" />
+              <Building2 className="w-4 h-4 text-primary" />
               Company Profile
             </CardTitle>
             {companyConfigured ? (
-              <Badge className="bg-green-100 text-green-700 border-green-200 text-xs gap-1">
+              <Badge className="bg-success/10 text-success border-success/30 text-xs gap-1">
                 <CheckCircle2 className="w-3 h-3" /> Configured
               </Badge>
             ) : (
@@ -575,16 +621,219 @@ export function Settings() {
             className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3"
             data-ocid="settings.appearance.theme_grid"
           >
-            {themes.map((preset) => (
-              <ThemePreviewCard
-                key={preset.id}
-                preset={preset}
-                mode={resolvedMode}
-                isSelected={preset.id === themeId}
-                onSelect={() => setThemeId(preset.id)}
-              />
-            ))}
+            {themes
+              .filter((preset) => !preset.id.startsWith("style-"))
+              .map((preset) => (
+                <ThemePreviewCard
+                  key={preset.id}
+                  preset={preset}
+                  mode={resolvedMode}
+                  isSelected={preset.id === themeId}
+                  onSelect={() => setThemeId(preset.id)}
+                />
+              ))}
           </div>
+
+          {/* Style Lab comparison (see chat) — a real, separately-labeled
+              "UI Style" group, distinct from the plain accent-color grid
+              above. Same single themeId/setThemeId selection underneath
+              (this app has one active preset at a time, exactly like
+              Instrument already does) - picking a style here is mutually
+              exclusive with picking a plain accent above, not a second
+              independent axis composed on top of it. Only the 6 Style
+              Lab directions with a real, fully-defined color+font
+              identity are offered; each one's sidebar-shape/shadow
+              identity is intentionally not reproduced (would require a
+              second design system). */}
+          <div className="pt-2 border-t border-border">
+            <Label className="text-sm font-medium">UI Style</Label>
+            <p className="text-xs text-muted-foreground mb-3">
+              Named design directions from the Style Lab. Selecting one sets
+              your accent color too — pick either an accent above or a style
+              here, not both at once.
+            </p>
+            <div
+              className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3"
+              data-ocid="settings.appearance.style_grid"
+            >
+              {themes
+                .filter((preset) => preset.id.startsWith("style-"))
+                .map((preset) => (
+                  <ThemePreviewCard
+                    key={preset.id}
+                    preset={preset}
+                    mode={resolvedMode}
+                    isSelected={preset.id === themeId}
+                    onSelect={() => setThemeId(preset.id)}
+                  />
+                ))}
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* AI Agent redesign (see chat) — configurable assistant name plus
+          voice settings, read by AgentPage.tsx/agent/voice.ts directly
+          from the store (falls back to "FabFlow Copilot" / voice off when
+          unset). Voice controls are disabled with an explicit note rather
+          than hidden when the browser doesn't support the underlying Web
+          Speech API — never a setting that silently does nothing. */}
+      <Card data-ocid="settings.ai_assistant.card">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm font-semibold flex items-center gap-2">
+            <Bot className="w-4 h-4 text-primary" />
+            AI Assistant
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-1">
+            <Label className="text-xs">Assistant Name</Label>
+            <Input
+              className="h-8 text-sm max-w-sm"
+              placeholder="FabFlow Copilot"
+              value={aiAssistantForm.aiAssistantName}
+              onChange={(e) =>
+                setAiAssistantForm((f) => ({
+                  ...f,
+                  aiAssistantName: e.target.value,
+                }))
+              }
+              data-ocid="settings.ai_assistant.name.input"
+            />
+            <p className="text-xs text-muted-foreground">
+              Shown in the AI Agent conversation header. Leave blank to use the
+              default, "FabFlow Copilot".
+            </p>
+          </div>
+
+          <div className="pt-1 border-t border-border space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Mic className="w-3.5 h-3.5 text-muted-foreground" />
+                <Label className="text-xs font-medium">
+                  Voice Conversation
+                </Label>
+              </div>
+              <Switch
+                checked={aiAssistantForm.voiceEnabled}
+                onCheckedChange={(checked) =>
+                  setAiAssistantForm((f) => ({
+                    ...f,
+                    voiceEnabled: checked,
+                  }))
+                }
+                disabled={!speechSupported}
+                data-ocid="settings.ai_assistant.voice_enabled.switch"
+              />
+            </div>
+            {!speechSupported && (
+              <p className="text-xs text-warning">
+                This browser doesn't support speech input or playback (Web
+                Speech API) — voice conversation stays unavailable here, but
+                text chat is unaffected.
+              </p>
+            )}
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label className="text-xs">Voice Input Language</Label>
+                <Select
+                  value={aiAssistantForm.voiceInputLanguage}
+                  onValueChange={(value) =>
+                    setAiAssistantForm((f) => ({
+                      ...f,
+                      voiceInputLanguage: value,
+                    }))
+                  }
+                  disabled={!sttSupported}
+                >
+                  <SelectTrigger
+                    className="h-8 text-sm"
+                    data-ocid="settings.ai_assistant.voice_input_lang.select"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {SUPPORTED_VOICE_LANGUAGES.map((l) => (
+                      <SelectItem key={l.code} value={l.code}>
+                        {l.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {!sttSupported && (
+                  <p className="text-xs text-muted-foreground">
+                    Speech recognition isn't supported in this browser.
+                  </p>
+                )}
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Voice Output Language</Label>
+                <Select
+                  value={aiAssistantForm.voiceOutputLanguage}
+                  onValueChange={(value) =>
+                    setAiAssistantForm((f) => ({
+                      ...f,
+                      voiceOutputLanguage: value,
+                    }))
+                  }
+                  disabled={!ttsSupported}
+                >
+                  <SelectTrigger
+                    className="h-8 text-sm"
+                    data-ocid="settings.ai_assistant.voice_output_lang.select"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {SUPPORTED_VOICE_LANGUAGES.map((l) => (
+                      <SelectItem key={l.code} value={l.code}>
+                        {l.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {!ttsSupported && (
+                  <p className="text-xs text-muted-foreground">
+                    Speech playback isn't supported in this browser.
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Volume2 className="w-3.5 h-3.5 text-muted-foreground" />
+                <Label className="text-xs font-medium">
+                  Auto-Speak Responses
+                </Label>
+              </div>
+              <Switch
+                checked={aiAssistantForm.autoSpeakResponses}
+                onCheckedChange={(checked) =>
+                  setAiAssistantForm((f) => ({
+                    ...f,
+                    autoSpeakResponses: checked,
+                  }))
+                }
+                disabled={!ttsSupported}
+                data-ocid="settings.ai_assistant.auto_speak.switch"
+              />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              When on, every assistant reply is read aloud automatically. Off by
+              default — you can always play a reply's audio manually from its
+              speaker button in the conversation.
+            </p>
+          </div>
+
+          <Button
+            size="sm"
+            onClick={handleSaveAiAssistant}
+            data-ocid="settings.ai_assistant.save_button"
+          >
+            Save
+          </Button>
         </CardContent>
       </Card>
 
@@ -593,11 +842,11 @@ export function Settings() {
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
             <CardTitle className="text-sm font-semibold flex items-center gap-2">
-              <MessageSquare className="w-4 h-4 text-green-600" />
+              <MessageSquare className="w-4 h-4 text-primary" />
               WhatsApp Reminders (via Twilio)
             </CardTitle>
             {whatsappConfigured ? (
-              <Badge className="bg-green-100 text-green-700 border-green-200 text-xs gap-1">
+              <Badge className="bg-success/10 text-success border-success/30 text-xs gap-1">
                 <CheckCircle2 className="w-3 h-3" /> Configured
               </Badge>
             ) : (
@@ -654,9 +903,9 @@ export function Settings() {
               }
             />
           </div>
-          <div className="flex items-start gap-2 rounded-md bg-blue-50 border border-blue-200 p-3">
-            <Info className="w-3.5 h-3.5 text-blue-600 mt-0.5 shrink-0" />
-            <p className="text-xs text-blue-700">
+          <div className="flex items-start gap-2 rounded-md bg-info/10 border border-info/30 p-3">
+            <Info className="w-3.5 h-3.5 text-info mt-0.5 shrink-0" />
+            <p className="text-xs text-info">
               Credentials are stored locally in the browser. For production,
               ensure your environment has proper CORS handling for Twilio API
               calls. Get your credentials from{" "}
@@ -688,11 +937,11 @@ export function Settings() {
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
             <CardTitle className="text-sm font-semibold flex items-center gap-2">
-              <Mail className="w-4 h-4 text-red-500" />
+              <Mail className="w-4 h-4 text-primary" />
               Email Reminders (Gmail SMTP)
             </CardTitle>
             {emailConfigured ? (
-              <Badge className="bg-green-100 text-green-700 border-green-200 text-xs gap-1">
+              <Badge className="bg-success/10 text-success border-success/30 text-xs gap-1">
                 <CheckCircle2 className="w-3 h-3" /> Configured
               </Badge>
             ) : (
@@ -735,9 +984,9 @@ export function Settings() {
               }
             />
           </div>
-          <div className="flex items-start gap-2 rounded-md bg-amber-50 border border-amber-200 p-3">
-            <AlertTriangle className="w-3.5 h-3.5 text-amber-600 mt-0.5 shrink-0" />
-            <p className="text-xs text-amber-700">
+          <div className="flex items-start gap-2 rounded-md bg-warning/15 border border-warning/30 p-3">
+            <AlertTriangle className="w-3.5 h-3.5 text-warning mt-0.5 shrink-0" />
+            <p className="text-xs text-warning">
               Use a{" "}
               <a
                 href="https://support.google.com/accounts/answer/185833"
@@ -781,6 +1030,9 @@ export function Settings() {
 
       {/* User Management */}
       <UserManagement />
+
+      {/* Security Audit Log */}
+      <SecurityAuditLog />
 
       {/* Company Profile Preview Modal */}
       <CompanyProfilePrintView
@@ -1618,6 +1870,15 @@ function UserDialog({
   editUser: OrgUserRow | null;
   existingUsernames: string[];
 }) {
+  const { currentUser } = useAuth();
+  // Monster-1 — user_roles_write's RLS policy requires users.assign_roles
+  // specifically, distinct from users.edit (which only covers permission
+  // overrides / profile fields — see user_permission_overrides_write and
+  // profiles_write). This dialog used to gate the whole thing on
+  // users.edit alone: a user granted .edit but not .assign_roles would
+  // see the Role select, change it, and have setUserRole() silently
+  // report "denied" from the RLS-blocked write.
+  const canAssignRoles = hasPermission(currentUser, "users.assign_roles");
   const [form, setForm] = useState<UserFormState>({
     username: "",
     password: "",
@@ -1683,6 +1944,12 @@ function UserDialog({
       setSaving(true);
       try {
         if (editUser.role !== form.role) {
+          if (!canAssignRoles) {
+            toast.error(
+              "Access restricted: role-assignment permission required",
+            );
+            return;
+          }
           const roleResult = await setUserRole(editUser.id, form.role);
           if (roleResult.status !== "success") {
             toast.error(roleResult.error || "Could not change role");
@@ -1757,7 +2024,7 @@ function UserDialog({
           data-ocid="settings.user.created_dialog"
         >
           <DialogHeader>
-            <DialogTitle className="flex items-center gap-2 text-emerald-600">
+            <DialogTitle className="flex items-center gap-2 text-success">
               <CheckCircle2 className="w-4 h-4" /> User Created
             </DialogTitle>
           </DialogHeader>
@@ -1841,7 +2108,11 @@ function UserDialog({
             )}
             <div>
               <Label className="text-xs">Role *</Label>
-              <Select value={form.role} onValueChange={handleRoleChange}>
+              <Select
+                value={form.role}
+                onValueChange={handleRoleChange}
+                disabled={!!editUser && !canAssignRoles}
+              >
                 <SelectTrigger
                   className="mt-1 h-8 text-sm"
                   data-ocid="settings.user_role.select"
@@ -1976,15 +2247,18 @@ function UserManagement() {
     refetch();
   };
 
+  // Role identity badges — categorical, not severity, so these use the
+  // app's chart-1..5 tokens rather than success/warning/destructive.
+  // Matches Layout.tsx's ROLE_BADGE map for the roles both files share.
   const ROLE_COLORS: Record<string, string> = {
-    admin: "bg-red-100 text-red-700",
-    sales: "bg-emerald-100 text-emerald-700",
-    procurement: "bg-orange-100 text-orange-700",
-    production: "bg-yellow-100 text-yellow-700",
-    quality: "bg-cyan-100 text-cyan-700",
-    dispatch: "bg-indigo-100 text-indigo-700",
-    accounts: "bg-blue-100 text-blue-700",
-    employee: "bg-gray-100 text-gray-700",
+    admin: "bg-chart-4/15 text-chart-4",
+    sales: "bg-chart-1/15 text-chart-1",
+    procurement: "bg-chart-4/15 text-chart-4",
+    production: "bg-chart-3/15 text-chart-3",
+    quality: "bg-chart-2/15 text-chart-2",
+    dispatch: "bg-chart-5/15 text-chart-5",
+    accounts: "bg-chart-1/15 text-chart-1",
+    employee: "bg-muted text-muted-foreground",
   };
 
   return (
@@ -2065,25 +2339,25 @@ function UserManagement() {
                           </span>
                         )}
                         {user.mustChangePassword && (
-                          <span className="ml-1.5 text-[10px] text-amber-600">
+                          <span className="ml-1.5 text-[10px] text-warning">
                             (pending first login)
                           </span>
                         )}
                       </td>
                       <td className="px-4 py-2.5">
                         <span
-                          className={`text-[10px] font-semibold px-2 py-0.5 rounded-full capitalize ${ROLE_COLORS[user.role] || "bg-gray-100 text-gray-700"}`}
+                          className={`text-[10px] font-semibold px-2 py-0.5 rounded-full capitalize ${ROLE_COLORS[user.role] || "bg-muted text-muted-foreground"}`}
                         >
                           {user.role}
                         </span>
                       </td>
                       <td className="px-4 py-2.5">
                         {user.isActive ? (
-                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">
+                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-success/10 text-success">
                             Active
                           </span>
                         ) : (
-                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-gray-200 text-gray-600">
+                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
                             Deactivated
                           </span>
                         )}
@@ -2139,5 +2413,110 @@ function UserManagement() {
         existingUsernames={existingUsernames}
       />
     </>
+  );
+}
+
+// ── Security Audit Log Component ──────────────────────────────────────────────
+//
+// Read-only viewer for security_audit_log (phase1_auth_permissions_rls_v5_
+// FINAL.sql §9) — password-change events plus every Agent action (proposed/
+// confirmed/executed/blocked/failed, see agent/audit.ts). The table has
+// always had data written to it (log_security_event RPC) but no viewer
+// anywhere in the app; audit_log.view was also missing from
+// MODULE_PERMISSIONS entirely (see the comment on that entry in
+// permissions.ts), so nothing could gate or grant this view either.
+// Mirrors UserManagement's own self-gating shape exactly: returns null if
+// the current user lacks the permission, rather than the caller checking.
+
+function SecurityAuditLog() {
+  const { currentUser } = useAuth();
+  const [entries, setEntries] = useState<SecurityAuditLogEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    listSecurityAuditLog()
+      .then((result) => {
+        if (result.status === "success" && result.data) {
+          setEntries(result.data);
+        } else if (result.status !== "unauthenticated") {
+          toast.error(result.error || "Could not load the audit log");
+        }
+      })
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (!canView(currentUser, "audit_log")) return null;
+
+  return (
+    <Card data-ocid="settings.audit_log.card">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm font-semibold flex items-center gap-2">
+          <History className="w-4 h-4 text-violet-600" />
+          Security Audit Log
+        </CardTitle>
+        <p className="text-xs text-muted-foreground">
+          Password-change events and every Agent action (proposed, confirmed,
+          executed, blocked, or failed). Most recent 200 events.
+        </p>
+      </CardHeader>
+      <CardContent>
+        {loading ? (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground py-4">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading...
+          </div>
+        ) : entries.length === 0 ? (
+          <p className="text-xs text-muted-foreground py-4">
+            No audit events recorded yet.
+          </p>
+        ) : (
+          <div className="table-wrapper">
+            <div className="border border-border rounded-md overflow-hidden">
+              <table className="w-full text-xs">
+                <thead className="bg-muted/50">
+                  <tr>
+                    <th className="text-left px-2 py-1.5 font-medium">Time</th>
+                    <th className="text-left px-2 py-1.5 font-medium">Event</th>
+                    <th className="text-left px-2 py-1.5 font-medium">Actor</th>
+                    <th className="text-left px-2 py-1.5 font-medium">
+                      Target
+                    </th>
+                    <th className="text-left px-2 py-1.5 font-medium">
+                      Details
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {entries.map((entry, idx) => (
+                    <tr
+                      key={entry.id}
+                      className="border-t"
+                      data-ocid={`settings.audit_log.row.${idx + 1}`}
+                    >
+                      <td className="px-2 py-1.5 whitespace-nowrap text-muted-foreground">
+                        {new Date(entry.createdAt).toLocaleString("en-IN")}
+                      </td>
+                      <td className="px-2 py-1.5 font-mono">
+                        {entry.eventType}
+                      </td>
+                      <td className="px-2 py-1.5">
+                        {entry.actorUsername || entry.actorUserId || "—"}
+                      </td>
+                      <td className="px-2 py-1.5">
+                        {entry.targetUsername || entry.targetUserId || "—"}
+                      </td>
+                      <td className="px-2 py-1.5 font-mono text-muted-foreground max-w-xs truncate">
+                        {Object.keys(entry.metadata).length > 0
+                          ? JSON.stringify(entry.metadata)
+                          : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }

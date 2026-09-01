@@ -11,10 +11,10 @@ import { Badge } from "@/components/ui/badge";
 import type { StageGateResult } from "@/qms/lib/productionGate";
 
 const STATUS_BADGE_CLASS: Record<string, string> = {
-  NotStarted: "bg-gray-100 text-gray-600 border-gray-300",
-  InProgress: "bg-blue-100 text-blue-700 border-blue-300",
-  Failed: "bg-red-100 text-red-700 border-red-300",
-  Passed: "bg-green-100 text-green-700 border-green-300",
+  NotStarted: "bg-muted text-muted-foreground border-border",
+  InProgress: "bg-info/10 text-info border-info/30",
+  Failed: "bg-destructive/10 text-destructive border-destructive/30",
+  Passed: "bg-success/10 text-success border-success/30",
 };
 
 interface Props {
@@ -27,7 +27,7 @@ export function ProductionGateStatusBadge({ gate }: Props) {
       <div className="flex items-center gap-1.5 flex-wrap">
         <Badge
           variant="outline"
-          className="text-[11px] gap-1 border-blue-300 bg-blue-50 text-blue-700"
+          className="text-[11px] gap-1 border-info/30 bg-info/10 text-info"
         >
           Inspection Required: {gate.inspection.libraryInspectionName}
         </Badge>
@@ -40,26 +40,26 @@ export function ProductionGateStatusBadge({ gate }: Props) {
         {gate.canProceed ? (
           <Badge
             variant="outline"
-            className="text-[10px] bg-green-100 text-green-700 border-green-300"
+            className="text-[10px] bg-success/10 text-success border-success/30"
           >
             {gate.overridden ? "Gate: Overridden" : "Gate: Passed"}
           </Badge>
         ) : (
           <Badge
             variant="outline"
-            className="text-[10px] bg-red-100 text-red-700 border-red-300"
+            className="text-[10px] bg-destructive/10 text-destructive border-destructive/30"
           >
             Gate: Blocked
           </Badge>
         )}
       </div>
       {!gate.canProceed && gate.blockReason && (
-        <span className="text-[10px] text-red-600">
+        <span className="text-[10px] text-destructive">
           Blocking Production: {gate.blockReason}
         </span>
       )}
       {gate.overridden && gate.activeOverride && (
-        <span className="text-[10px] text-amber-700">
+        <span className="text-[10px] text-warning">
           Overridden by {gate.activeOverride.overriddenByName} on{" "}
           {new Date(gate.activeOverride.overriddenAt).toLocaleString("en-IN")}
           {" — "}"{gate.activeOverride.reason}"

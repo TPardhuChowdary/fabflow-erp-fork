@@ -64,7 +64,11 @@ import {
   deleteEmployeeDocumentRemote,
   updateEmployeeDocumentRemote,
 } from "../lib/employeeDocumentsApi";
-import { updateEmployeeRemote } from "../lib/employeesApi";
+import {
+  assignEmployeeCodeRemote,
+  computeNextEmployeeCode,
+  updateEmployeeRemote,
+} from "../lib/employeesApi";
 import { generateEmployeeIdCardPdf } from "../lib/generateEmployeeIdCardPdf";
 import { createSalaryPaymentRemote } from "../lib/salaryPaymentsApi";
 import { canUpload, hasPermission } from "../permissions";
@@ -134,7 +138,6 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
     deleteEmployeeDocument,
     updateEmployee,
     settings,
-    generateDocNo,
   } = useStore();
 
   const employee = employees.find((e) => e.id === employeeId);
@@ -162,19 +165,26 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
   useEffect(() => {
     if (!canEditEmp) return;
     if (employee && !employee.employeeCode) {
-      const code = generateDocNo("EMP");
-      updateEmployeeRemote({ ...employee, employeeCode: code }).then(
-        (result) => {
-          if (result.status === "success" && result.data) {
-            updateEmployee({ ...result.data, userId: employee.userId });
-          }
-          // unauthenticated/error/denied: leave Zustand untouched, no
-          // fabricated success. The effect will simply retry on the next
-          // mount/employee change since employeeCode is still unset.
-        },
+      // Monster-1: was the local, per-browser generateDocNo("EMP") counter
+      // — two sessions lazily opening this tab for different employees
+      // around the same time could compute the identical code, and the
+      // write would then silently fail forever (no retry existed).
+      // assignEmployeeCodeRemote retries against fresh server state on a
+      // genuine unique-index collision, same "Option 1" pattern already
+      // used for project/quotation/float numbers.
+      const code = computeNextEmployeeCode(
+        employees.map((e) => e.employeeCode).filter((c): c is string => !!c),
       );
+      assignEmployeeCodeRemote(employee, code).then((result) => {
+        if (result.status === "success" && result.data) {
+          updateEmployee({ ...result.data, userId: employee.userId });
+        }
+        // unauthenticated/error/denied: leave Zustand untouched, no
+        // fabricated success. The effect will simply retry on the next
+        // mount/employee change since employeeCode is still unset.
+      });
     }
-  }, [employee, canEditEmp, updateEmployee, generateDocNo]);
+  }, [employee, canEditEmp, updateEmployee, employees]);
 
   const [idCardGenerating, setIdCardGenerating] = useState(false);
   const [idCardSide, setIdCardSide] = useState<"front" | "back" | "both">(
@@ -544,6 +554,10 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
       date: new Date().toISOString().split("T")[0],
       reason: "",
     });
+    // SignaturePad no longer closes itself after a successful save (see
+    // its own comment) — this call site owns closing once its write
+    // is done.
+    setSigPadOpen(false);
   };
 
   const openUploadDialog = () => {
@@ -809,11 +823,10 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
   // the JSX below), matching the employees_update RLS policy.
   const handleRegenerateIdCard = async () => {
     if (employee && !employee.employeeCode) {
-      const code = generateDocNo("EMP");
-      const result = await updateEmployeeRemote({
-        ...employee,
-        employeeCode: code,
-      });
+      const code = computeNextEmployeeCode(
+        employees.map((e) => e.employeeCode).filter((c): c is string => !!c),
+      );
+      const result = await assignEmployeeCodeRemote(employee, code);
       if (result.status === "success" && result.data) {
         updateEmployee({ ...result.data, userId: employee.userId });
       } else {
@@ -1129,7 +1142,7 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
             <Card>
               <CardContent className="pt-4 pb-3">
-                <p className="text-2xl font-bold text-green-600">
+                <p className="text-2xl font-bold text-success">
                   {presentCount}
                 </p>
                 <p className="text-xs text-muted-foreground">Present</p>
@@ -1137,13 +1150,15 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
             </Card>
             <Card>
               <CardContent className="pt-4 pb-3">
-                <p className="text-2xl font-bold text-red-600">{absentCount}</p>
+                <p className="text-2xl font-bold text-destructive">
+                  {absentCount}
+                </p>
                 <p className="text-xs text-muted-foreground">Absent</p>
               </CardContent>
             </Card>
             <Card>
               <CardContent className="pt-4 pb-3">
-                <p className="text-2xl font-bold text-amber-600">
+                <p className="text-2xl font-bold text-warning">
                   {halfDayCount}
                 </p>
                 <p className="text-xs text-muted-foreground">Half Day</p>
@@ -1157,11 +1172,11 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
               const rec = getAttendance(day);
               const statusClass =
                 rec?.status === "Present"
-                  ? "border-green-400 bg-green-50 text-green-700"
+                  ? "border-success/40 bg-success/10 text-success"
                   : rec?.status === "Absent"
-                    ? "border-red-400 bg-red-50 text-red-700"
+                    ? "border-destructive/40 bg-destructive/10 text-destructive"
                     : rec?.status === "Half Day"
-                      ? "border-amber-400 bg-amber-50 text-amber-700"
+                      ? "border-warning/40 bg-warning/15 text-warning"
                       : "border-border bg-muted/30 text-muted-foreground";
               return (
                 <button
@@ -1707,7 +1722,7 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
                                   data-ocid="employee-detail.salary.input"
                                 />
                                 {exceedsBalance && (
-                                  <p className="text-xs text-red-500">
+                                  <p className="text-xs text-destructive">
                                     Cannot exceed balance ₹
                                     {adv.remainingBalance.toLocaleString(
                                       "en-IN",
@@ -1777,7 +1792,7 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
                   <div
                     className={`rounded-md border p-3 text-sm space-y-1 ${
                       finalPayable < 0
-                        ? "border-red-300 bg-red-50"
+                        ? "border-destructive/30 bg-destructive/10"
                         : "border-border bg-muted/30"
                     }`}
                   >
@@ -1793,7 +1808,7 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
                       <span className="text-muted-foreground">
                         Advance Deduction
                       </span>
-                      <span className="font-medium text-amber-700">
+                      <span className="font-medium text-warning">
                         − ₹{totalAdvanceDeducted.toLocaleString("en-IN")}
                       </span>
                     </div>
@@ -1801,21 +1816,21 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
                       <span className="text-muted-foreground">
                         Personal Expense Recovery
                       </span>
-                      <span className="font-medium text-amber-700">
+                      <span className="font-medium text-warning">
                         − ₹
                         {totalPersonalExpenseDeducted.toLocaleString("en-IN")}
                       </span>
                     </div>
                     <div
                       className={`flex justify-between border-t pt-1 font-semibold ${
-                        finalPayable < 0 ? "text-red-600" : ""
+                        finalPayable < 0 ? "text-destructive" : ""
                       }`}
                     >
                       <span>Final Payable</span>
                       <span>₹{finalPayable.toLocaleString("en-IN")}</span>
                     </div>
                     {finalPayable < 0 && (
-                      <p className="text-xs text-red-500 pt-0.5">
+                      <p className="text-xs text-destructive pt-0.5">
                         Deductions exceed salary — reduce deduction amounts
                       </p>
                     )}

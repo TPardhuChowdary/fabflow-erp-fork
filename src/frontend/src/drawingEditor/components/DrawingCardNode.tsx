@@ -86,6 +86,8 @@ export function DrawingCardNode({
               variant="ghost"
               className="h-5 w-5 p-0 shrink-0 mt-0.5"
               onClick={() => setExpanded((e) => !e)}
+              title={expanded ? "Collapse" : "Expand"}
+              aria-label={expanded ? "Collapse" : "Expand"}
               data-ocid={`drawing_editor.card_toggle.${drawing.id}`}
             >
               {expanded ? (
@@ -98,7 +100,7 @@ export function DrawingCardNode({
             <span className="w-5 shrink-0" />
           )}
           {drawing.sourceDesignFileId ? (
-            <Layers className="w-3.5 h-3.5 text-blue-600 shrink-0 mt-0.5" />
+            <Layers className="w-3.5 h-3.5 text-info shrink-0 mt-0.5" />
           ) : drawing.parentDrawingId ? (
             <FileOutput className="w-3.5 h-3.5 text-muted-foreground shrink-0 mt-0.5" />
           ) : (
@@ -115,7 +117,7 @@ export function DrawingCardNode({
               {drawing.sourceDesignFileId && (
                 <Badge
                   variant="outline"
-                  className="text-[10px] px-1 py-0 border-blue-400 text-blue-600"
+                  className="text-[10px] px-1 py-0 border-info/40 text-info"
                 >
                   Master
                 </Badge>
@@ -131,7 +133,7 @@ export function DrawingCardNode({
                 !drawing.originalDrawingId && (
                   <Badge
                     variant="outline"
-                    className="text-[10px] px-1 py-0 border-emerald-400 text-emerald-600"
+                    className="text-[10px] px-1 py-0 border-success/40 text-success"
                   >
                     Original
                   </Badge>
@@ -140,7 +142,7 @@ export function DrawingCardNode({
                 workingDrawingOriginalIds?.has(drawing.id) && (
                   <Badge
                     variant="outline"
-                    className="text-[10px] px-1 py-0 border-amber-400 text-amber-600"
+                    className="text-[10px] px-1 py-0 border-warning/40 text-warning"
                   >
                     Edited
                   </Badge>

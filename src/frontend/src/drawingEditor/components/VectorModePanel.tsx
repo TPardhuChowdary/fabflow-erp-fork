@@ -33,7 +33,7 @@ export function VectorModePanel({
       <Button
         type="button"
         size="sm"
-        className="w-full h-8 text-[10px] bg-[#0066ff] hover:bg-[#0055dd] text-white"
+        className="w-full h-8 text-[10px] bg-info hover:bg-info/90 text-info-foreground"
         onClick={onDeleteBlue}
         data-ocid="drawing_editor.vector.delete_blue"
       >
@@ -42,7 +42,7 @@ export function VectorModePanel({
       <Button
         type="button"
         size="sm"
-        className="w-full h-8 text-[10px] bg-[#ff3366] hover:bg-[#e02d5a] text-white"
+        className="w-full h-8 text-[10px] bg-destructive hover:bg-destructive/90 text-destructive-foreground"
         onClick={onDeleteRed}
         data-ocid="drawing_editor.vector.delete_red"
       >

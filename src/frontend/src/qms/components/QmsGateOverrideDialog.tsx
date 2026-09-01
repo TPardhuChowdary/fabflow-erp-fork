@@ -68,7 +68,7 @@ export function QmsGateOverrideDialog({
     >
       <DialogContent className="max-w-sm">
         <DialogHeader>
-          <DialogTitle className="text-amber-600">
+          <DialogTitle className="text-warning">
             ⚠ Inspection Gate Blocked
           </DialogTitle>
         </DialogHeader>
@@ -87,7 +87,7 @@ export function QmsGateOverrideDialog({
               data-ocid="qms.gate_override.reason_input"
             />
           </div>
-          <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+          <p className="text-xs text-warning bg-warning/15 border border-warning/30 rounded p-2">
             Supervisor override: "{inspectionName}" will remain recorded exactly
             as it is — this only allows {stageName} to proceed. The override is
             permanently recorded with your name, the time, and this reason.

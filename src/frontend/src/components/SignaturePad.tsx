@@ -150,12 +150,21 @@ export function SignaturePad({
     setIsEmpty(true);
   };
 
+  // Deliberately does NOT call onClose() after onSave(). onClose means
+  // "the user dismissed this without signing" (backdrop/Escape/X — see
+  // onOpenChange below), which callers may treat as a real cancellation
+  // (AgentPage.tsx declines the whole pending action). A successful save
+  // is a different event; each caller decides what "done" means for it
+  // (EmployeeDetail.tsx closes itself once its own write succeeds,
+  // AgentPage.tsx stops rendering this dialog once the pending call no
+  // longer needs a signature) — conflating the two here caused a real
+  // bug where saving a signature auto-cancelled the very call it was
+  // meant to unblock.
   const handleSave = () => {
     const canvas = canvasRef.current;
     if (!canvas || isEmpty) return;
     const data = canvas.toDataURL("image/png");
     onSave(data);
-    onClose();
   };
 
   return (

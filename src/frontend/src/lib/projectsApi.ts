@@ -36,6 +36,7 @@
 // Callers merge them from local state on top of what this module returns.
 
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
+import { normalizeBusinessName } from "@/lib/utils";
 import type { Project } from "@/types";
 import { transformProjectRow } from "./hydration";
 import type { ProjectRow } from "./hydration";
@@ -66,12 +67,14 @@ export type ProjectWritable = Omit<
 
 function toProjectFields(v: ProjectWritable) {
   return {
-    name: v.projectName,
+    name: normalizeBusinessName(v.projectName),
     customer_id: v.customerId,
     quantity: v.totalQty ?? null,
     work_description: v.workDescription || null,
     production_version: v.productionVersion ?? null,
-    customer_visible_name: v.customerVisibleName || null,
+    customer_visible_name: v.customerVisibleName
+      ? normalizeBusinessName(v.customerVisibleName)
+      : null,
     internal_order_code: v.internalOrderCode || null,
     project_type: v.projectType ?? null,
     parent_project_id: v.parentProjectId || null,
@@ -237,6 +240,59 @@ export async function updateProjectRemote(
   return {
     status: "success",
     data: transformProjectRow(rows[0]) as Project,
+  };
+}
+
+// Appends one entry to projects.activity_log via the add_project_activity()
+// RPC (database/phase-11/phase11_production_persistence_FINAL.sql) — "the
+// sanctioned manual-note write path... Deliberately the ONLY write path
+// created by this migration for activity_log", built specifically to
+// avoid what store.ts's addProjectActivity used to do: read the full
+// activityLog array from local state, append one entry client-side, and
+// write the WHOLE array back via updateProjectRemote's normal full-row
+// update. Unlike editing a project field (rare, low-stakes if a
+// concurrent edit loses), activity log entries are appended from several
+// independent triggers in quick succession (invoice generation, agent
+// actions, manual notes) — a client-computed full-array overwrite would
+// silently drop whichever entry lost the race. The RPC appends server-
+// side via `activity_log || jsonb_build_array(entry)`, so two concurrent
+// calls both survive regardless of ordering. Returns void, so the fresh
+// row is read back the same way settleExpenseFloatRemote's RPC is.
+export async function addProjectActivityRemote(
+  projectId: string,
+  type: string,
+  description: string,
+  performedBy: string,
+  metadata?: Record<string, string | number>,
+): Promise<WriteResult<Project>> {
+  const gate = await requireSession();
+  if (!gate.ok) return gate.result;
+
+  const { error: rpcError } = await gate.client.rpc("add_project_activity", {
+    p_project_id: projectId,
+    p_type: type,
+    p_description: description,
+    p_performed_by: performedBy,
+    p_metadata: metadata ?? null,
+  });
+  if (rpcError) return { status: "error", error: rpcError.message };
+
+  const { data, error } = await gate.client
+    .from("projects")
+    .select(SELECT_COLUMNS)
+    .eq("id", projectId)
+    .maybeSingle();
+  if (error) return { status: "error", error: error.message };
+  if (!data) {
+    return {
+      status: "denied",
+      error:
+        "Activity was recorded, but the updated project is not visible to you (blocked by RLS)",
+    };
+  }
+  return {
+    status: "success",
+    data: transformProjectRow(data as unknown as ProjectRow) as Project,
   };
 }
 

@@ -216,7 +216,7 @@ export function PurchaseOrders() {
                     </TableCell>
                     <TableCell className="text-xs font-mono">
                       {qt?.qtNo ? (
-                        <span className="font-semibold text-blue-700">
+                        <span className="font-semibold text-info">
                           {qt.qtNo}
                         </span>
                       ) : (

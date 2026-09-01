@@ -18,10 +18,10 @@ import type {
 import { ProjectQmsCharacteristicPanel } from "./ProjectQmsCharacteristicPanel";
 
 const STATUS_BADGE_CLASS: Record<ProjectQmsInspectionStatus, string> = {
-  NotStarted: "bg-gray-100 text-gray-600 border-gray-300",
-  InProgress: "bg-blue-100 text-blue-700 border-blue-300",
-  Failed: "bg-red-100 text-red-700 border-red-300",
-  Passed: "bg-green-100 text-green-700 border-green-300",
+  NotStarted: "bg-muted text-muted-foreground border-border",
+  InProgress: "bg-info/10 text-info border-info/30",
+  Failed: "bg-destructive/10 text-destructive border-destructive/30",
+  Passed: "bg-success/10 text-success border-success/30",
 };
 
 interface Props {
@@ -86,7 +86,7 @@ export function ProjectQmsInspectionCard({
 
   return (
     <div
-      className={`rounded-lg border ${expanded ? "border-blue-300 shadow-sm" : ""}`}
+      className={`rounded-lg border ${expanded ? "border-primary/40 shadow-sm" : ""}`}
       data-ocid={`qms.project_inspection.card.${inspection.id}`}
     >
       <button
@@ -108,7 +108,7 @@ export function ProjectQmsInspectionCard({
             {INSPECTION_MODE_LABELS[inspection.mode]}
           </Badge>
           {linkedStageName ? (
-            <Badge className="text-[10px] bg-blue-50 text-blue-700 border-blue-300">
+            <Badge className="text-[10px] bg-info/10 text-info border-info/30">
               Linked: {linkedStageName}
             </Badge>
           ) : inspection.requiredProductionStageId ? (

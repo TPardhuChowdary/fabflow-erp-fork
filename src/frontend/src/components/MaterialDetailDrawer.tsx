@@ -20,7 +20,7 @@ import {
   X,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { useStore } from "../store";
 import type { InventoryItem } from "../types";
 
@@ -152,6 +152,8 @@ export function MaterialDetailDrawer({
                 size="icon"
                 className="h-8 w-8 shrink-0"
                 onClick={onClose}
+                title="Close"
+                aria-label="Close"
                 data-ocid="inventory.detail.close_button"
               >
                 <X className="w-4 h-4" />
@@ -177,7 +179,7 @@ export function MaterialDetailDrawer({
                     <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
                       Total Used
                     </p>
-                    <p className="text-xl font-bold tabular-nums text-orange-600 dark:text-orange-400">
+                    <p className="text-xl font-bold tabular-nums text-warning">
                       {data.totalUsed}
                     </p>
                     <p className="text-[10px] text-muted-foreground">
@@ -193,7 +195,7 @@ export function MaterialDetailDrawer({
                         item.quantityAvailable === 0
                           ? "text-destructive"
                           : item.quantityAvailable < 10
-                            ? "text-yellow-600 dark:text-yellow-400"
+                            ? "text-warning"
                             : "text-primary"
                       }`}
                     >
@@ -258,9 +260,8 @@ export function MaterialDetailDrawer({
                             const attachments = p.attachments ?? [];
                             const isExpanded = expandedPurchaseIds.has(p.id);
                             return (
-                              <>
+                              <Fragment key={p.id}>
                                 <TableRow
-                                  key={p.id}
                                   data-ocid={`inventory.detail.purchase.item.${i + 1}`}
                                 >
                                   <TableCell className="text-xs py-2">
@@ -330,7 +331,7 @@ export function MaterialDetailDrawer({
                                               href={att.ref}
                                               target="_blank"
                                               rel="noopener noreferrer"
-                                              className="text-xs text-blue-600 underline flex items-center gap-1"
+                                              className="text-xs text-info underline flex items-center gap-1"
                                             >
                                               <FileText className="w-3 h-3" />
                                               {att.name}
@@ -341,7 +342,7 @@ export function MaterialDetailDrawer({
                                     </TableCell>
                                   </TableRow>
                                 )}
-                              </>
+                              </Fragment>
                             );
                           })
                         )}

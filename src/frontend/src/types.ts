@@ -198,20 +198,46 @@ export interface ProductionStage {
   notes?: string;
 }
 
+// Job Cards feature (see chat) — this JobCard shape replaces a dead
+// legacy type of the same name (zero references anywhere in store.ts or
+// any page — a leftover from the pre-Supabase ICP-canister prototype).
+// Real employee-assigned, time-based work assignment/execution,
+// complementing (not replacing) ProjectProductionStage.
+export type JobCardStatus =
+  | "NotStarted"
+  | "InProgress"
+  | "Completed"
+  | "OnHold";
+
 export interface JobCard {
   id: string;
   jobNo: string;
-  soId?: string;
-  customerId: string;
-  projectId?: string;
+  projectId: string;
+  /** Real FK to Employee. Optional only because the employee may later be
+   * deleted (ON DELETE SET NULL) — employeeName is snapshotted below so
+   * the card still displays correctly in that case. */
+  employeeId?: string;
+  employeeName: string;
   jobDescription: string;
-  drawingFileIds: string[];
-  materialRequisitionStatus: "Pending" | "Raised" | "Fulfilled";
-  productionStages: ProductionStage[];
-  qcStatus: QCStatus;
-  qcNotes: string;
-  assignedTo: string;
+  operationType: string;
+  standardTimePerUnitMinutes: number;
+  allocatedTimeMinutes: number;
+  /** Server-computed (Postgres GENERATED column): floor(allocatedTimeMinutes
+   * / standardTimePerUnitMinutes). Never sent by the client — always
+   * read back from the server so it can never drift from its two real
+   * inputs. */
+  expectedQuantity: number;
+  actualCompletedQty: number;
+  rejectedQty: number;
+  reworkQty: number;
+  startTime?: string;
+  endTime?: string;
+  /** Server-computed (Postgres GENERATED column) from startTime/endTime. */
+  actualTimeSpentMinutes?: number;
+  status: JobCardStatus;
+  notes?: string;
   createdAt: number;
+  updatedAt: number;
 }
 
 export interface MRItem {
@@ -306,6 +332,20 @@ export interface BankDetails {
   branch: string;
 }
 
+// Invoice multi-PO feature (see chat) — a real one-to-many child row,
+// mirroring public.invoice_purchase_orders (Phase 48). Not a comma-
+// separated string on Invoice itself.
+export interface InvoicePurchaseOrder {
+  id: string;
+  poNumber: string;
+  poDate?: string;
+  /** Set when this row references a real QuotationPurchaseOrder record
+   * (the actual Customer PO entity) rather than a manually-typed number —
+   * undefined for a free-text entry, exactly like MaterialPurchase's
+   * vendorId is undefined for a free-text supplierName. */
+  quotationPurchaseOrderId?: string;
+}
+
 export interface Invoice {
   id: string;
   invNo: string;
@@ -329,8 +369,17 @@ export interface Invoice {
   paidAmount: number;
   deliveryVehicleNo?: string;
   deliveryDestination?: string;
+  /** Legacy single-PO fields (Phase 9) — kept for backward compatibility,
+   * no longer written to by the UI. purchaseOrders below is the real
+   * one-to-many list (Phase 48); every existing invoice's single
+   * poNumber/poDate was backfilled into it as one row. */
   poNumber?: string;
   poDate?: string;
+  /** Real one-to-many Invoice → Customer PO relationship (Phase 48,
+   * invoice_purchase_orders). Each entry optionally references a real
+   * QuotationPurchaseOrder record via quotationPurchaseOrderId when one
+   * exists; poNumber/poDate are always present as a display snapshot. */
+  purchaseOrders?: InvoicePurchaseOrder[];
   bankDetails?: BankDetails;
   termsAndConditions?: string;
   buyerGstin?: string;
@@ -423,6 +472,7 @@ export type Page =
   | "quotations"
   | "purchase-orders"
   | "production"
+  | "job-cards"
   | "material-requisitions"
   | "quality"
   | "delivery-challans"
@@ -451,7 +501,17 @@ export type Page =
   | "qms-my-inspections"
   | "drawing-editor"
   | "ledger"
-  | "machine-revenue";
+  | "machine-revenue"
+  | "agent"
+  | "design-lab"
+  | "design-lab-v2"
+  | "style-lab"
+  | "design-archive"
+  | "ux-lab"
+  | "ux-final"
+  | "ux-decision-lab"
+  | "ux-visual-lab"
+  | "ux-implementation-lab";
 
 // ── Project Tracking Types ──────────────────────────────────────
 
@@ -579,6 +639,11 @@ export interface MaterialPurchase {
   vendorId?: string;
   purchaseDate: string;
   attachments?: PurchaseAttachment[];
+  // Monster-1 — the real backing row (public.inventory_purchases) is
+  // resolved-or-created by material_type name via record_material_purchase();
+  // carrying its id through lets edit/delete reuse the already-existing
+  // inventoryPurchasesApi.ts functions instead of duplicating them.
+  inventoryItemId?: string;
 }
 
 export interface OutsourcedWork {
@@ -1002,6 +1067,20 @@ export interface AppSettings {
   companyDeclaration: string;
   quotationTerms: string;
   companyPOTerms: string;
+  /** AI Agent redesign (see chat) — the assistant's display name shown in
+   * the conversation header/empty state. Optional so existing settings
+   * objects (pre-dating this field) fall back to the default
+   * "FabFlow Copilot" in the UI rather than needing a migration. */
+  aiAssistantName?: string;
+  /** Voice conversation settings (see chat) — all optional so existing
+   * settings objects fall back to sane defaults (voice off, browser's
+   * own language) in AgentPage.tsx/agent/voice.ts. Each field maps to a
+   * real, wired capability there — never a stub. BCP-47 codes (e.g.
+   * "en-US"), see agent/voice.ts's SUPPORTED_VOICE_LANGUAGES. */
+  voiceEnabled?: boolean;
+  voiceInputLanguage?: string;
+  voiceOutputLanguage?: string;
+  autoSpeakResponses?: boolean;
 }
 
 // ── BOM Types ────────────────────────────────────────────────────

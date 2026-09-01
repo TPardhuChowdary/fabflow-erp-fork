@@ -27,6 +27,8 @@ import {
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
+  AlertOctagon,
+  AlertTriangle,
   Archive,
   ChevronDown,
   ChevronRight,
@@ -40,7 +42,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
 import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
@@ -589,180 +591,219 @@ export function Inventory({
                         categoryFilter === "all" ||
                         (item.category ?? "raw_material") === categoryFilter,
                     )
-                    .map((item, i) => (
-                      <TableRow
-                        key={item.id}
-                        className="cursor-pointer hover:bg-muted/50 transition-colors group"
-                        onClick={() => setSelectedMaterial(item)}
-                        data-ocid={`inventory.item.${i + 1}`}
-                      >
-                        <TableCell className="font-medium text-sm">
-                          <span className="flex items-center gap-1.5">
-                            {item.name}
-                            <ChevronRight className="w-3.5 h-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
-                          </span>
-                        </TableCell>
-                        <TableCell>
-                          <Badge
-                            variant="outline"
-                            className="text-xs font-normal"
-                          >
-                            {CATEGORY_LABEL[item.category ?? "raw_material"]}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="text-sm text-muted-foreground">
-                          {item.unit}
-                        </TableCell>
-                        <TableCell>
-                          <span className="font-mono text-xs">
-                            {item.quantityAvailable} {item.unit}
-                          </span>
-                        </TableCell>
-                        <TableCell>
-                          {(item.quantityReserved ?? 0) > 0 ? (
-                            <span className="font-mono text-xs text-amber-600">
-                              {item.quantityReserved} {item.unit}
+                    .map((item, i) => {
+                      // Model 3 Workspace comparison (see chat) — hoisted
+                      // out of the single badge cell so the SAME real
+                      // reorderLevel-driven state also tints the whole
+                      // row and carries an icon, making it obvious at a
+                      // glance rather than a small cell-level color only
+                      // (color + icon + label, not color alone). Was a
+                      // hardcoded "< 10" magic number before this pass;
+                      // reorderLevel is a real per-item field the ERP
+                      // already collects (Edit Item dialog) but never
+                      // used for this attention treatment. Falls back to
+                      // 10 only for items with no reorderLevel set, so
+                      // existing rows keep their prior behavior.
+                      const avail =
+                        item.quantityAvailable - (item.quantityReserved ?? 0);
+                      const threshold = item.reorderLevel ?? 10;
+                      const isOut = avail <= 0;
+                      const isLow = !isOut && avail <= threshold;
+                      return (
+                        <TableRow
+                          key={item.id}
+                          className={`cursor-pointer transition-colors group ${
+                            isOut
+                              ? "bg-destructive/5 hover:bg-destructive/10"
+                              : isLow
+                                ? "bg-warning/5 hover:bg-warning/10"
+                                : "hover:bg-muted/50"
+                          }`}
+                          onClick={() => setSelectedMaterial(item)}
+                          data-ocid={`inventory.item.${i + 1}`}
+                        >
+                          <TableCell className="font-medium text-sm">
+                            <span className="flex items-center gap-1.5">
+                              {isOut && (
+                                <AlertOctagon
+                                  className="w-3.5 h-3.5 text-destructive shrink-0"
+                                  aria-label="Out of stock"
+                                />
+                              )}
+                              {isLow && (
+                                <AlertTriangle
+                                  className="w-3.5 h-3.5 text-warning shrink-0"
+                                  aria-label="At or below reorder level"
+                                />
+                              )}
+                              {item.name}
+                              <ChevronRight className="w-3.5 h-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
                             </span>
-                          ) : (
-                            <span className="text-muted-foreground text-xs">
-                              —
+                          </TableCell>
+                          <TableCell>
+                            <Badge
+                              variant="outline"
+                              className="text-xs font-normal"
+                            >
+                              {CATEGORY_LABEL[item.category ?? "raw_material"]}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-sm text-muted-foreground">
+                            {item.unit}
+                          </TableCell>
+                          <TableCell>
+                            <span className="font-mono text-xs">
+                              {item.quantityAvailable} {item.unit}
                             </span>
-                          )}
-                        </TableCell>
-                        <TableCell>
-                          {(() => {
-                            const avail =
-                              item.quantityAvailable -
-                              (item.quantityReserved ?? 0);
-                            return (
-                              <Badge
-                                variant={
-                                  avail <= 0
-                                    ? "destructive"
-                                    : avail < 10
-                                      ? "secondary"
-                                      : "outline"
-                                }
-                                className="font-mono text-xs"
-                              >
-                                {Math.max(0, avail)} {item.unit}
-                              </Badge>
-                            );
-                          })()}
-                        </TableCell>
-                        <TableCell className="text-xs text-muted-foreground">
-                          {item.lastPurchasePrice &&
-                          item.lastPurchasePrice > 0 ? (
-                            `₹${item.lastPurchasePrice.toLocaleString("en-IN")}`
-                          ) : (
-                            <span className="text-muted-foreground/50">—</span>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-xs text-muted-foreground">
-                          {formatDate(item.lastUpdated)}
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex items-center gap-1">
-                            {pCreate && (
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                className="h-7 text-xs"
-                                onClick={(e) => openPurchaseDialog(e, item)}
-                                data-ocid="inventory.purchase_button"
-                              >
-                                <ShoppingCart className="w-3 h-3 mr-1" />{" "}
-                                Purchase
-                              </Button>
+                          </TableCell>
+                          <TableCell>
+                            {(item.quantityReserved ?? 0) > 0 ? (
+                              <span className="font-mono text-xs text-warning">
+                                {item.quantityReserved} {item.unit}
+                              </span>
+                            ) : (
+                              <span className="text-muted-foreground text-xs">
+                                —
+                              </span>
                             )}
-                            {pEdit && (
-                              <button
-                                type="button"
-                                className="p-1 rounded hover:bg-muted transition-colors"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setEditingItem({
-                                    id: item.id,
-                                    name: item.name,
-                                    unit: item.unit,
-                                    reorderLevel:
-                                      item.reorderLevel != null
-                                        ? String(item.reorderLevel)
-                                        : "",
-                                    unitCost:
-                                      item.unitCost != null
-                                        ? String(item.unitCost)
-                                        : "",
-                                    estimatedPrice:
-                                      item.estimatedPrice != null
-                                        ? String(item.estimatedPrice)
-                                        : "",
-                                    category: item.category ?? "raw_material",
-                                    brand: item.brand ?? "",
-                                    shade: item.shade ?? "",
-                                    ralCode: item.ralCode ?? "",
-                                    finish: item.finish ?? "",
-                                    powderType: item.powderType ?? "",
-                                    pretreatmentTank:
-                                      item.pretreatmentTank ?? "",
-                                  });
-                                  setEditItemDialog(true);
-                                }}
-                                title="Edit material"
-                                data-ocid={`inventory.item.edit_button.${i + 1}`}
-                              >
-                                <Pencil className="w-3.5 h-3.5 text-muted-foreground hover:text-foreground" />
-                              </button>
+                          </TableCell>
+                          <TableCell>
+                            <Badge
+                              variant={isOut ? "destructive" : "outline"}
+                              className={`font-mono text-xs ${
+                                isLow
+                                  ? "bg-warning/15 text-warning border-warning/30"
+                                  : ""
+                              }`}
+                            >
+                              {Math.max(0, avail)} {item.unit}
+                              {isOut
+                                ? " · Out of stock"
+                                : isLow
+                                  ? " · Low"
+                                  : ""}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {item.lastPurchasePrice &&
+                            item.lastPurchasePrice > 0 ? (
+                              `₹${item.lastPurchasePrice.toLocaleString("en-IN")}`
+                            ) : (
+                              <span className="text-muted-foreground/50">
+                                —
+                              </span>
                             )}
-                            {pDelete && (
-                              <button
-                                type="button"
-                                className="p-1 rounded hover:bg-muted transition-colors"
-                                onClick={async (e) => {
-                                  e.stopPropagation();
-                                  const hasPurchases = (
-                                    inventoryPurchases || []
-                                  ).some((p) => p.inventoryItemId === item.id);
-                                  const hasUsage = (materialUsages || []).some(
-                                    (u) => u.inventoryItemId === item.id,
-                                  );
-                                  if (hasPurchases || hasUsage) {
-                                    toast.error(
-                                      "Cannot delete material with existing records",
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {formatDate(item.lastUpdated)}
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex items-center gap-1">
+                              {pCreate && (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="h-7 text-xs"
+                                  onClick={(e) => openPurchaseDialog(e, item)}
+                                  data-ocid="inventory.purchase_button"
+                                >
+                                  <ShoppingCart className="w-3 h-3 mr-1" />{" "}
+                                  Purchase
+                                </Button>
+                              )}
+                              {pEdit && (
+                                <button
+                                  type="button"
+                                  className="p-1 rounded hover:bg-muted transition-colors"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setEditingItem({
+                                      id: item.id,
+                                      name: item.name,
+                                      unit: item.unit,
+                                      reorderLevel:
+                                        item.reorderLevel != null
+                                          ? String(item.reorderLevel)
+                                          : "",
+                                      unitCost:
+                                        item.unitCost != null
+                                          ? String(item.unitCost)
+                                          : "",
+                                      estimatedPrice:
+                                        item.estimatedPrice != null
+                                          ? String(item.estimatedPrice)
+                                          : "",
+                                      category: item.category ?? "raw_material",
+                                      brand: item.brand ?? "",
+                                      shade: item.shade ?? "",
+                                      ralCode: item.ralCode ?? "",
+                                      finish: item.finish ?? "",
+                                      powderType: item.powderType ?? "",
+                                      pretreatmentTank:
+                                        item.pretreatmentTank ?? "",
+                                    });
+                                    setEditItemDialog(true);
+                                  }}
+                                  title="Edit material"
+                                  data-ocid={`inventory.item.edit_button.${i + 1}`}
+                                >
+                                  <Pencil className="w-3.5 h-3.5 text-muted-foreground hover:text-foreground" />
+                                </button>
+                              )}
+                              {pDelete && (
+                                <button
+                                  type="button"
+                                  className="p-1 rounded hover:bg-muted transition-colors"
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    const hasPurchases = (
+                                      inventoryPurchases || []
+                                    ).some(
+                                      (p) => p.inventoryItemId === item.id,
                                     );
-                                    return;
-                                  }
-                                  const result =
-                                    await deleteInventoryItemRemote(item.id);
-                                  if (result.status === "unauthenticated") {
-                                    toast.error(
-                                      "Sign in required to delete inventory items",
+                                    const hasUsage = (
+                                      materialUsages || []
+                                    ).some(
+                                      (u) => u.inventoryItemId === item.id,
                                     );
-                                    return;
-                                  }
-                                  if (
-                                    result.status === "error" ||
-                                    result.status === "denied"
-                                  ) {
-                                    toast.error(
-                                      result.error ||
-                                        "Failed to delete inventory item",
-                                    );
-                                    return;
-                                  }
-                                  deleteInventoryItem(item.id);
-                                  toast.success("Material deleted");
-                                }}
-                                title="Delete material"
-                                data-ocid={`inventory.item.delete_button.${i + 1}`}
-                              >
-                                <Trash2 className="w-3.5 h-3.5 text-muted-foreground hover:text-destructive" />
-                              </button>
-                            )}
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    ))}
+                                    if (hasPurchases || hasUsage) {
+                                      toast.error(
+                                        "Cannot delete material with existing records",
+                                      );
+                                      return;
+                                    }
+                                    const result =
+                                      await deleteInventoryItemRemote(item.id);
+                                    if (result.status === "unauthenticated") {
+                                      toast.error(
+                                        "Sign in required to delete inventory items",
+                                      );
+                                      return;
+                                    }
+                                    if (
+                                      result.status === "error" ||
+                                      result.status === "denied"
+                                    ) {
+                                      toast.error(
+                                        result.error ||
+                                          "Failed to delete inventory item",
+                                      );
+                                      return;
+                                    }
+                                    deleteInventoryItem(item.id);
+                                    toast.success("Material deleted");
+                                  }}
+                                  title="Delete material"
+                                  data-ocid={`inventory.item.delete_button.${i + 1}`}
+                                >
+                                  <Trash2 className="w-3.5 h-3.5 text-muted-foreground hover:text-destructive" />
+                                </button>
+                              )}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
                   {inventoryItems.length === 0 && (
                     <TableRow>
                       <TableCell
@@ -820,9 +861,8 @@ export function Inventory({
                       const attachments = p.attachments ?? [];
                       const isHighlighted = highlightPurchaseId === p.id;
                       return (
-                        <>
+                        <Fragment key={p.id}>
                           <TableRow
-                            key={p.id}
                             id={`inventory-purchase-${p.id}`}
                             className={
                               isHighlighted
@@ -943,7 +983,7 @@ export function Inventory({
                                         href={att.ref}
                                         target="_blank"
                                         rel="noopener noreferrer"
-                                        className="text-xs text-blue-600 underline flex items-center gap-1"
+                                        className="text-xs text-info underline flex items-center gap-1"
                                       >
                                         <FileText className="w-3 h-3" />
                                         {att.name}
@@ -954,7 +994,7 @@ export function Inventory({
                               </TableCell>
                             </TableRow>
                           )}
-                        </>
+                        </Fragment>
                       );
                     })}
                   {inventoryPurchases.length === 0 && (
@@ -1619,8 +1659,8 @@ export function Inventory({
                               className="h-8 w-8 rounded object-cover shrink-0 border"
                             />
                           ) : (
-                            <div className="h-8 w-8 rounded bg-blue-100 dark:bg-blue-950 flex items-center justify-center shrink-0">
-                              <FileText className="w-4 h-4 text-blue-600" />
+                            <div className="h-8 w-8 rounded bg-info/10 flex items-center justify-center shrink-0">
+                              <FileText className="w-4 h-4 text-info" />
                             </div>
                           )}
                           <span className="text-xs flex-1 truncate">

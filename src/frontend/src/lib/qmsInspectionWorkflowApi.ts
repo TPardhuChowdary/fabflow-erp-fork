@@ -206,7 +206,7 @@ interface InspectionSheetRow {
   updated_at: string;
 }
 
-function rowToInspectionSheet(row: InspectionSheetRow): InspectionSheet {
+export function rowToInspectionSheet(row: InspectionSheetRow): InspectionSheet {
   return {
     id: row.id,
     projectId: row.project_id,
@@ -368,7 +368,7 @@ interface QmsStageCompletionRow {
   updated_at: string;
 }
 
-function rowToStageCompletion(
+export function rowToStageCompletion(
   row: QmsStageCompletionRow,
 ): InspectionStageCompletion {
   return {

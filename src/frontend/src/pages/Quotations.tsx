@@ -51,6 +51,7 @@ import { ProjectMultiSelect } from "../components/ProjectMultiSelect";
 import { QuotationPrintView } from "../components/QuotationPrintView";
 import ShareButton from "../components/ShareButton";
 import { StatusBadge } from "../components/StatusBadge";
+import { RowActions } from "../components/ui/row-actions";
 import { QuotationDocContent } from "../lib/documentRenderers";
 import {
   openShareModalV2,
@@ -71,7 +72,6 @@ import {
   updateQuotationRevisionRemote,
 } from "../lib/quotationsApi";
 import {
-  cn,
   getCustomerVisibleName,
   projectsNeedingNewLineItems,
 } from "../lib/utils";
@@ -601,6 +601,13 @@ export function Quotations() {
         }
         toast.success("Quotation updated");
       } else {
+        // quotations.valid_until is a real NOT NULL DB column - enforce it
+        // here at the boundary rather than letting a blank value reach the
+        // server as an unhelpful date-syntax error (Phase E.1).
+        if (!form.validUntil) {
+          toast.error("Set a Valid Until date.");
+          return;
+        }
         const qtNo = generateDocNo("QT");
         const createResult = await createQuotationRemote({
           qtNo,
@@ -958,161 +965,105 @@ export function Quotations() {
   // only changes button sizing (table = tight icon buttons, card =
   // touch-sized) via the existing size conventions already used for
   // each layout elsewhere on this page.
-  const QuotationRowActions = ({
-    q,
-    i,
-    compact,
-  }: {
-    q: Quotation;
-    i: number;
-    compact: boolean;
-  }) => {
-    const btnSize = compact ? "h-7 w-7" : "h-9 w-9";
-    const iconSize = compact ? "w-3.5 h-3.5" : "w-4 h-4";
+  // Component I's table-action rule: this row used to be up to 9 bare
+  // icon-only buttons (View/Revisions/Edit/Duplicate/Create Revision/
+  // Print/Download/Share/Delete, plus a 10th "Record PO" for Accepted
+  // quotations) — the exact real "icon soup" case UX_CONSOLIDATION.md's
+  // own live audit named for this screen specifically. Every handler and
+  // permission gate below is unchanged; only the chrome changed, from a
+  // flat icon row to 1-2 explicit actions + one labeled overflow menu.
+  // `compact` no longer drives a separate icon-only sizing scheme — the
+  // desktop table and mobile card now share RowActions' one consistent
+  // treatment (explicit-label buttons read fine at both densities, unlike
+  // bare icons).
+  const QuotationRowActions = ({ q, i }: { q: Quotation; i: number }) => {
     return (
-      <>
-        <Button
-          variant="ghost"
-          size="icon"
-          className={btnSize}
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setPrintQuotation(q);
-          }}
-          title="View"
-          data-ocid={`quotations.view_button.${i + 1}`}
-        >
-          <Eye className={iconSize} />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          className={btnSize}
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setSelectedQuotation(q);
-          }}
-          title="Revisions & Purchase Orders"
-          data-ocid={`quotations.revisions_button.${i + 1}`}
-        >
-          <Layers className={iconSize} />
-        </Button>
-        {pEdit && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className={btnSize}
-            onClick={() => openEdit(q)}
-            title="Edit"
-          >
-            <Edit2 className={iconSize} />
-          </Button>
-        )}
-        {pCreate && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className={btnSize}
-            onClick={() => openDuplicate(q)}
-            title="Duplicate"
-            data-ocid={`quotations.duplicate_button.${i + 1}`}
-          >
-            <Copy className={iconSize} />
-          </Button>
-        )}
-        {pEdit && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className={btnSize}
-            onClick={() => openCreateRevision(q)}
-            title="Create Revision"
-            data-ocid={`quotations.create_revision.button.${i + 1}`}
-          >
-            <GitBranch className={iconSize} />
-          </Button>
-        )}
-        {pPrint && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className={btnSize}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              handlePrint(q);
-            }}
-            title="Print"
-          >
-            <Printer className={iconSize} />
-          </Button>
-        )}
-        {pDownload && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className={btnSize}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              handleDownload(q);
-            }}
-            title="Download PDF"
-          >
-            <Download className={iconSize} />
-          </Button>
-        )}
-        {pShare && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className={btnSize}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              handleShare(q);
-            }}
-            title="Share"
-          >
-            <Share2 className={iconSize} />
-          </Button>
-        )}
-        {pDelete && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className={cn(btnSize, "text-destructive hover:text-destructive")}
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              setDeleteQuotationTarget(q);
-            }}
-            title="Delete"
-          >
-            <Trash2 className={iconSize} />
-          </Button>
-        )}
-        {pEdit && q.status === "Accepted" && (
-          <Button
-            variant="ghost"
-            size="icon"
-            className={cn(btnSize, "text-green-700 hover:text-green-900")}
-            title="Record Purchase Order"
-            onClick={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              setPoTargetQuotation(q);
-              setPoTargetRevisionId(getCurrentRevision(q.id)?.id || null);
-              setShowRecordPO(true);
-            }}
-            data-ocid={`quotations.record_po.button.${i + 1}`}
-          >
-            <Plus className={iconSize} />
-          </Button>
-        )}
-      </>
+      <RowActions
+        primary={[
+          {
+            label: "View",
+            icon: Eye,
+            onClick: () => setPrintQuotation(q),
+            "data-ocid": `quotations.view_button.${i + 1}`,
+          },
+          ...(pEdit
+            ? [
+                {
+                  label: "Edit",
+                  icon: Edit2,
+                  onClick: () => openEdit(q),
+                },
+              ]
+            : []),
+        ]}
+        overflow={[
+          {
+            label: "Revisions & Purchase Orders",
+            icon: Layers,
+            onClick: () => setSelectedQuotation(q),
+            "data-ocid": `quotations.revisions_button.${i + 1}`,
+          },
+          ...(pEdit && q.status === "Accepted"
+            ? [
+                {
+                  label: "Record Purchase Order",
+                  icon: Plus,
+                  onClick: () => {
+                    setPoTargetQuotation(q);
+                    setPoTargetRevisionId(getCurrentRevision(q.id)?.id || null);
+                    setShowRecordPO(true);
+                  },
+                  "data-ocid": `quotations.record_po.button.${i + 1}`,
+                },
+              ]
+            : []),
+          ...(pCreate
+            ? [
+                {
+                  label: "Duplicate",
+                  icon: Copy,
+                  onClick: () => openDuplicate(q),
+                  "data-ocid": `quotations.duplicate_button.${i + 1}`,
+                },
+              ]
+            : []),
+          ...(pEdit
+            ? [
+                {
+                  label: "Create Revision",
+                  icon: GitBranch,
+                  onClick: () => openCreateRevision(q),
+                  "data-ocid": `quotations.create_revision.button.${i + 1}`,
+                },
+              ]
+            : []),
+          ...(pPrint
+            ? [{ label: "Print", icon: Printer, onClick: () => handlePrint(q) }]
+            : []),
+          ...(pDownload
+            ? [
+                {
+                  label: "Download PDF",
+                  icon: Download,
+                  onClick: () => handleDownload(q),
+                },
+              ]
+            : []),
+          ...(pShare
+            ? [{ label: "Share", icon: Share2, onClick: () => handleShare(q) }]
+            : []),
+          ...(pDelete
+            ? [
+                {
+                  label: "Delete",
+                  icon: Trash2,
+                  destructive: true,
+                  onClick: () => setDeleteQuotationTarget(q),
+                },
+              ]
+            : []),
+        ]}
+      />
     );
   };
 
@@ -1199,11 +1150,11 @@ export function Quotations() {
                 <div className="col-span-2">
                   <span className="text-muted-foreground">PO: </span>
                   {qPOCount > 0 ? (
-                    <span className="font-mono text-green-700 font-semibold">
+                    <span className="font-mono text-success font-semibold">
                       {qPOCount} PO{qPOCount > 1 ? "s" : ""}
                     </span>
                   ) : rPO ? (
-                    <span className="font-mono text-green-700 font-semibold">
+                    <span className="font-mono text-success font-semibold">
                       {rPO.poNumber}
                     </span>
                   ) : (
@@ -1212,7 +1163,7 @@ export function Quotations() {
                 </div>
               </div>
               <div className="flex items-center gap-1 flex-wrap pt-1 border-t">
-                <QuotationRowActions q={q} i={i} compact={false} />
+                <QuotationRowActions q={q} i={i} />
               </div>
             </div>
           );
@@ -1280,11 +1231,11 @@ export function Quotations() {
                     </TableCell>
                     <TableCell className="text-xs">
                       {qPOCount > 0 ? (
-                        <span className="font-mono text-green-700 font-semibold">
+                        <span className="font-mono text-success font-semibold">
                           {qPOCount} PO{qPOCount > 1 ? "s" : ""}
                         </span>
                       ) : rPO ? (
-                        <span className="font-mono text-green-700 font-semibold">
+                        <span className="font-mono text-success font-semibold">
                           {rPO.poNumber}
                         </span>
                       ) : (
@@ -1327,7 +1278,7 @@ export function Quotations() {
                     </TableCell>
                     <TableCell onClick={(e) => e.stopPropagation()}>
                       <div className="flex gap-1">
-                        <QuotationRowActions q={q} i={i} compact />
+                        <QuotationRowActions q={q} i={i} />
                       </div>
                     </TableCell>
                   </TableRow>
@@ -1383,7 +1334,7 @@ export function Quotations() {
 
           {/* Admin Force Edit banner (shown when PO is recorded and editing) */}
           {editMode && hasRecordedPO && isAdmin && (
-            <div className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+            <div className="rounded border border-warning/30 bg-warning/15 p-2 text-xs text-warning">
               <p className="font-semibold">PO Already Recorded</p>
               <p>
                 Customer and line items are locked. You can edit dates, tax, and
@@ -1392,7 +1343,7 @@ export function Quotations() {
               {!forceEdit && (
                 <button
                   type="button"
-                  className="mt-1 text-xs underline text-amber-900"
+                  className="mt-1 text-xs underline text-warning"
                   onClick={() => setForceEdit(true)}
                   data-ocid="quotations.form.force_edit.toggle"
                 >
@@ -1400,7 +1351,7 @@ export function Quotations() {
                 </button>
               )}
               {forceEdit && (
-                <p className="mt-1 font-semibold text-red-700">
+                <p className="mt-1 font-semibold text-destructive">
                   \u26a0 Force edit active. Editing will not affect existing PO
                   or invoices.
                 </p>
@@ -1410,7 +1361,7 @@ export function Quotations() {
 
           {/* Non-admin locked info */}
           {editMode && hasRecordedPO && !isAdmin && (
-            <div className="rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+            <div className="rounded border border-warning/30 bg-warning/15 p-2 text-xs text-warning">
               <p className="font-semibold">PO Already Recorded</p>
               <p>
                 Customer and line items are locked. You may edit dates, tax, and
@@ -1422,7 +1373,6 @@ export function Quotations() {
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              console.log("FORM SUBMITTED");
               handleSave();
             }}
           >
@@ -1801,7 +1751,7 @@ export function Quotations() {
                 </span>
               )}
               {selectedQuotation?.approvedBy && (
-                <span className="text-xs text-green-700 bg-green-50 border border-green-200 px-1.5 py-0.5 rounded">
+                <span className="text-xs text-success bg-success/10 border border-success/30 px-1.5 py-0.5 rounded">
                   Approved by {selectedQuotation.approvedBy}
                   {selectedQuotation.approvedAt
                     ? ` · ${new Date(selectedQuotation.approvedAt).toLocaleDateString("en-IN")}`

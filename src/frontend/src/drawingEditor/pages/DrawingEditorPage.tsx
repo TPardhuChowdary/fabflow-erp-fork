@@ -180,6 +180,12 @@ export function DrawingEditorPage({
   const userName = currentUser?.username ?? "unknown";
   const canDelete = hasPermission(currentUser, "drawing_editor.delete");
   const canEdit = hasPermission(currentUser, "drawing_editor.edit");
+  // drawings_insert RLS (database/phase-14/phase14_drawing_repository_FINAL.sql)
+  // requires drawing_editor.create specifically, not .edit — every default
+  // role grants both together, but a per-user permission override could
+  // still separate them, and the "Upload Drawing" button had no gate at
+  // all before this (see DrawingsListPanel.tsx).
+  const canCreate = hasPermission(currentUser, "drawing_editor.create");
 
   const projectOptions: ProjectOption[] = useMemo(
     () =>
@@ -1859,6 +1865,7 @@ export function DrawingEditorPage({
           customers={customerOptions}
           canDelete={canDelete}
           canEdit={canEdit}
+          canCreate={canCreate}
           onUpload={handleUpload}
           onOpen={handleEditRepositoryDrawing}
           openLabel="Edit"

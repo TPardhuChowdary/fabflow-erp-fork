@@ -33,10 +33,12 @@ export function InspectionStatusStepper({
             <div
               className={cn(
                 "flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] border",
-                done && "bg-green-100 text-green-700 border-green-200",
+                done && "bg-success/10 text-success border-success/30",
                 current &&
                   "bg-primary text-primary-foreground border-primary font-semibold",
-                !done && !current && "bg-gray-50 text-gray-400 border-gray-200",
+                !done &&
+                  !current &&
+                  "bg-muted text-muted-foreground border-border",
               )}
               data-ocid={`qms.inspection.status_step.${s}`}
             >
@@ -45,10 +47,7 @@ export function InspectionStatusStepper({
             </div>
             {i < INSPECTION_SHEET_STATUS_ORDER.length - 1 && (
               <div
-                className={cn(
-                  "w-2 h-px",
-                  done ? "bg-green-300" : "bg-gray-200",
-                )}
+                className={cn("w-2 h-px", done ? "bg-success/40" : "bg-border")}
               />
             )}
           </div>

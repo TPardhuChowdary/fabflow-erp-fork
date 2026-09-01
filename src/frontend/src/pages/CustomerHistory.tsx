@@ -172,6 +172,7 @@ export function CustomerHistory({
                 fill="none"
                 stroke="currentColor"
                 strokeWidth="2"
+                aria-hidden="true"
               >
                 <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                 <polyline points="14,2 14,8 20,8" />
@@ -203,7 +204,7 @@ export function CustomerHistory({
           <p className="text-xs text-muted-foreground uppercase tracking-wide">
             Total Revenue
           </p>
-          <p className="text-xl font-bold mt-1 text-green-600">
+          <p className="text-xl font-bold mt-1 text-success">
             {fmt(totalRevenue)}
           </p>
         </div>
@@ -212,7 +213,7 @@ export function CustomerHistory({
             Outstanding
           </p>
           <p
-            className={`text-xl font-bold mt-1 ${outstanding > 0 ? "text-red-600" : "text-muted-foreground"}`}
+            className={`text-xl font-bold mt-1 ${outstanding > 0 ? "text-destructive" : "text-muted-foreground"}`}
           >
             {fmt(outstanding)}
           </p>
@@ -221,9 +222,7 @@ export function CustomerHistory({
           <p className="text-xs text-muted-foreground uppercase tracking-wide">
             Quotation Conversion
           </p>
-          <p className="text-xl font-bold mt-1 text-blue-600">
-            {conversionRate}%
-          </p>
+          <p className="text-xl font-bold mt-1 text-info">{conversionRate}%</p>
           <p className="text-[11px] text-muted-foreground mt-0.5">
             {acceptedQuotations} of {custQuotations.length} accepted
           </p>
@@ -233,7 +232,7 @@ export function CustomerHistory({
             Avg Payment Delay
           </p>
           <p
-            className={`text-xl font-bold mt-1 ${avgPaymentDelay !== null && avgPaymentDelay > 30 ? "text-orange-600" : "text-foreground"}`}
+            className={`text-xl font-bold mt-1 ${avgPaymentDelay !== null && avgPaymentDelay > 30 ? "text-warning" : "text-foreground"}`}
           >
             {avgPaymentDelay !== null ? `${avgPaymentDelay}d` : "—"}
           </p>
@@ -310,7 +309,7 @@ export function CustomerHistory({
                         <div className="flex items-center gap-2 flex-wrap">
                           <span>{getCustomerVisibleName(p)}</span>
                           {p.internalOrderCode && (
-                            <span className="font-mono text-[10px] text-amber-600 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">
+                            <span className="font-mono text-[10px] text-info bg-info/10 border border-info/30 px-1.5 py-0.5 rounded">
                               {p.internalOrderCode}
                             </span>
                           )}

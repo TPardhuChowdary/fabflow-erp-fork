@@ -167,7 +167,7 @@ export function StageChecklistSection({
       </CardHeader>
       <CardContent className="space-y-3">
         {isAssignedToSomeoneElse && (
-          <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2.5 py-1.5">
+          <p className="text-xs text-warning bg-warning/15 border border-warning/30 rounded-md px-2.5 py-1.5">
             This stage is assigned to {completion?.assignedToName} — only they
             (or an administrator) can complete it.
           </p>
@@ -271,10 +271,10 @@ export function StageChecklistSection({
                       "h-6 text-[10px] px-2",
                       entry?.result === r &&
                         r === "Pass" &&
-                        "bg-green-600 hover:bg-green-600",
+                        "bg-success hover:bg-success",
                       entry?.result === r &&
                         r === "Fail" &&
-                        "bg-red-600 hover:bg-red-600",
+                        "bg-destructive hover:bg-destructive",
                     )}
                     onClick={() => onEntryChange(c.id, { result: r })}
                     data-ocid={`qms.inspection.result.${c.id}.${r}`}

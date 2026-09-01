@@ -295,21 +295,21 @@ export function InspectionSheetsList({ onViewProject }: Props) {
                   {sheet.approvedAt ? (
                     <Badge
                       variant="outline"
-                      className="text-[10px] bg-green-100 text-green-700 border-green-200"
+                      className="text-[10px] bg-success/10 text-success border-success/30"
                     >
                       Approved
                     </Badge>
                   ) : sheet.reviewedAt ? (
                     <Badge
                       variant="outline"
-                      className="text-[10px] bg-orange-100 text-orange-700 border-orange-200"
+                      className="text-[10px] bg-warning/15 text-warning border-warning/30"
                     >
                       Reviewed
                     </Badge>
                   ) : (
                     <Badge
                       variant="outline"
-                      className="text-[10px] bg-gray-100 text-gray-600 border-gray-200"
+                      className="text-[10px] bg-muted text-muted-foreground border-border"
                     >
                       Pending
                     </Badge>

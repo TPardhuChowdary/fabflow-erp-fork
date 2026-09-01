@@ -169,6 +169,97 @@ export async function createEmployeeRemote(
   };
 }
 
+// Same EMP-YYYY-NNN format as the local generateDocNo("EMP") counter it
+// replaces below - pure calculation over supplied server-side codes,
+// mirroring computeNextProjectNumber/computeNextQtNumber/
+// computeNextFloatNumber's monotonic-across-years semantics exactly.
+export function computeNextEmployeeCode(existingCodes: string[]): string {
+  const year = new Date().getFullYear();
+  const nums = existingCodes.map((c) => {
+    const m = (c || "").match(/^EMP-\d{4}-(\d+)$/);
+    return m ? Number.parseInt(m[1], 10) : 0;
+  });
+  const next = nums.length > 0 ? Math.max(...nums) + 1 : 1;
+  return `EMP-${year}-${String(next).padStart(3, "0")}`;
+}
+
+async function fetchExistingEmployeeCodes(
+  client: ReturnType<typeof getSupabase>,
+): Promise<string[] | null> {
+  const { data, error } = await client
+    .from("employees")
+    .select("employee_code")
+    .not("employee_code", "is", null);
+  if (error || !data) return null;
+  return (data as unknown as { employee_code: string }[]).map(
+    (r) => r.employee_code,
+  );
+}
+
+function isEmployeeCodeConflict(error: { code?: string; message?: string }) {
+  return (
+    error.code === "23505" &&
+    (error.message?.includes("uq_employees_org_code") ||
+      error.message?.includes("employee_code"))
+  );
+}
+
+const MAX_EMPLOYEE_CODE_ATTEMPTS = 3;
+
+// employee_code collision handling: same bounded-retry Option 1 pattern as
+// qt_no/project_number/float_no. employees carries a genuine UNIQUE
+// (organization_id, employee_code) index (uq_employees_org_code); the code
+// was previously assigned from store.ts's local, per-browser generateDocNo
+// counter, which two sessions lazily generating a code around the same
+// time could both compute identically - the write would then silently
+// fail (no retry existed) and the employee would simply never get a code.
+export async function assignEmployeeCodeRemote(
+  employee: Employee,
+  candidateCode: string,
+): Promise<WriteResult<Employee>> {
+  const gate = await requireSession();
+  if (!gate.ok) return gate.result;
+  const { client } = gate;
+
+  let candidate = candidateCode;
+
+  for (let attempt = 1; attempt <= MAX_EMPLOYEE_CODE_ATTEMPTS; attempt++) {
+    const { data, error } = await client
+      .from("employees")
+      .update({ employee_code: candidate })
+      .eq("id", employee.id)
+      .select(SELECT_COLUMNS);
+
+    if (!error) {
+      const rows = (data as unknown as EmployeeRow[]) ?? [];
+      if (rows.length === 0) {
+        return {
+          status: "denied",
+          error:
+            "No row was updated (blocked by RLS, or the row does not exist)",
+        };
+      }
+      return { status: "success", data: rowToEmployee(rows[0]) };
+    }
+
+    if (!isEmployeeCodeConflict(error)) {
+      return { status: "error", error: error.message };
+    }
+
+    if (attempt === MAX_EMPLOYEE_CODE_ATTEMPTS) break;
+
+    const freshCodes = await fetchExistingEmployeeCodes(client);
+    if (freshCodes === null) break;
+    candidate = computeNextEmployeeCode(freshCodes);
+  }
+
+  return {
+    status: "error",
+    error:
+      "This employee code was just used by another session. Please try again.",
+  };
+}
+
 export async function updateEmployeeRemote(
   employee: Employee,
 ): Promise<WriteResult<Employee>> {

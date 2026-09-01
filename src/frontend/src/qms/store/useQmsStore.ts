@@ -103,6 +103,29 @@ interface QmsStoreState {
    * acceptedQty/rejectedQty without a per-sheet fetch. */
   stageCompletions: InspectionStageCompletion[];
 
+  // Phase P1.1 — proactive app-boot hydration for the two fields above,
+  // populated by hooks/useSupabaseHydration.ts on login/refresh, same
+  // pattern as every other Supabase-backed list in this app (see the
+  // projectQmsInspections* fields below). setX/setXHydrationStatus are
+  // hydration-write-only, never called directly by UI code — the
+  // loadInspectionSheets()/loadStageCompletions() actions above remain
+  // the on-demand refresh path and keep working exactly as before.
+  inspectionSheetsHydration: { status: HydrationStatus; error?: string };
+  setInspectionSheetsHydrationStatus: (
+    status: HydrationStatus,
+    error?: string,
+  ) => void;
+  setInspectionSheetsFromServer: (sheets: InspectionSheet[]) => void;
+
+  stageCompletionsHydration: { status: HydrationStatus; error?: string };
+  setStageCompletionsHydrationStatus: (
+    status: HydrationStatus,
+    error?: string,
+  ) => void;
+  setStageCompletionsFromServer: (
+    completions: InspectionStageCompletion[],
+  ) => void;
+
   loadInspectionStages: () => Promise<void>;
   loadInspectionSheets: () => Promise<void>;
   loadStageCompletions: () => Promise<void>;
@@ -421,6 +444,24 @@ export const useQmsStore = create<QmsStoreState>((set, get) => ({
   inspectionStages: [],
   inspectionSheets: [],
   stageCompletions: [],
+
+  inspectionSheetsHydration: { status: "idle" },
+  setInspectionSheetsHydrationStatus: (status, error) =>
+    set({ inspectionSheetsHydration: { status, error } }),
+  setInspectionSheetsFromServer: (sheets) =>
+    set({
+      inspectionSheets: sheets,
+      inspectionSheetsHydration: { status: "success" },
+    }),
+
+  stageCompletionsHydration: { status: "idle" },
+  setStageCompletionsHydrationStatus: (status, error) =>
+    set({ stageCompletionsHydration: { status, error } }),
+  setStageCompletionsFromServer: (completions) =>
+    set({
+      stageCompletions: completions,
+      stageCompletionsHydration: { status: "success" },
+    }),
 
   loadInspectionStages: async () => {
     if (get().inspectionStagesLoaded) return;

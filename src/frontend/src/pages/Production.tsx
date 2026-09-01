@@ -23,6 +23,7 @@ import { ShieldOff } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import { checkMaterialAvailability } from "../lib/materialAvailability";
 import { createVendorRemote } from "../lib/vendorsApi";
 import { canCreate, canEdit, canView, hasPermission } from "../permissions";
 import { ProductionGateStatusBadge } from "../qms/components/ProductionGateStatusBadge";
@@ -37,11 +38,11 @@ import type {
 } from "../types";
 
 const STAGE_STATUS_COLORS: Record<ProjectStageStatus, string> = {
-  NotStarted: "bg-gray-100 text-gray-500",
-  Sent: "bg-blue-100 text-blue-700",
-  InProgress: "bg-amber-100 text-amber-700",
-  Completed: "bg-green-100 text-green-700",
-  Received: "bg-emerald-100 text-emerald-700",
+  NotStarted: "bg-destructive/10 text-destructive",
+  Sent: "bg-info/10 text-info",
+  InProgress: "bg-warning/15 text-warning",
+  Completed: "bg-success/10 text-success",
+  Received: "bg-success/10 text-success",
 };
 
 const STAGE_STATUS_LABELS: Record<ProjectStageStatus, string> = {
@@ -52,33 +53,54 @@ const STAGE_STATUS_LABELS: Record<ProjectStageStatus, string> = {
   Received: "Received",
 };
 
+// Same real per-status color intent as STAGE_STATUS_COLORS above (Not
+// Started reads as destructive, Sent/In Progress as warning, Completed/
+// Received as success) — these two feed inline `style` props instead of
+// `className` (the surrounding card also sets inline pixel values for
+// minWidth/borderRadius/boxShadow this pass isn't touching), so the
+// tokens are expressed as real oklch(var(--x)) CSS functions rather than
+// Tailwind utility classes, at the same 10%/30%/full-opacity levels used
+// everywhere else in this pass.
 const STAGE_CARD_STYLE: Record<
   ProjectStageStatus,
   { background: string; borderColor: string }
 > = {
-  NotStarted: { background: "#fdecea", borderColor: "#f5c6c4" },
-  Sent: { background: "#fff7e6", borderColor: "#ffd591" },
-  InProgress: { background: "#fff7e6", borderColor: "#ffd591" },
-  Completed: { background: "#e6f7ec", borderColor: "#b7e4c7" },
-  Received: { background: "#e6f7ec", borderColor: "#b7e4c7" },
+  NotStarted: {
+    background: "oklch(var(--destructive) / 0.1)",
+    borderColor: "oklch(var(--destructive) / 0.3)",
+  },
+  Sent: {
+    background: "oklch(var(--warning) / 0.15)",
+    borderColor: "oklch(var(--warning) / 0.3)",
+  },
+  InProgress: {
+    background: "oklch(var(--warning) / 0.15)",
+    borderColor: "oklch(var(--warning) / 0.3)",
+  },
+  Completed: {
+    background: "oklch(var(--success) / 0.1)",
+    borderColor: "oklch(var(--success) / 0.3)",
+  },
+  Received: {
+    background: "oklch(var(--success) / 0.1)",
+    borderColor: "oklch(var(--success) / 0.3)",
+  },
 };
 
 const STAGE_STATUS_TEXT_COLORS: Record<ProjectStageStatus, string> = {
-  NotStarted: "#a12622",
-  Sent: "#a15c00",
-  InProgress: "#a15c00",
-  Completed: "#1f7a3e",
-  Received: "#1f7a3e",
+  NotStarted: "oklch(var(--destructive))",
+  Sent: "oklch(var(--warning))",
+  InProgress: "oklch(var(--warning))",
+  Completed: "oklch(var(--success))",
+  Received: "oklch(var(--success))",
 };
 
 // ---- SentToSelect (same logic as ProjectDetail) ----
 function SentToSelect({
   vendorId,
-  vendorName,
   onChange,
 }: {
   vendorId: string;
-  vendorName: string;
   onChange: (id: string, name: string) => void;
 }) {
   const { vendors, addVendor } = useStore();
@@ -356,29 +378,6 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
   );
 
   // ---- Material availability check ----
-  const checkMaterialAvailability = (
-    projectId: string,
-  ): { ok: boolean; shortages: string[] } => {
-    const projBomItems = (bomItems || []).filter(
-      (b) => b.projectId === projectId,
-    );
-    const shortages: string[] = [];
-    for (const bom of projBomItems) {
-      const inv = (inventoryItems || []).find(
-        (i) =>
-          i.id === bom.inventoryItemId ||
-          i.name.trim().toLowerCase() === bom.materialName.trim().toLowerCase(),
-      );
-      const available = inv?.quantityAvailable ?? 0;
-      if (available < bom.requiredQuantity) {
-        shortages.push(
-          `${bom.materialName} requires ${bom.requiredQuantity} but only ${available} available`,
-        );
-      }
-    }
-    return { ok: shortages.length === 0, shortages };
-  };
-
   // ---- Handlers ----
 
   const handleStatusChange = async (
@@ -392,7 +391,11 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
     }
     // Material check when starting a stage
     if (newStatus === "InProgress") {
-      const { ok, shortages } = checkMaterialAvailability(projectId);
+      const { ok, shortages } = checkMaterialAvailability(
+        projectId,
+        bomItems,
+        inventoryItems,
+      );
       if (!ok) {
         const isAdmin =
           currentUser?.role === "admin" || currentUser?.role === "Admin";
@@ -456,7 +459,11 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
     const stage = prod.stages?.[stageIdx];
     // Material check
     if (stage?.status === "NotStarted" || stage?.status === undefined) {
-      const { ok, shortages } = checkMaterialAvailability(projectId);
+      const { ok, shortages } = checkMaterialAvailability(
+        projectId,
+        bomItems,
+        inventoryItems,
+      );
       if (!ok) {
         const isAdmin =
           currentUser?.role === "admin" || currentUser?.role === "Admin";
@@ -730,7 +737,7 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
             <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
               Active Queue
             </span>
-            <span className="ml-auto text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-medium">
+            <span className="ml-auto text-xs bg-warning/15 text-warning px-2 py-0.5 rounded-full font-medium">
               {productionQueue.length} stage
               {productionQueue.length > 1 ? "s" : ""} active
             </span>
@@ -750,7 +757,7 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                   {stage.requiresMaterialTracking && (
-                    <span className="text-[10px] bg-blue-50 text-blue-700 border border-blue-200 rounded px-1.5 py-0.5">
+                    <span className="text-[10px] bg-info/10 text-info border border-info/30 rounded px-1.5 py-0.5">
                       Material
                     </span>
                   )}
@@ -801,7 +808,7 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                       {project.projectName}
                     </span>
                     {isLegacy && (
-                      <span className="text-[10px] bg-yellow-100 text-yellow-700 border border-yellow-200 rounded px-1.5 py-0.5">
+                      <span className="text-[10px] bg-warning/15 text-warning border border-warning/30 rounded px-1.5 py-0.5">
                         Legacy
                       </span>
                     )}
@@ -815,7 +822,7 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                         {STAGE_STATUS_LABELS[activeStage.status]}
                       </span>
                     ) : totalStages > 0 ? (
-                      <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-green-100 text-green-700">
+                      <span className="text-xs px-2 py-0.5 rounded-full font-medium bg-success/10 text-success">
                         All Complete
                       </span>
                     ) : (
@@ -825,9 +832,9 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                     )}
                     {totalStages > 0 && (
                       <div className="flex items-center gap-1.5">
-                        <div className="w-16 h-1.5 bg-gray-200 rounded-full overflow-hidden">
+                        <div className="w-16 h-1.5 bg-muted rounded-full overflow-hidden">
                           <div
-                            className="h-full bg-green-500 rounded-full"
+                            className="h-full bg-success rounded-full"
                             style={{
                               width: `${Math.round((completedCount / totalStages) * 100)}%`,
                             }}
@@ -851,7 +858,7 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                   <CardContent className="px-4 pb-4 pt-0 border-t">
                     {isLegacy ? (
                       <div className="mt-3">
-                        <div className="rounded-md bg-yellow-50 px-3 py-2 text-xs text-yellow-800 border border-yellow-200">
+                        <div className="rounded-md bg-warning/15 px-3 py-2 text-xs text-warning border border-warning/30">
                           This project uses the legacy production system.
                           Production data is view-only.
                         </div>
@@ -980,9 +987,9 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                   <span
                                     className={`flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${
                                       stage.isRework
-                                        ? "bg-amber-500 text-white"
+                                        ? "bg-warning text-warning-foreground"
                                         : isActive
-                                          ? "bg-blue-500 text-white"
+                                          ? "bg-info text-info-foreground"
                                           : "bg-muted text-muted-foreground"
                                     }`}
                                   >
@@ -993,12 +1000,12 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                       {stage.stageName}
                                     </span>
                                     {stage.requiresMaterialTracking && (
-                                      <span className="ml-2 text-[10px] bg-amber-100 text-amber-700 rounded px-1 py-0.5">
+                                      <span className="ml-2 text-[10px] bg-warning/15 text-warning rounded px-1 py-0.5">
                                         Material
                                       </span>
                                     )}
                                     {stage.isRework && (
-                                      <span className="ml-2 text-[10px] bg-amber-100 text-amber-700 border border-amber-200 rounded px-1 py-0.5">
+                                      <span className="ml-2 text-[10px] bg-warning/15 text-warning border border-warning/30 rounded px-1 py-0.5">
                                         Rework
                                       </span>
                                     )}
@@ -1011,7 +1018,7 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                 </button>
                                 <div className="flex items-center gap-2">
                                   {hasRejected && (
-                                    <span className="text-[10px] bg-red-100 text-red-700 border border-red-200 rounded px-1.5 py-0.5 font-medium">
+                                    <span className="text-[10px] bg-destructive/10 text-destructive border border-destructive/30 rounded px-1.5 py-0.5 font-medium">
                                       {stage.rejectedQty} rejected
                                     </span>
                                   )}
@@ -1089,34 +1096,34 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                     <div className="space-y-3">
                                       {/* Totals */}
                                       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-                                        <div className="bg-blue-50 border border-blue-200 rounded-md p-2 text-center">
-                                          <div className="text-xs text-blue-600 font-medium">
+                                        <div className="bg-info/10 border border-info/30 rounded-md p-2 text-center">
+                                          <div className="text-xs text-info font-medium">
                                             Total Sent
                                           </div>
-                                          <div className="text-lg font-bold text-blue-700">
+                                          <div className="text-lg font-bold text-info">
                                             {totalSent}
                                           </div>
                                         </div>
-                                        <div className="bg-green-50 border border-green-200 rounded-md p-2 text-center">
-                                          <div className="text-xs text-green-600 font-medium">
+                                        <div className="bg-success/10 border border-success/30 rounded-md p-2 text-center">
+                                          <div className="text-xs text-success font-medium">
                                             Total Received
                                           </div>
-                                          <div className="text-lg font-bold text-green-700">
+                                          <div className="text-lg font-bold text-success">
                                             {totalReceived}
                                           </div>
                                         </div>
                                         <div
                                           className={`border rounded-md p-2 text-center ${
                                             pending > 0
-                                              ? "bg-orange-50 border-orange-200"
-                                              : "bg-gray-50 border-gray-200"
+                                              ? "bg-warning/15 border-warning/30"
+                                              : "bg-muted border-border"
                                           }`}
                                         >
                                           <div
                                             className={`text-xs font-medium ${
                                               pending > 0
-                                                ? "text-orange-600"
-                                                : "text-gray-500"
+                                                ? "text-warning"
+                                                : "text-muted-foreground"
                                             }`}
                                           >
                                             Pending
@@ -1124,8 +1131,8 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                           <div
                                             className={`text-lg font-bold ${
                                               pending > 0
-                                                ? "text-orange-700"
-                                                : "text-gray-600"
+                                                ? "text-warning"
+                                                : "text-muted-foreground"
                                             }`}
                                           >
                                             {pending}
@@ -1192,7 +1199,7 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                         <Button
                                           size="sm"
                                           variant="outline"
-                                          className="text-indigo-600 border-indigo-200 hover:bg-indigo-50"
+                                          className="text-info border-info/30 hover:bg-info/10"
                                           onClick={() => {
                                             setQtyDialog({
                                               projectId: project.id,
@@ -1216,7 +1223,7 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                         {hasRejected && (
                                           <Button
                                             size="sm"
-                                            className="bg-amber-500 hover:bg-amber-600 text-white"
+                                            className="bg-warning hover:bg-warning/90 text-warning-foreground"
                                             onClick={() => {
                                               setReworkDialog({
                                                 projectId: project.id,
@@ -1252,18 +1259,18 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                             </div>
                                           </div>
                                           <div className="text-center">
-                                            <div className="text-[10px] text-green-600">
+                                            <div className="text-[10px] text-success">
                                               OK Qty
                                             </div>
-                                            <div className="text-sm font-bold text-green-700">
+                                            <div className="text-sm font-bold text-success">
                                               {stage.okQty ?? 0}
                                             </div>
                                           </div>
                                           <div className="text-center">
-                                            <div className="text-[10px] text-red-500">
+                                            <div className="text-[10px] text-destructive">
                                               Rejected Qty
                                             </div>
-                                            <div className="text-sm font-bold text-red-600">
+                                            <div className="text-sm font-bold text-destructive">
                                               {stage.rejectedQty ?? 0}
                                             </div>
                                           </div>
@@ -1307,8 +1314,8 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                                         <span
                                                           className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
                                                             tx.type === "send"
-                                                              ? "bg-blue-100 text-blue-700"
-                                                              : "bg-green-100 text-green-700"
+                                                              ? "bg-info/10 text-info"
+                                                              : "bg-success/10 text-success"
                                                           }`}
                                                         >
                                                           {tx.type === "send"
@@ -1400,7 +1407,7 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                         <Button
                                           size="sm"
                                           variant="outline"
-                                          className="text-indigo-600 border-indigo-200 hover:bg-indigo-50"
+                                          className="text-info border-info/30 hover:bg-info/10"
                                           onClick={() => {
                                             setQtyDialog({
                                               projectId: project.id,
@@ -1424,7 +1431,7 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                         {hasRejected && (
                                           <Button
                                             size="sm"
-                                            className="bg-amber-500 hover:bg-amber-600 text-white"
+                                            className="bg-warning hover:bg-warning/90 text-warning-foreground"
                                             onClick={() => {
                                               setReworkDialog({
                                                 projectId: project.id,
@@ -1460,18 +1467,18 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                             </div>
                                           </div>
                                           <div className="text-center">
-                                            <div className="text-[10px] text-green-600">
+                                            <div className="text-[10px] text-success">
                                               OK Qty
                                             </div>
-                                            <div className="text-sm font-bold text-green-700">
+                                            <div className="text-sm font-bold text-success">
                                               {stage.okQty ?? 0}
                                             </div>
                                           </div>
                                           <div className="text-center">
-                                            <div className="text-[10px] text-red-500">
+                                            <div className="text-[10px] text-destructive">
                                               Rejected Qty
                                             </div>
-                                            <div className="text-sm font-bold text-red-600">
+                                            <div className="text-sm font-bold text-destructive">
                                               {stage.rejectedQty ?? 0}
                                             </div>
                                           </div>
@@ -1551,7 +1558,6 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
               <Label className="text-xs">Sent To</Label>
               <SentToSelect
                 vendorId={sendForm.vendorId}
-                vendorName={sendForm.vendorName}
                 onChange={(id, name) =>
                   setSendForm((f) => ({ ...f, vendorId: id, vendorName: name }))
                 }
@@ -1675,10 +1681,10 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                 />
               </div>
               <div className="space-y-1">
-                <Label className="text-xs text-green-700">OK Quantity</Label>
+                <Label className="text-xs text-success">OK Quantity</Label>
                 <Input
                   type="number"
-                  className="h-8 text-xs border-green-300"
+                  className="h-8 text-xs border-success/40"
                   min={0}
                   value={qtyForm.okQty}
                   onChange={(e) =>
@@ -1688,12 +1694,12 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                 />
               </div>
               <div className="space-y-1">
-                <Label className="text-xs text-red-600">
+                <Label className="text-xs text-destructive">
                   Rejected Quantity
                 </Label>
                 <Input
                   type="number"
-                  className="h-8 text-xs border-red-300"
+                  className="h-8 text-xs border-destructive/40"
                   min={0}
                   value={qtyForm.rejectedQty}
                   onChange={(e) =>
@@ -1746,16 +1752,16 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
         <DialogContent className="max-w-sm">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <span className="text-amber-600">↺</span> Send to Rework
+              <span className="text-warning">↺</span> Send to Rework
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-3 py-2">
-            <div className="rounded-md bg-amber-50 border border-amber-200 px-3 py-2 space-y-1">
-              <p className="text-xs text-amber-700">
+            <div className="rounded-md bg-warning/15 border border-warning/30 px-3 py-2 space-y-1">
+              <p className="text-xs text-warning">
                 <span className="font-semibold">Original Stage:</span>{" "}
                 {reworkDialog?.stage.stageName}
               </p>
-              <p className="text-xs text-amber-700">
+              <p className="text-xs text-warning">
                 <span className="font-semibold">Rejected Qty:</span>{" "}
                 {reworkDialog?.stage.rejectedQty ?? 0}
               </p>
@@ -1806,7 +1812,7 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
             </Button>
             <Button
               size="sm"
-              className="bg-amber-500 hover:bg-amber-600"
+              className="bg-warning hover:bg-warning/90"
               onClick={handleSendToRework}
               data-ocid="production.rework.confirm_button"
             >
@@ -1823,7 +1829,7 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
       >
         <DialogContent className="max-w-sm">
           <DialogHeader>
-            <DialogTitle className="text-amber-600">
+            <DialogTitle className="text-warning">
               ⚠ Material Shortage
             </DialogTitle>
           </DialogHeader>
@@ -1842,7 +1848,7 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                 </li>
               ))}
             </ul>
-            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded p-2">
+            <p className="text-xs text-warning bg-warning/15 border border-warning/30 rounded p-2">
               Admin override: Proceeding will start this stage despite the
               shortage.
             </p>

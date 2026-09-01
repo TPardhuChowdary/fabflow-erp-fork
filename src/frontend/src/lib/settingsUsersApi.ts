@@ -86,6 +86,90 @@ export async function listOrgUsers(): Promise<WriteResult<OrgUserRow[]>> {
   return { status: "success", data: users };
 }
 
+export interface SecurityAuditLogEntry {
+  id: string;
+  eventType: string;
+  actorUserId: string | null;
+  actorUsername?: string;
+  targetUserId: string | null;
+  targetUsername?: string;
+  metadata: Record<string, unknown>;
+  createdAt: number;
+}
+
+// Read path for security_audit_log (phase1_auth_permissions_rls_v5_FINAL.sql
+// §9) — written to via the log_security_event() RPC (password-change events,
+// agent/audit.ts's Agent-action trail). SELECT-only from here; there is no
+// insert/update/delete RLS policy on this table for clients, matching its
+// append-only, tamper-evident intent. Most recent first, capped at `limit`
+// (a simple recency window, not full pagination - this is a small,
+// occasional-use admin view, not a high-volume log browser).
+export async function listSecurityAuditLog(
+  limit = 200,
+): Promise<WriteResult<SecurityAuditLogEntry[]>> {
+  if (!isSupabaseConfigured) return unauth();
+  const supabase = getSupabase();
+  const {
+    data: { session },
+  } = await supabase.auth.getSession();
+  if (!session) return unauth();
+
+  const { data, error } = await supabase
+    .from("security_audit_log")
+    .select(
+      "id, event_type, actor_user_id, target_user_id, metadata, created_at",
+    )
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) {
+    if (error.code === "42501" || /permission denied/i.test(error.message)) {
+      return { status: "denied", error: error.message };
+    }
+    return { status: "error", error: error.message };
+  }
+
+  const rows = (data || []) as {
+    id: string;
+    event_type: string;
+    actor_user_id: string | null;
+    target_user_id: string | null;
+    metadata: Record<string, unknown> | null;
+    created_at: string;
+  }[];
+
+  // Resolve actor/target ids to usernames for display - same
+  // fetch-profiles-separately-and-map pattern listOrgUsers above already
+  // uses, not a new join style.
+  const ids = new Set<string>();
+  for (const r of rows) {
+    if (r.actor_user_id) ids.add(r.actor_user_id);
+    if (r.target_user_id) ids.add(r.target_user_id);
+  }
+  const usernames = new Map<string, string>();
+  if (ids.size > 0) {
+    const { data: profiles } = await supabase
+      .from("profiles")
+      .select("id, username")
+      .in("id", Array.from(ids));
+    for (const p of profiles || []) usernames.set(p.id, p.username);
+  }
+
+  const entries: SecurityAuditLogEntry[] = rows.map((r) => ({
+    id: r.id,
+    eventType: r.event_type,
+    actorUserId: r.actor_user_id,
+    actorUsername: r.actor_user_id ? usernames.get(r.actor_user_id) : undefined,
+    targetUserId: r.target_user_id,
+    targetUsername: r.target_user_id
+      ? usernames.get(r.target_user_id)
+      : undefined,
+    metadata: r.metadata || {},
+    createdAt: new Date(r.created_at).getTime(),
+  }));
+
+  return { status: "success", data: entries };
+}
+
 /**
  * The single, privileged, real-account-provisioning path — the ONLY place
  * in the frontend that creates a real Supabase Auth user. Called both by

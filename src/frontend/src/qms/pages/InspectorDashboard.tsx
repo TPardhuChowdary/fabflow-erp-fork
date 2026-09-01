@@ -195,7 +195,7 @@ export function InspectorDashboard({ onOpenProject }: Props) {
         </Card>
         <Card>
           <CardContent className="pt-4 flex items-center gap-3">
-            <AlertTriangle className="w-5 h-5 text-red-600" />
+            <AlertTriangle className="w-5 h-5 text-destructive" />
             <div>
               <div className="text-lg font-bold">{overdue.length}</div>
               <div className="text-xs text-muted-foreground">Overdue</div>
@@ -204,7 +204,7 @@ export function InspectorDashboard({ onOpenProject }: Props) {
         </Card>
         <Card>
           <CardContent className="pt-4 flex items-center gap-3">
-            <CheckCircle2 className="w-5 h-5 text-green-600" />
+            <CheckCircle2 className="w-5 h-5 text-success" />
             <div>
               <div className="text-lg font-bold">
                 {recentlyCompleted.length}
@@ -221,11 +221,11 @@ export function InspectorDashboard({ onOpenProject }: Props) {
         <Card>
           <CardHeader className="pb-2">
             <CardTitle className="text-sm font-semibold flex items-center gap-1.5">
-              <AlertTriangle className="w-4 h-4 text-red-600" />
+              <AlertTriangle className="w-4 h-4 text-destructive" />
               Overdue
               <Badge
                 variant="outline"
-                className="text-[10px] bg-red-100 text-red-700 border-red-200"
+                className="text-[10px] bg-destructive/10 text-destructive border-destructive/30"
               >
                 {overdue.length}
               </Badge>

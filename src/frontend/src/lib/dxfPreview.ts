@@ -7,10 +7,18 @@
 // viewing a DXF. There is no editing, no saving, no undo/redo here — that
 // is explicitly out of scope for this phase (see task spec section 2/13).
 //
-// Phase 1 entity scope: LINE, LWPOLYLINE/POLYLINE, CIRCLE, ARC, TEXT, plus
-// a simple per-layer visibility list and the 9 standard ACI colors.
-// ELLIPSE, SPLINE, DIMENSION, and BLOCK/INSERT are intentionally skipped
-// (not rendered), not approximated incorrectly.
+// Entity scope: LINE, LWPOLYLINE/POLYLINE, CIRCLE, ARC, TEXT, plus a simple
+// per-layer visibility list and the 9 standard ACI colors. INSERT (block
+// references) are resolved by recursively walking the referenced block's
+// own entities through the same conversion, so a DXF built from repeated
+// blocks (a very common way multi-view/multi-sheet drawings are authored)
+// renders completely instead of showing only whatever wasn't a block.
+// ELLIPSE, SPLINE, DIMENSION, and MTEXT are still intentionally skipped
+// (not rendered), not approximated incorrectly. Model space only — DXF
+// PAPER SPACE layouts are a separate, larger feature (a sheet/layout
+// switcher UI) and are not part of this pass; see the block-resolution
+// comment below for exactly what "layouts" means here and why it's out
+// of scope for now.
 //
 // Parsing (dxf-parser, CPU-heavy on large files) runs in a Web Worker via
 // parseDxfInWorker — see dxfWorker.ts. Geometry conversion below runs on
@@ -38,10 +46,30 @@ export interface ParsedDxfEntity {
   text?: string;
   textHeight?: number;
   shape?: boolean;
+  // INSERT (block reference) fields — matches dxf-parser's IInsertEntity.
+  // `name` looks up the referenced definition in ParsedDxf.blocks;
+  // `position` here is the insertion point (distinct from `startPoint`,
+  // which TEXT uses) — only ever set on an INSERT entity.
+  name?: string;
+  xScale?: number;
+  yScale?: number;
+  rotation?: number;
+  position?: { x: number; y: number; z?: number };
+}
+
+/** A DXF block definition — a named, reusable group of entities. dxf-parser
+ * already parses these (and even flags which are paper-space); this app
+ * simply hadn't been reading them until now. `position` is the block's own
+ * local origin — every entity inside is defined relative to it, so an
+ * INSERT must subtract it before applying the insert's own placement. */
+export interface ParsedDxfBlock {
+  entities: ParsedDxfEntity[];
+  position?: { x: number; y: number; z?: number };
 }
 
 export interface ParsedDxf {
   entities: ParsedDxfEntity[];
+  blocks?: Record<string, ParsedDxfBlock>;
   tables?: { layer?: { layers?: Record<string, { colorIndex?: number }> } };
 }
 
@@ -114,9 +142,56 @@ export interface DxfSceneResult {
   skippedEntityTypes: string[];
 }
 
+/** A 2D point transform: block-local coordinates in, placed/world
+ * coordinates out. Identity for top-level (non-block) entities. */
+type XY = (x: number, y: number) => { x: number; y: number };
+const IDENTITY_XY: XY = (x, y) => ({ x, y });
+
+/** Composes the transform an INSERT applies to its block's entities:
+ * subtract the block's own local origin, scale, rotate, then translate to
+ * the insertion point — the standard DXF block-reference placement. Only
+ * uniform-ish scale is representable on CIRCLE/ARC (a true non-uniform
+ * scale turns a circle into an ellipse, which isn't one of the supported
+ * primitives); this averages xScale/yScale for radius, a documented
+ * simplification, not a bug, matching this file's existing approach to
+ * bulge on polylines. */
+function makeInsertTransform(
+  block: ParsedDxfBlock,
+  insert: ParsedDxfEntity,
+): XY {
+  const base = block.position ?? { x: 0, y: 0 };
+  const ins = insert.position ?? { x: 0, y: 0 };
+  const rad = ((insert.rotation ?? 0) * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const sx = insert.xScale ?? 1;
+  const sy = insert.yScale ?? 1;
+  return (x, y) => {
+    const lx = (x - base.x) * sx;
+    const ly = (y - base.y) * sy;
+    return {
+      x: lx * cos - ly * sin + ins.x,
+      y: lx * sin + ly * cos + ins.y,
+    };
+  };
+}
+
+/** Maximum INSERT nesting depth to walk (a block referencing a block
+ * referencing a block, and so on) — guards against a malformed/circular
+ * DXF (block A inserts block A) hanging the parse instead of skipping the
+ * offending reference. Real-world drawings are rarely more than 2-3
+ * levels deep, so this is generous headroom, not a real limitation. */
+const MAX_INSERT_DEPTH = 8;
+
 /** Converts parsed DXF entities into fabric.Object instances. DXF is
  * Y-up; canvas is Y-down, so every Y coordinate is negated once here
- * ("flip") rather than fighting it with a canvas-level transform. */
+ * ("flip") rather than fighting it with a canvas-level transform.
+ *
+ * INSERT entities are resolved by recursively converting the referenced
+ * block's own entities through this same function, composing the block's
+ * placement transform (see makeInsertTransform) with whatever transform
+ * this call itself was invoked under — so a block inserted inside another
+ * inserted block still lands in the right place. */
 export function buildDxfScene(dxf: ParsedDxf): DxfSceneResult {
   const objects: fabric.Object[] = [];
   const layerSet = new Set<string>();
@@ -138,115 +213,167 @@ export function buildDxfScene(dxf: ParsedDxf): DxfSceneResult {
     hoverCursor: "default",
   } as const;
 
-  for (const entity of dxf.entities ?? []) {
-    const layer = entity.layer ?? "0";
-    layerSet.add(layer);
-    const stroke = resolveColor(entity, dxf);
-    let obj: fabric.Object | null = null;
+  function walk(entities: ParsedDxfEntity[], toWorld: XY, depth: number) {
+    for (const entity of entities) {
+      const layer = entity.layer ?? "0";
+      layerSet.add(layer);
+      const stroke = resolveColor(entity, dxf);
+      let obj: fabric.Object | null = null;
 
-    switch (entity.type) {
-      case "LINE": {
-        const [p1, p2] = entity.vertices ?? [];
-        if (!p1 || !p2) break;
-        const y1 = flip(p1.y);
-        const y2 = flip(p2.y);
-        track(p1.x, y1);
-        track(p2.x, y2);
-        obj = new fabric.Line([p1.x, y1, p2.x, y2], {
-          stroke,
-          strokeWidth: 1,
-          ...commonOpts,
-        });
-        break;
-      }
-      case "LWPOLYLINE":
-      case "POLYLINE": {
-        const pts = (entity.vertices ?? []).map((v) => {
-          const y = flip(v.y);
-          track(v.x, y);
-          return { x: v.x, y };
-        });
-        if (pts.length < 2) break;
-        // Bulge (curved polyline segments) is rendered as a straight
-        // segment for Phase 1 — a documented simplification, not a bug.
-        const Ctor = entity.shape ? fabric.Polygon : fabric.Polyline;
-        obj = new Ctor(pts, {
-          stroke,
-          fill: "",
-          strokeWidth: 1,
-          ...commonOpts,
-        });
-        break;
-      }
-      case "CIRCLE": {
-        if (!entity.center || !entity.radius) break;
-        const cy = flip(entity.center.y);
-        track(entity.center.x - entity.radius, cy - entity.radius);
-        track(entity.center.x + entity.radius, cy + entity.radius);
-        obj = new fabric.Circle({
-          left: entity.center.x - entity.radius,
-          top: cy - entity.radius,
-          radius: entity.radius,
-          stroke,
-          fill: "",
-          strokeWidth: 1,
-          ...commonOpts,
-        });
-        break;
-      }
-      case "ARC": {
-        if (
-          !entity.center ||
-          entity.radius === undefined ||
-          entity.startAngle === undefined ||
-          entity.endAngle === undefined
-        )
+      switch (entity.type) {
+        case "LINE": {
+          const [p1, p2] = entity.vertices ?? [];
+          if (!p1 || !p2) break;
+          const w1 = toWorld(p1.x, p1.y);
+          const w2 = toWorld(p2.x, p2.y);
+          const y1 = flip(w1.y);
+          const y2 = flip(w2.y);
+          track(w1.x, y1);
+          track(w2.x, y2);
+          obj = new fabric.Line([w1.x, y1, w2.x, y2], {
+            stroke,
+            strokeWidth: 1,
+            ...commonOpts,
+          });
           break;
-        const { center, radius, startAngle, endAngle } = entity;
-        const sx = center.x + radius * Math.cos(startAngle);
-        const sy = flip(center.y + radius * Math.sin(startAngle));
-        const ex = center.x + radius * Math.cos(endAngle);
-        const ey = flip(center.y + radius * Math.sin(endAngle));
-        track(center.x - radius, flip(center.y) - radius);
-        track(center.x + radius, flip(center.y) + radius);
-        let sweep = endAngle - startAngle;
-        while (sweep < 0) sweep += Math.PI * 2;
-        const largeArc = sweep > Math.PI ? 1 : 0;
-        // Y-flip reverses visual arc direction, so sweep-flag=1 here
-        // matches DXF's always-CCW start->end convention on screen.
-        const d = `M ${sx} ${sy} A ${radius} ${radius} 0 ${largeArc} 1 ${ex} ${ey}`;
-        obj = new fabric.Path(d, {
-          stroke,
-          fill: "",
-          strokeWidth: 1,
-          ...commonOpts,
-        });
-        break;
+        }
+        case "LWPOLYLINE":
+        case "POLYLINE": {
+          const pts = (entity.vertices ?? []).map((v) => {
+            const w = toWorld(v.x, v.y);
+            const y = flip(w.y);
+            track(w.x, y);
+            return { x: w.x, y };
+          });
+          if (pts.length < 2) break;
+          // Bulge (curved polyline segments) is rendered as a straight
+          // segment — a documented simplification, not a bug.
+          const Ctor = entity.shape ? fabric.Polygon : fabric.Polyline;
+          obj = new Ctor(pts, {
+            stroke,
+            fill: "",
+            strokeWidth: 1,
+            ...commonOpts,
+          });
+          break;
+        }
+        case "CIRCLE": {
+          if (!entity.center || !entity.radius) break;
+          const wc = toWorld(entity.center.x, entity.center.y);
+          const cy = flip(wc.y);
+          // Radius scale under an INSERT: measure how far toWorld() moves a
+          // unit vector — length is preserved by rotation, so this is
+          // exactly the local-to-world scale factor along X, composed
+          // through any nesting. 1 (no change) for top-level entities,
+          // where toWorld is the identity transform. Only the X-scale is
+          // used — see makeInsertTransform's doc comment on non-uniform
+          // scale.
+          const origin = toWorld(0, 0);
+          const unitX = toWorld(1, 0);
+          const scale = Math.hypot(unitX.x - origin.x, unitX.y - origin.y);
+          const r = entity.radius * scale;
+          track(wc.x - r, cy - r);
+          track(wc.x + r, cy + r);
+          obj = new fabric.Circle({
+            left: wc.x - r,
+            top: cy - r,
+            radius: r,
+            stroke,
+            fill: "",
+            strokeWidth: 1,
+            ...commonOpts,
+          });
+          break;
+        }
+        case "ARC": {
+          if (
+            !entity.center ||
+            entity.radius === undefined ||
+            entity.startAngle === undefined ||
+            entity.endAngle === undefined
+          )
+            break;
+          const { center, radius, startAngle, endAngle } = entity;
+          const wStart = toWorld(
+            center.x + radius * Math.cos(startAngle),
+            center.y + radius * Math.sin(startAngle),
+          );
+          const wEnd = toWorld(
+            center.x + radius * Math.cos(endAngle),
+            center.y + radius * Math.sin(endAngle),
+          );
+          const wc = toWorld(center.x, center.y);
+          // Same scale derivation as CIRCLE — see that case's comment.
+          const origin = toWorld(0, 0);
+          const unitX = toWorld(1, 0);
+          const scale = Math.hypot(unitX.x - origin.x, unitX.y - origin.y);
+          const r = radius * scale;
+          const sx = wStart.x;
+          const sy = flip(wStart.y);
+          const ex = wEnd.x;
+          const ey = flip(wEnd.y);
+          track(wc.x - r, flip(wc.y) - r);
+          track(wc.x + r, flip(wc.y) + r);
+          let sweep = endAngle - startAngle;
+          while (sweep < 0) sweep += Math.PI * 2;
+          const largeArc = sweep > Math.PI ? 1 : 0;
+          // Y-flip reverses visual arc direction, so sweep-flag=1 here
+          // matches DXF's always-CCW start->end convention on screen.
+          const d = `M ${sx} ${sy} A ${r} ${r} 0 ${largeArc} 1 ${ex} ${ey}`;
+          obj = new fabric.Path(d, {
+            stroke,
+            fill: "",
+            strokeWidth: 1,
+            ...commonOpts,
+          });
+          break;
+        }
+        case "TEXT": {
+          if (!entity.startPoint || !entity.text) break;
+          const w = toWorld(entity.startPoint.x, entity.startPoint.y);
+          const y = flip(w.y);
+          track(w.x, y);
+          obj = new fabric.Text(entity.text, {
+            left: w.x,
+            top: y,
+            fontSize: entity.textHeight || 2.5,
+            fill: stroke,
+            ...commonOpts,
+          });
+          break;
+        }
+        case "INSERT": {
+          const block = entity.name ? dxf.blocks?.[entity.name] : undefined;
+          if (!block || depth >= MAX_INSERT_DEPTH) {
+            skipped.add(
+              depth >= MAX_INSERT_DEPTH
+                ? "INSERT (too deep)"
+                : "INSERT (block missing)",
+            );
+            break;
+          }
+          const blockToParent = makeInsertTransform(block, entity);
+          const composed: XY = (x, y) => {
+            const p = blockToParent(x, y);
+            return toWorld(p.x, p.y);
+          };
+          walk(block.entities, composed, depth + 1);
+          continue; // no single fabric.Object for INSERT itself
+        }
+        default:
+          // ELLIPSE, SPLINE, DIMENSION, MTEXT — deferred by design.
+          // Recorded, not rendered.
+          skipped.add(entity.type);
+          break;
       }
-      case "TEXT": {
-        if (!entity.startPoint || !entity.text) break;
-        const y = flip(entity.startPoint.y);
-        track(entity.startPoint.x, y);
-        obj = new fabric.Text(entity.text, {
-          left: entity.startPoint.x,
-          top: y,
-          fontSize: entity.textHeight || 2.5,
-          fill: stroke,
-          ...commonOpts,
-        });
-        break;
+      if (obj) {
+        (obj as fabric.Object & { dxfLayer?: string }).dxfLayer = layer;
+        objects.push(obj);
       }
-      default:
-        // ELLIPSE, SPLINE, DIMENSION, INSERT/BLOCK, MTEXT — deferred by
-        // design (Phase 1 scope, see file header). Recorded, not rendered.
-        skipped.add(entity.type);
-        break;
-    }
-    if (obj) {
-      (obj as fabric.Object & { dxfLayer?: string }).dxfLayer = layer;
-      objects.push(obj);
     }
   }
+
+  walk(dxf.entities ?? [], IDENTITY_XY, 0);
 
   return {
     objects,
@@ -271,7 +398,22 @@ export function fitDxfCanvasToViewport(
 ): number {
   canvas.setWidth(width);
   canvas.setHeight(height);
-  if (!scene.bbox || width <= 0 || height <= 0) return 1;
+  // setWidth/setHeight clear the canvas's backing bitmap (standard HTML
+  // canvas behaviour whenever width/height attributes change) — so the
+  // background is transparent again at this point regardless of scene
+  // content, until the next render paints it back in. The empty-scene
+  // branch below used to return before any render happened at all, which
+  // left exactly that transparent, just-resized canvas on screen — the
+  // single biggest concrete cause of the reported transparent background,
+  // since a DXF dominated by not-yet-supported entity types (or one whose
+  // renderable content is entirely inside blocks that failed to resolve)
+  // produces a scene with no bbox. Rendering unconditionally, on every
+  // path, fixes that class of case and removes the gap entirely rather
+  // than papering over one symptom of it.
+  if (!scene.bbox || width <= 0 || height <= 0) {
+    canvas.renderAll();
+    return 1;
+  }
   const w = scene.bbox.maxX - scene.bbox.minX || 1;
   const h = scene.bbox.maxY - scene.bbox.minY || 1;
   const margin = 0.9;
@@ -283,7 +425,12 @@ export function fitDxfCanvasToViewport(
     vpt[5] = -scene.bbox.minY * zoom + (height - h * zoom) / 2;
     canvas.setViewportTransform(vpt);
   }
-  canvas.requestRenderAll();
+  // Synchronous render (not requestRenderAll's rAF-deferred one): callers
+  // that immediately export the canvas (Edit's offscreen rasterize step
+  // in DrawingEditorPage.tsx) must not race a scheduled-but-not-yet-run
+  // paint. On-screen callers (Preview) still repaint correctly — this is
+  // strictly more deterministic, never less.
+  canvas.renderAll();
   return zoom;
 }
 

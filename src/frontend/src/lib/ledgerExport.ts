@@ -78,11 +78,17 @@ function ledgerFooterLines(meta: LedgerExportMeta): string[][] {
   ];
 }
 
-export function exportLedgerCsv(
+// Pure content builders — no DOM, no download trigger. Extracted so
+// agent/queries.ts's exportLedger can reuse the EXACT same formatting
+// logic (never a duplicate/parallel implementation) to build a file for
+// Storage upload instead of a browser download. exportLedgerCsv/
+// exportLedgerExcel below are now thin wrappers around these + the
+// existing downloadBlob() — byte-for-byte identical output to before
+// this split.
+export function buildLedgerCsvContent(
   rows: LedgerRow[],
   meta: LedgerExportMeta,
-  fileName: string,
-): void {
+): string {
   const lines: string[][] = [
     ...ledgerHeaderLines(meta),
     HEADERS,
@@ -97,15 +103,13 @@ export function exportLedgerCsv(
     ]),
     ...ledgerFooterLines(meta),
   ];
-  const csv = lines.map((row) => row.map(csvCell).join(",")).join("\r\n");
-  downloadBlob(csv, "text/csv;charset=utf-8;", fileName);
+  return lines.map((row) => row.map(csvCell).join(",")).join("\r\n");
 }
 
-export function exportLedgerExcel(
+export function buildLedgerExcelContent(
   rows: LedgerRow[],
   meta: LedgerExportMeta,
-  fileName: string,
-): void {
+): string {
   const escapeHtml = (s: string | number) =>
     String(s)
       .replace(/&/g, "&amp;")
@@ -126,7 +130,7 @@ export function exportLedgerExcel(
     )
     .join("");
 
-  const html = `<html xmlns:x="urn:schemas-microsoft-com:office:excel">
+  return `<html xmlns:x="urn:schemas-microsoft-com:office:excel">
 <head>
   <meta charset="utf-8" />
   <style>
@@ -153,6 +157,28 @@ export function exportLedgerExcel(
   </table>
 </body>
 </html>`;
+}
 
-  downloadBlob(html, "application/vnd.ms-excel", fileName);
+export function exportLedgerCsv(
+  rows: LedgerRow[],
+  meta: LedgerExportMeta,
+  fileName: string,
+): void {
+  downloadBlob(
+    buildLedgerCsvContent(rows, meta),
+    "text/csv;charset=utf-8;",
+    fileName,
+  );
+}
+
+export function exportLedgerExcel(
+  rows: LedgerRow[],
+  meta: LedgerExportMeta,
+  fileName: string,
+): void {
+  downloadBlob(
+    buildLedgerExcelContent(rows, meta),
+    "application/vnd.ms-excel",
+    fileName,
+  );
 }

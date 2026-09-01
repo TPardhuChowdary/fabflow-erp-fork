@@ -121,11 +121,11 @@ export function InvoicePrintView({ invoice, customer, open, onClose }: Props) {
       >
         {/* E-Way Bill Alert Banner */}
         {invoice && (invoice.totalAmount ?? 0) > 50000 && (
-          <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 no-print">
+          <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/15 px-3 py-2 text-xs text-warning no-print">
             <span className="mt-0.5 text-base leading-none">\u26a0\ufe0f</span>
             <div className="flex-1">
               <p className="font-semibold">E-Way Bill Required</p>
-              <p className="mt-0.5 text-amber-700">
+              <p className="mt-0.5 text-warning">
                 This invoice exceeds \u20b950,000. An E-Way Bill is mandatory
                 for this shipment.
               </p>
@@ -134,7 +134,7 @@ export function InvoicePrintView({ invoice, customer, open, onClose }: Props) {
               href="https://ewaybillgst.gov.in"
               target="_blank"
               rel="noopener noreferrer"
-              className="ml-2 shrink-0 rounded bg-amber-600 px-2 py-1 text-xs font-semibold text-white hover:bg-amber-700 no-print"
+              className="ml-2 shrink-0 rounded bg-warning px-2 py-1 text-xs font-semibold text-warning-foreground hover:bg-warning/90 no-print"
             >
               Generate E-Way Bill \u2197
             </a>
@@ -272,16 +272,27 @@ export function InvoicePrintView({ invoice, customer, open, onClose }: Props) {
               <div style={{ fontSize: "11px", color: "#444" }}>
                 <strong>Date:</strong> {invoice.invoiceDate || "\u2014"}
               </div>
-              {invoice.poNumber && (
-                <div style={{ fontSize: "11px", color: "#444" }}>
-                  <strong>PO No:</strong> {invoice.poNumber}
-                </div>
-              )}
-              {invoice.poDate && (
-                <div style={{ fontSize: "11px", color: "#444" }}>
-                  <strong>PO Date:</strong> {invoice.poDate}
-                </div>
-              )}
+              {/* Invoice multi-PO feature (see chat) — every real linked
+                  PO, one line each. Falls back to the legacy single
+                  poNumber/poDate pair only for an invoice with neither
+                  (shouldn't happen for real data post-Phase-48 backfill,
+                  kept as defensive belt-and-suspenders). */}
+              {invoice.purchaseOrders && invoice.purchaseOrders.length > 0
+                ? invoice.purchaseOrders.map((po) => (
+                    <div
+                      key={po.id}
+                      style={{ fontSize: "11px", color: "#444" }}
+                    >
+                      <strong>PO No:</strong> {po.poNumber}
+                      {po.poDate ? ` (${po.poDate})` : ""}
+                    </div>
+                  ))
+                : invoice.poNumber && (
+                    <div style={{ fontSize: "11px", color: "#444" }}>
+                      <strong>PO No:</strong> {invoice.poNumber}
+                      {invoice.poDate ? ` (${invoice.poDate})` : ""}
+                    </div>
+                  )}
               {invoice.deliveryVehicleNo && (
                 <div style={{ fontSize: "11px", color: "#444" }}>
                   <strong>Vehicle No:</strong> {invoice.deliveryVehicleNo}
@@ -757,11 +768,11 @@ export function InvoicePrintView({ invoice, customer, open, onClose }: Props) {
         </div>
 
         {/* Mobile sticky bottom */}
-        <div className="fixed bottom-0 left-0 right-0 flex sm:hidden bg-white border-t border-gray-200 p-3 gap-2 z-50 no-print print:hidden justify-center">
+        <div className="fixed bottom-0 left-0 right-0 flex sm:hidden bg-background border-t border-border p-3 gap-2 z-50 no-print print:hidden justify-center">
           <button
             type="button"
             onClick={onClose}
-            className="flex items-center justify-center gap-2 px-4 py-3 rounded-lg border border-gray-300 text-sm font-medium min-h-[48px] text-gray-600"
+            className="flex items-center justify-center gap-2 px-4 py-3 rounded-lg border border-border text-sm font-medium min-h-[48px] text-muted-foreground"
             data-ocid="invoice-print.mobile.close_button"
           >
             <X className="w-4 h-4" /> Close

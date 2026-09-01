@@ -22,9 +22,9 @@ import type {
 } from "../types";
 
 const RESULT_BADGE_CLASS: Record<ProjectQmsInspectionAttemptResult, string> = {
-  Pass: "bg-green-100 text-green-700 border-green-300",
-  Fail: "bg-red-100 text-red-700 border-red-300",
-  NA: "bg-gray-100 text-gray-600 border-gray-300",
+  Pass: "bg-success/10 text-success border-success/30",
+  Fail: "bg-destructive/10 text-destructive border-destructive/30",
+  NA: "bg-muted text-muted-foreground border-border",
 };
 
 function readFileAsDataUrl(
@@ -231,8 +231,8 @@ export function ProjectQmsCharacteristicPanel({
       {formOpen && (
         <div className="mt-2 space-y-2 border-t pt-2">
           {priorWasFail && (
-            <div className="space-y-1.5 bg-amber-50 border border-amber-200 rounded p-2">
-              <div className="text-[11px] font-semibold text-amber-800">
+            <div className="space-y-1.5 bg-warning/15 border border-warning/30 rounded p-2">
+              <div className="text-[11px] font-semibold text-warning">
                 Rectification (previous attempt failed)
               </div>
               <Textarea
@@ -266,9 +266,7 @@ export function ProjectQmsCharacteristicPanel({
                 }}
               />
               {rectificationPhoto && (
-                <span className="text-[10px] text-green-700">
-                  Photo attached
-                </span>
+                <span className="text-[10px] text-success">Photo attached</span>
               )}
             </div>
           )}
@@ -290,8 +288,8 @@ export function ProjectQmsCharacteristicPanel({
           </div>
 
           {result === "Fail" && (
-            <div className="space-y-1.5 bg-red-50 border border-red-200 rounded p-2">
-              <div className="text-[11px] font-semibold text-red-800">
+            <div className="space-y-1.5 bg-destructive/10 border border-destructive/30 rounded p-2">
+              <div className="text-[11px] font-semibold text-destructive">
                 Failure detail
               </div>
               <Textarea
@@ -325,9 +323,7 @@ export function ProjectQmsCharacteristicPanel({
                 }}
               />
               {failurePhoto && (
-                <span className="text-[10px] text-green-700">
-                  Photo attached
-                </span>
+                <span className="text-[10px] text-success">Photo attached</span>
               )}
             </div>
           )}
@@ -378,7 +374,7 @@ export function ProjectQmsCharacteristicPanel({
               </div>
               {a.rectificationAction && (
                 <div className="text-[11px]">
-                  <span className="font-medium text-amber-700">
+                  <span className="font-medium text-warning">
                     Rectification:
                   </span>{" "}
                   {a.rectificationAction}
@@ -389,7 +385,7 @@ export function ProjectQmsCharacteristicPanel({
               )}
               {a.failureReason && (
                 <div className="text-[11px]">
-                  <span className="font-medium text-red-700">Failure:</span>{" "}
+                  <span className="font-medium text-destructive">Failure:</span>{" "}
                   {a.failureReason}
                   {a.failureDescription ? ` — ${a.failureDescription}` : ""}
                 </div>

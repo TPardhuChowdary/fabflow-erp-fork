@@ -32,18 +32,23 @@ import type { ProjectItem, ProjectItemStatus } from "../types";
 interface Props {
   projectId: string;
   projectItems: ProjectItem[];
-  addProjectItem: (item: Omit<ProjectItem, "id" | "createdAt">) => void;
-  updateProjectItem: (id: string, updates: Partial<ProjectItem>) => void;
-  deleteProjectItem: (id: string) => void;
+  addProjectItem: (
+    item: Omit<ProjectItem, "id" | "createdAt">,
+  ) => Promise<boolean>;
+  updateProjectItem: (
+    id: string,
+    updates: Partial<Omit<ProjectItem, "id" | "createdAt">>,
+  ) => Promise<boolean>;
+  deleteProjectItem: (id: string) => Promise<boolean>;
   canAdd?: boolean;
   canEditItem?: boolean;
   canDelete?: boolean;
 }
 
 const STATUS_COLORS: Record<ProjectItemStatus, string> = {
-  Accepted: "bg-green-100 text-green-700 border-green-300",
-  Pending: "bg-amber-100 text-amber-700 border-amber-300",
-  Rejected: "bg-red-100 text-red-700 border-red-300",
+  Accepted: "bg-success/10 text-success border-success/30",
+  Pending: "bg-warning/15 text-warning border-warning/30",
+  Rejected: "bg-destructive/10 text-destructive border-destructive/30",
 };
 
 const emptyForm = () => ({
@@ -70,6 +75,8 @@ export function ProjectItemsTab({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState(emptyForm());
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const openAdd = () => {
     setEditingId(null);
@@ -89,11 +96,12 @@ export function ProjectItemsTab({
     setDialogOpen(true);
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!form.name.trim()) {
       toast.error("Item name is required");
       return;
     }
+    if (isSaving) return;
     const payload = {
       projectId,
       name: form.name.trim(),
@@ -102,24 +110,40 @@ export function ProjectItemsTab({
       unitPrice: form.unitPrice !== "" ? Number(form.unitPrice) : undefined,
       status: form.status,
     };
-    if (editingId) {
-      updateProjectItem(editingId, payload);
-      toast.success("Item updated");
-    } else {
-      addProjectItem(payload);
-      toast.success("Item added");
+    setIsSaving(true);
+    try {
+      const ok = editingId
+        ? await updateProjectItem(editingId, payload)
+        : await addProjectItem(payload);
+      if (!ok) {
+        toast.error("Could not save the item — please try again");
+        return;
+      }
+      toast.success(editingId ? "Item updated" : "Item added");
+      setDialogOpen(false);
+    } finally {
+      setIsSaving(false);
     }
-    setDialogOpen(false);
   };
 
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
     if (!canDelete) {
       alert("Access restricted");
       return;
     }
-    deleteProjectItem(id);
-    setDeleteConfirm(null);
-    toast.success("Item removed");
+    if (isDeleting) return;
+    setIsDeleting(true);
+    try {
+      const ok = await deleteProjectItem(id);
+      if (!ok) {
+        toast.error("Could not remove the item — please try again");
+        return;
+      }
+      setDeleteConfirm(null);
+      toast.success("Item removed");
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   return (
@@ -199,6 +223,8 @@ export function ProjectItemsTab({
                         size="sm"
                         className="h-6 w-6 p-0"
                         onClick={() => openEdit(item)}
+                        title="Edit item"
+                        aria-label="Edit item"
                         data-ocid={`project-detail.items.edit_button.${i + 1}`}
                       >
                         <Pencil className="w-3 h-3" />
@@ -210,6 +236,8 @@ export function ProjectItemsTab({
                         size="sm"
                         className="h-6 w-6 p-0 text-destructive hover:text-destructive"
                         onClick={() => setDeleteConfirm(item.id)}
+                        title="Delete item"
+                        aria-label="Delete item"
                         data-ocid={`project-detail.items.delete_button.${i + 1}`}
                       >
                         <Trash2 className="w-3 h-3" />
@@ -312,19 +340,19 @@ export function ProjectItemsTab({
                 <SelectContent>
                   <SelectItem value="Accepted" className="text-sm">
                     <span className="flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-green-500" />
+                      <span className="w-2 h-2 rounded-full bg-success" />
                       Accepted
                     </span>
                   </SelectItem>
                   <SelectItem value="Pending" className="text-sm">
                     <span className="flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-amber-500" />
+                      <span className="w-2 h-2 rounded-full bg-warning" />
                       Pending
                     </span>
                   </SelectItem>
                   <SelectItem value="Rejected" className="text-sm">
                     <span className="flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full bg-red-500" />
+                      <span className="w-2 h-2 rounded-full bg-destructive" />
                       Rejected
                     </span>
                   </SelectItem>
@@ -344,6 +372,7 @@ export function ProjectItemsTab({
             <Button
               size="sm"
               onClick={handleSave}
+              disabled={isSaving}
               data-ocid="project-detail.items.save_button"
             >
               {editingId ? "Save Changes" : "Add Item"}
@@ -378,6 +407,7 @@ export function ProjectItemsTab({
               variant="destructive"
               size="sm"
               onClick={() => deleteConfirm && handleDelete(deleteConfirm)}
+              disabled={isDeleting}
               data-ocid="project-detail.items.delete.confirm_button"
             >
               Remove

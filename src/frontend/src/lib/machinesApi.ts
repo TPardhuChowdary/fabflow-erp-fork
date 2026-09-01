@@ -180,22 +180,99 @@ async function requireSession() {
   return { ok: true as const, client };
 }
 
+// Phase L.1 — machine_code now carries a real UNIQUE (organization_id,
+// machine_code) constraint (see database/phase-l1/), mirroring
+// uq_company_pos_org_cpono/uq_expense_floats_org_floatno exactly.
+// computeNextMachineCode is a pure calculation over supplied existing
+// codes, matching store.ts's generateMachineCode() format
+// (MCH-{n}, padded 3) - kept in exact sync so a server-state-based retry
+// produces a code in the identical format. store.ts's own generator is
+// left unchanged; it still supplies the initial candidate exactly as
+// before, and this function is only used here, to re-derive a fresh
+// candidate from actual server state on a 23505 conflict.
+export function computeNextMachineCode(existingCodes: string[]): string {
+  const nums = existingCodes.map((c) => {
+    const m = (c || "").match(/MCH-(\d+)/);
+    return m ? Number.parseInt(m[1], 10) : 0;
+  });
+  const next = nums.length > 0 ? Math.max(...nums) + 1 : 1;
+  return `MCH-${String(next).padStart(3, "0")}`;
+}
+
+async function fetchExistingMachineCodes(
+  client: ReturnType<typeof getSupabase>,
+): Promise<string[] | null> {
+  const { data, error } = await client.from("machines").select("machine_code");
+  if (error || !data) return null;
+  return (data as unknown as { machine_code: string }[]).map(
+    (r) => r.machine_code,
+  );
+}
+
+// Postgres unique_violation. Confirmed via investigation: the only UNIQUE
+// constraint on machines that a normal INSERT could hit is
+// uq_machines_org_code (organization_id, machine_code) - the primary key
+// is server-generated, so a PK collision is not a realistic path here.
+function isMachineCodeConflict(error: { code?: string; message?: string }) {
+  return (
+    error.code === "23505" &&
+    (error.message?.includes("uq_machines_org_code") ||
+      error.message?.includes("machine_code"))
+  );
+}
+
+const MAX_MACHINE_CODE_ATTEMPTS = 3;
+
 export async function createMachineRemote(
   machine: Omit<Machine, "id">,
 ): Promise<WriteResult<Machine>> {
   const gate = await requireSession();
   if (!gate.ok) return gate.result;
+  const { client } = gate;
 
-  const { data, error } = await gate.client
-    .from("machines")
-    .insert(toMachineFields(machine))
-    .select(SELECT_COLUMNS)
-    .single();
+  let candidate = machine;
 
-  if (error) return { status: "error", error: error.message };
+  for (let attempt = 1; attempt <= MAX_MACHINE_CODE_ATTEMPTS; attempt++) {
+    const { data, error } = await client
+      .from("machines")
+      .insert(toMachineFields(candidate))
+      .select(SELECT_COLUMNS)
+      .single();
+
+    if (!error) {
+      return {
+        status: "success",
+        data: rowToMachine(data as unknown as MachineRow),
+      };
+    }
+
+    if (!isMachineCodeConflict(error)) {
+      // Any unrelated error (RLS denial, validation, etc.) - return
+      // immediately, never retried.
+      return { status: "error", error: error.message };
+    }
+
+    if (attempt === MAX_MACHINE_CODE_ATTEMPTS) {
+      break;
+    }
+
+    // Collision on machine_code specifically - re-derive the next code
+    // from actual server state (never from stale Zustand) and retry.
+    const freshCodes = await fetchExistingMachineCodes(client);
+    if (freshCodes === null) {
+      // Could not even read fresh state - stop retrying, report clearly.
+      break;
+    }
+    candidate = {
+      ...candidate,
+      machineCode: computeNextMachineCode(freshCodes),
+    };
+  }
+
   return {
-    status: "success",
-    data: rowToMachine(data as unknown as MachineRow),
+    status: "error",
+    error:
+      "This machine code was just used by another session. Please try saving again.",
   };
 }
 

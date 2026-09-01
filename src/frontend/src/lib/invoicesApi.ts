@@ -27,15 +27,30 @@
 // invNo), soId (zero occurrences anywhere in Invoices.tsx/Payments.tsx/
 // store.ts, same dead-legacy-field shape as DeliveryChallan.soId/.jobId).
 //
-// No numbering race: inv_no carries no UNIQUE constraint (confirmed, same
-// as dc_no) - the existing local duplicate-scan guard in Invoices.tsx is
-// preserved exactly as today's soft, unenforced guard.
+// Phase D.1 - inv_no now carries a real UNIQUE (organization_id, inv_no)
+// constraint (see database/phase-d1/), mirroring uq_delivery_challans_org_dcno
+// (Phase C.1) exactly. createInvoiceRemote below bounded-retries on a 23505
+// conflict against that constraint specifically, re-deriving the candidate
+// from fresh server state on conflict, never from stale local state, never
+// by re-invoking any local counter - same pattern as
+// createDeliveryChallanRemote (lib/deliveryChallansApi.ts),
+// createProjectRemote (lib/projectsApi.ts), and createQuotationRemote
+// (lib/quotationsApi.ts). autoRenumberOnConflict controls whether a
+// conflict is silently retried with a fresh number (auto-generated
+// candidates - the Agent, or an untouched UI preview) or surfaced as a
+// plain error (a user explicitly typed a specific number in Invoices.tsx's
+// editable Invoice Number field - same user-editable-number wrinkle dc_no
+// had, so silently substituting a different one would be wrong there too).
+// Only the invoice-row insert is retried; the line-items insert loop
+// (and its existing best-effort orphan cleanup) runs unchanged once a
+// candidate succeeds.
 
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
-import type { InvLineItem, Invoice } from "@/types";
+import type { InvLineItem, Invoice, InvoicePurchaseOrder } from "@/types";
 import {
   INVOICE_COLUMNS,
   INVOICE_ITEM_COLUMNS,
+  INVOICE_PO_COLUMNS,
   transformInvoiceRow,
 } from "./hydration";
 import type { InvoiceRow } from "./hydration";
@@ -97,6 +112,21 @@ function toInvoiceFields(v: InvoiceWritable) {
   };
 }
 
+// Same INV-YYYY-NNN format as Invoices.tsx's own previewInvNo() - mirrors
+// that exact existing client-side computation rather than inventing a new
+// numbering scheme. Pure calculation over supplied existing numbers, never
+// a local counter. Used by createInvoiceRemote to compute a fresh
+// candidate after an inv_no collision (see header comment).
+export function computeNextInvNumber(existingInvNumbers: string[]): string {
+  const year = new Date().getFullYear();
+  const nums = existingInvNumbers.map((n) => {
+    const m = (n || "").match(/INV-\d{4}-(\d+)/);
+    return m ? Number.parseInt(m[1], 10) : 0;
+  });
+  const next = nums.length > 0 ? Math.max(...nums) + 1 : 1;
+  return `INV-${year}-${String(next).padStart(3, "0")}`;
+}
+
 function toInvoiceItemFields(item: InvLineItem, invoiceId: string) {
   return {
     invoice_id: invoiceId,
@@ -105,6 +135,16 @@ function toInvoiceItemFields(item: InvLineItem, invoiceId: string) {
     quantity: item.qty,
     price: item.rate,
     project_id: item.projectId || null,
+  };
+}
+
+// Invoice multi-PO feature (see chat) — Phase 48.
+function toInvoicePOFields(po: InvoicePurchaseOrder, invoiceId: string) {
+  return {
+    invoice_id: invoiceId,
+    quotation_purchase_order_id: po.quotationPurchaseOrderId || null,
+    po_number: po.poNumber,
+    po_date: po.poDate || null,
   };
 }
 
@@ -155,13 +195,39 @@ async function replaceInvoiceItems(
   return {};
 }
 
+// Invoice multi-PO feature (see chat) — Phase 48. Same delete-all +
+// sequential re-insert pattern as replaceInvoiceItems above, for exactly
+// the same reason (order preserved via increasing created_at; no
+// explicit ordering column on invoice_purchase_orders either).
+async function replaceInvoicePurchaseOrders(
+  client: any,
+  invoiceId: string,
+  purchaseOrders: InvoicePurchaseOrder[],
+): Promise<{ error?: string }> {
+  const { error: delError } = await client
+    .from("invoice_purchase_orders")
+    .delete()
+    .eq("invoice_id", invoiceId);
+  if (delError) return { error: delError.message };
+
+  for (const po of purchaseOrders) {
+    const { error: insError } = await client
+      .from("invoice_purchase_orders")
+      .insert(toInvoicePOFields(po, invoiceId));
+    if (insError) return { error: insError.message };
+  }
+  return {};
+}
+
 async function fetchFullInvoice(
   client: any,
   invoiceId: string,
 ): Promise<WriteResult<Invoice>> {
   const { data, error } = await client
     .from("invoices")
-    .select(`${INVOICE_COLUMNS}, invoice_items(${INVOICE_ITEM_COLUMNS})`)
+    .select(
+      `${INVOICE_COLUMNS}, invoice_items(${INVOICE_ITEM_COLUMNS}), invoice_purchase_orders(${INVOICE_PO_COLUMNS})`,
+    )
     .eq("id", invoiceId)
     .single();
   if (error) return { status: "error", error: error.message };
@@ -171,22 +237,85 @@ async function fetchFullInvoice(
   };
 }
 
+async function fetchExistingInvNumbers(
+  client: ReturnType<typeof getSupabase>,
+): Promise<string[] | null> {
+  const { data, error } = await client.from("invoices").select("inv_no");
+  if (error || !data) return null;
+  return (data as unknown as { inv_no: string | null }[]).map(
+    (r) => r.inv_no ?? "",
+  );
+}
+
+// Postgres unique_violation on uq_invoices_org_invno specifically - same
+// check shape as isDcNumberConflict/isProjectNumberConflict/isQtNumberConflict.
+function isInvNumberConflict(error: { code?: string; message?: string }) {
+  return (
+    error.code === "23505" &&
+    (error.message?.includes("uq_invoices_org_invno") ||
+      error.message?.includes("inv_no"))
+  );
+}
+
+const MAX_INV_NUMBER_ATTEMPTS = 3;
+
 export async function createInvoiceRemote(
   inv: InvoiceWritable,
+  options?: { autoRenumberOnConflict?: boolean },
 ): Promise<WriteResult<Invoice>> {
   const gate = await requireSession();
   if (!gate.ok) return gate.result;
+  const { client } = gate;
+  const autoRenumberOnConflict = options?.autoRenumberOnConflict ?? true;
 
-  const { data, error } = await gate.client
-    .from("invoices")
-    .insert(toInvoiceFields(inv))
-    .select("id")
-    .single();
+  let candidate = inv;
+  let invoiceId: string | null = null;
 
-  if (error) return { status: "error", error: error.message };
-  const invoiceId = (data as { id: string }).id;
+  for (let attempt = 1; attempt <= MAX_INV_NUMBER_ATTEMPTS; attempt++) {
+    const { data, error } = await client
+      .from("invoices")
+      .insert(toInvoiceFields(candidate))
+      .select("id")
+      .single();
 
-  for (const item of inv.lineItems) {
+    if (!error) {
+      invoiceId = (data as { id: string }).id;
+      break;
+    }
+
+    if (!isInvNumberConflict(error)) {
+      return { status: "error", error: error.message };
+    }
+
+    if (!autoRenumberOnConflict || attempt === MAX_INV_NUMBER_ATTEMPTS) {
+      return {
+        status: "error",
+        error: `Invoice number ${candidate.invNo} already exists. Please use a different number.`,
+      };
+    }
+
+    // Collision on inv_no specifically - re-derive the next number from
+    // actual server state (never from stale local state, never by
+    // re-invoking computeNextInvNumber's caller) and retry.
+    const freshNumbers = await fetchExistingInvNumbers(client);
+    if (freshNumbers === null) {
+      return {
+        status: "error",
+        error: `Invoice number ${candidate.invNo} already exists. Please use a different number.`,
+      };
+    }
+    candidate = { ...candidate, invNo: computeNextInvNumber(freshNumbers) };
+  }
+
+  if (invoiceId === null) {
+    return {
+      status: "error",
+      error:
+        "This invoice number was just used by another session. Please try saving again.",
+    };
+  }
+
+  for (const item of candidate.lineItems) {
     const { error: itemError } = await gate.client
       .from("invoice_items")
       .insert(toInvoiceItemFields(item, invoiceId));
@@ -196,6 +325,16 @@ export async function createInvoiceRemote(
       // a stray empty invoice behind.
       await gate.client.from("invoices").delete().eq("id", invoiceId);
       return { status: "error", error: itemError.message };
+    }
+  }
+
+  for (const po of candidate.purchaseOrders ?? []) {
+    const { error: poError } = await gate.client
+      .from("invoice_purchase_orders")
+      .insert(toInvoicePOFields(po, invoiceId));
+    if (poError) {
+      await gate.client.from("invoices").delete().eq("id", invoiceId);
+      return { status: "error", error: poError.message };
     }
   }
 
@@ -230,6 +369,15 @@ export async function updateInvoiceRemote(
   );
   if (itemsResult.error) {
     return { status: "error", error: itemsResult.error };
+  }
+
+  const poResult = await replaceInvoicePurchaseOrders(
+    gate.client,
+    inv.id,
+    inv.purchaseOrders ?? [],
+  );
+  if (poResult.error) {
+    return { status: "error", error: poResult.error };
   }
 
   return fetchFullInvoice(gate.client, inv.id);

@@ -105,6 +105,8 @@ export function TemplateManagerDialog({
                   variant="ghost"
                   className="h-7 w-7 p-0 text-destructive"
                   onClick={() => setDeleteTarget(t)}
+                  title="Delete template"
+                  aria-label="Delete template"
                   data-ocid={`qms.templates.delete.${t.id}`}
                 >
                   <Trash2 className="w-3.5 h-3.5" />

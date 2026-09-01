@@ -21,6 +21,7 @@ import { useRef, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
 import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
+import { RowActions } from "../components/ui/row-actions";
 import {
   createCustomerRemote,
   deleteCustomerRemote,
@@ -196,6 +197,72 @@ export function Customers({ onViewHistory }: Props) {
       }
     };
 
+  const handleDeleteClick = (c: Customer) => {
+    if (!canDelete(currentUser, "customers")) {
+      toast.error("Access restricted: delete permission required");
+      return;
+    }
+    // Local linked-record guard, fail-fast BEFORE even offering the confirm
+    // dialog - same check store.ts's deleteCustomer runs, duplicated here
+    // so we never attempt a delete for a customer with linked quotations/
+    // invoices/projects (mirrors Employees.tsx's Phase 18B pattern).
+    const s = useStore.getState();
+    const hasQuotations = (s.quotations || []).some(
+      (q) => q.customerId === c.id,
+    );
+    const hasInvoices = (s.invoices || []).some(
+      (inv) => inv.customerId === c.id,
+    );
+    const hasProjects = (s.projects || []).some((p) => p.customerId === c.id);
+    if (hasQuotations || hasInvoices || hasProjects) {
+      toast.error(
+        "Cannot delete customer. Linked transactions or projects exist.",
+      );
+      return;
+    }
+    setDeleteTarget(c);
+  };
+
+  const CustomerRowActions = ({ c, i }: { c: Customer; i: number }) => (
+    <RowActions
+      primary={[
+        ...(onViewHistory
+          ? [
+              {
+                label: "History",
+                icon: History,
+                onClick: () => onViewHistory(c.id),
+                "data-ocid": `customers.history_button.${i + 1}`,
+              },
+            ]
+          : []),
+        ...(pEdit
+          ? [
+              {
+                label: "Edit",
+                icon: Edit2,
+                onClick: () => openEdit(c),
+                "data-ocid": `customers.edit_button.${i + 1}`,
+              },
+            ]
+          : []),
+      ]}
+      overflow={[
+        ...(pDelete
+          ? [
+              {
+                label: "Delete",
+                icon: Trash2,
+                destructive: true,
+                onClick: () => handleDeleteClick(c),
+                "data-ocid": `customers.delete_button.${i + 1}`,
+              },
+            ]
+          : []),
+      ]}
+    />
+  );
+
   if (!canView(currentUser, "customers")) {
     return (
       <div className="flex flex-col items-center justify-center min-h-[60vh] gap-4">
@@ -279,73 +346,7 @@ export function Customers({ onViewHistory }: Props) {
                       : "—"}
                   </TableCell>
                   <TableCell>
-                    <div className="flex gap-1">
-                      {pEdit && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-6 px-2"
-                          onClick={() => openEdit(c)}
-                          data-ocid={`customers.edit_button.${i + 1}`}
-                        >
-                          <Edit2 className="w-3.5 h-3.5" />
-                        </Button>
-                      )}
-                      {pDelete && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-6 px-2"
-                          onClick={() => {
-                            if (!canDelete(currentUser, "customers")) {
-                              toast.error(
-                                "Access restricted: delete permission required",
-                              );
-                              return;
-                            }
-                            // Local linked-record guard, fail-fast BEFORE
-                            // even offering the confirm dialog - same
-                            // check store.ts's deleteCustomer runs,
-                            // duplicated here so we never attempt a delete
-                            // for a customer with linked quotations/
-                            // invoices/projects (mirrors Employees.tsx's
-                            // Phase 18B pattern).
-                            const s = useStore.getState();
-                            const hasQuotations = (s.quotations || []).some(
-                              (q) => q.customerId === c.id,
-                            );
-                            const hasInvoices = (s.invoices || []).some(
-                              (inv) => inv.customerId === c.id,
-                            );
-                            const hasProjects = (s.projects || []).some(
-                              (p) => p.customerId === c.id,
-                            );
-                            if (hasQuotations || hasInvoices || hasProjects) {
-                              toast.error(
-                                "Cannot delete customer. Linked transactions or projects exist.",
-                              );
-                              return;
-                            }
-                            setDeleteTarget(c);
-                          }}
-                          data-ocid={`customers.delete_button.${i + 1}`}
-                        >
-                          <Trash2 className="w-3.5 h-3.5 text-destructive" />
-                        </Button>
-                      )}
-                      {onViewHistory && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-6 px-2"
-                          onClick={() => onViewHistory(c.id)}
-                          data-ocid={`customers.history_button.${i + 1}`}
-                          title="View document history"
-                        >
-                          <History className="w-3.5 h-3.5" />
-                        </Button>
-                      )}
-                    </div>
+                    <CustomerRowActions c={c} i={i} />
                   </TableCell>
                 </TableRow>
               ))}

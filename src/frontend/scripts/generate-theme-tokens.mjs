@@ -8,6 +8,7 @@
 //
 // Usage: node scripts/generate-theme-tokens.mjs
 
+import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
@@ -524,6 +525,118 @@ const DEFAULT_DARK = {
   tableHeaderForeground: "0.92 0 0",
 };
 
+// ── 7b. Instrument — the Phase 3 Visual System Lab recommendation
+//      (design-lab/uxlab/visuallab/tokens.ts, VISUAL_SYSTEM.md). Hand-
+//      mapped from its 12-token LabTheme shape into the real 38-key
+//      ThemeModeTokens contract (via scripts/convert-theme-hex.mjs for
+//      every hex), transcribed verbatim like Default rather than run
+//      through the swatch-derivation algorithm — Instrument's light AND
+//      dark palettes were already independently tuned by hand in Phase
+//      3, so re-deriving them here would silently drift from the
+//      approved design. Two deliberate departures from the other 11
+//      presets, both straight from the approved source:
+//        - The sidebar follows the active surface (light sidebar in
+//          light mode) instead of staying permanently dark-navy like
+//          Default/the 10 generated presets — Instrument's own tokens.ts
+//          gives distinct light/dark sidebar values, unlike every other
+//          preset's fixed-dark sidebar block.
+//        - border/input/sidebarBorder stay Instrument's own solid
+//          low-chroma color in dark mode rather than the translucent
+//          white-overlay technique the other 10 dark palettes use —
+//          Instrument's source hex is explicit and solid, not an
+//          overlay, so it's transcribed as given.
+//      "info" isn't part of Instrument's palette (only success/warning/
+//      danger are) — reuses the app-wide info blue every other preset
+//      already shares, for continuity rather than inventing a new hue.
+const INSTRUMENT_LIGHT = {
+  background: "0.96 0 91",
+  foreground: "0.21 0 85",
+  card: "1 0 0",
+  cardForeground: "0.21 0 85",
+  popover: "1 0 0",
+  popoverForeground: "0.21 0 85",
+  primary: "0.50 0.08 206",
+  primaryForeground: "1 0 0",
+  secondary: "0.94 0.01 94",
+  secondaryForeground: "0.21 0 85",
+  muted: "0.94 0.01 94",
+  mutedForeground: "0.51 0.01 92",
+  accent: "0.95 0.01 205",
+  accentForeground: "0.50 0.08 206",
+  destructive: "0.56 0.16 28",
+  destructiveForeground: "1 0 0",
+  success: "0.58 0.12 156",
+  successForeground: "0.15 0 0",
+  warning: "0.68 0.13 72",
+  warningForeground: "0.15 0 0",
+  info: "0.55 0.15 250",
+  infoForeground: "1 0 0",
+  border: "0.91 0.01 95",
+  input: "0.91 0.01 95",
+  ring: "0.50 0.08 206",
+  chart1: "0.50 0.08 206",
+  chart2: "0.55 0.15 250",
+  chart3: "0.58 0.12 156",
+  chart4: "0.56 0.16 28",
+  chart5: "0.68 0.13 72",
+  sidebar: "1 0 0",
+  sidebarForeground: "0.51 0.01 92",
+  sidebarPrimary: "0.50 0.08 206",
+  sidebarPrimaryForeground: "1 0 0",
+  sidebarAccent: "0.95 0.01 205",
+  sidebarAccentForeground: "0.50 0.08 206",
+  sidebarBorder: "0.91 0.01 95",
+  sidebarRing: "0.50 0.08 206",
+  tableHeader: "0.94 0.01 94",
+  tableHeaderForeground: "0.21 0 85",
+};
+const INSTRUMENT_DARK = {
+  background: "0.20 0.01 248",
+  foreground: "0.94 0.01 89",
+  card: "0.24 0.01 248",
+  cardForeground: "0.94 0.01 89",
+  popover: "0.24 0.01 248",
+  popoverForeground: "0.94 0.01 89",
+  primary: "0.71 0.08 204",
+  primaryForeground: "0.22 0.02 205",
+  secondary: "0.27 0.01 254",
+  secondaryForeground: "0.94 0.01 89",
+  muted: "0.27 0.01 254",
+  mutedForeground: "0.68 0.01 93",
+  accent: "0.27 0.02 201",
+  accentForeground: "0.71 0.08 204",
+  destructive: "0.69 0.14 27",
+  destructiveForeground: "1 0 0",
+  success: "0.75 0.14 158",
+  successForeground: "0.15 0 0",
+  warning: "0.75 0.14 75",
+  warningForeground: "0.15 0 0",
+  info: "0.55 0.15 250",
+  infoForeground: "1 0 0",
+  border: "0.31 0.01 248",
+  input: "0.31 0.01 248",
+  ring: "0.71 0.08 204",
+  chart1: "0.71 0.08 204",
+  chart2: "0.55 0.15 250",
+  chart3: "0.75 0.14 158",
+  chart4: "0.69 0.14 27",
+  chart5: "0.75 0.14 75",
+  sidebar: "0.24 0.01 248",
+  sidebarForeground: "0.68 0.01 93",
+  sidebarPrimary: "0.71 0.08 204",
+  sidebarPrimaryForeground: "0.22 0.02 205",
+  sidebarAccent: "0.27 0.02 201",
+  sidebarAccentForeground: "0.71 0.08 204",
+  sidebarBorder: "0.31 0.01 248",
+  sidebarRing: "0.71 0.08 204",
+  tableHeader: "0.27 0.01 254",
+  tableHeaderForeground: "0.94 0.01 89",
+};
+const INSTRUMENT_FONTS = {
+  fontSans: "'IBM Plex Sans', system-ui, sans-serif",
+  fontMono: "'IBM Plex Mono', ui-monospace, SFMono-Regular, monospace",
+};
+
 // ── 8. Build every preset ────────────────────────────────────────────
 const presets = [
   {
@@ -535,6 +648,17 @@ const presets = [
     light: DEFAULT_LIGHT,
     dark: DEFAULT_DARK,
   },
+  {
+    id: "instrument",
+    name: "Instrument",
+    description:
+      "Approved Phase 3 visual system — steel-teal accent, IBM Plex Sans/Mono.",
+    sourceSwatches: ["#1f6f78", "#f4f3f0", "#2f8f5b", "#c98a2c", "#c1443a"],
+    visuallyEstimated: false,
+    light: INSTRUMENT_LIGHT,
+    dark: INSTRUMENT_DARK,
+    ...INSTRUMENT_FONTS,
+  },
   ...THEME_DEFS.map((def) => {
     const roles = assignRoles(def.swatches);
     return {
@@ -545,6 +669,91 @@ const presets = [
       visuallyEstimated: !!def.visuallyEstimated,
       light: buildLight(roles),
       dark: buildDark(roles),
+      ...(def.fontSans ? { fontSans: def.fontSans, fontMono: def.fontMono } : {}),
+    };
+  }),
+  // Style Lab comparison (see chat) — 6 real, fully-defined design
+  // directions from pages/design-lab/themes.ts (labThemes), ported for
+  // real Settings selection. Only their COLOR identity + font pairing is
+  // portable through this preset pipeline: that file's own header
+  // comment confirms these were never wired into the app's global
+  // tokens, have no dark variant of their own (derived here via the same
+  // deterministic algorithm as every other non-Instrument preset above -
+  // not hand-guessed), and are each defined partly by a sidebar `layout`
+  // shape (dark-floating/thin-rail/light-sidebar) that would require
+  // rebuilding the app shell per style - out of scope (a second design
+  // system, explicitly not allowed). fontSans is each style's own
+  // `fontBody` (not `fontDisplay`) - e.g. Sketchbook's Comic Sans
+  // headline font is deliberately NOT carried over, since that would
+  // leak into dense data/body text app-wide; Raw Brutalist's JetBrains
+  // Mono is its real fontBody already, so it is carried over faithfully.
+  ...[
+    {
+      id: "style-warm-clinical",
+      name: "Warm Clinical",
+      description:
+        "Style Lab: cream backdrop, pastel-coded categories (color only - see chat).",
+      swatches: ["#faf6ec", "#171512", "#f6c453", "#f3a6c9", "#a8d5ba"],
+      fontSans: "'Plus Jakarta Sans', system-ui, sans-serif",
+      fontMono: "ui-monospace, SFMono-Regular, monospace",
+    },
+    {
+      id: "style-quiet-utility",
+      name: "Quiet Utility",
+      description:
+        "Style Lab: single accent, near-zero visual noise (color only - see chat).",
+      swatches: ["#f6f4ef", "#1f8a5f", "#ffffff", "#d8d3c4", "#2b2b28"],
+      fontSans: "'Inter', system-ui, sans-serif",
+      fontMono: "ui-monospace, SFMono-Regular, monospace",
+    },
+    {
+      id: "style-flat-signal",
+      name: "Flat Signal",
+      description:
+        "Style Lab: soft pastel block-fills, confident flat color (color only - see chat).",
+      swatches: ["#f4f5f7", "#4f7cff", "#ffb703", "#2ec4b6", "#ffffff"],
+      fontSans: "'Inter', system-ui, sans-serif",
+      fontMono: "ui-monospace, SFMono-Regular, monospace",
+    },
+    {
+      id: "style-radical-minimal",
+      name: "Radical Minimal",
+      description:
+        "Style Lab: stark black/white, near-zero ornamentation (color only - see chat).",
+      swatches: ["#ffffff", "#0a0a0a", "#0a0a0a", "#dcdcdc", "#0a0a0a"],
+      fontSans: "'Inter', system-ui, sans-serif",
+      fontMono: "ui-monospace, SFMono-Regular, monospace",
+    },
+    {
+      id: "style-raw-brutalist",
+      name: "Raw Brutalist",
+      description:
+        "Style Lab: hard edges, monospace, zero softness (color only - see chat).",
+      swatches: ["#ffffff", "#000000", "#000000", "#e0261f", "#ffffff"],
+      fontSans: "'JetBrains Mono', ui-monospace, monospace",
+      fontMono: "'JetBrains Mono', ui-monospace, monospace",
+    },
+    {
+      id: "style-sketchbook",
+      name: "Sketchbook",
+      description:
+        "Style Lab: warm hand-drawn palette (color only, headline font intentionally not carried over - see chat).",
+      swatches: ["#fbf6ec", "#3a3226", "#e98a4e", "#7fb0c9", "#e4c05a"],
+      fontSans: "'Inter', system-ui, sans-serif",
+      fontMono: "ui-monospace, SFMono-Regular, monospace",
+    },
+  ].map((def) => {
+    const roles = assignRoles(def.swatches);
+    return {
+      id: def.id,
+      name: def.name,
+      description: def.description,
+      sourceSwatches: def.swatches,
+      visuallyEstimated: false,
+      light: buildLight(roles),
+      dark: buildDark(roles),
+      fontSans: def.fontSans,
+      fontMono: def.fontMono,
     };
   }),
 ];
@@ -574,13 +783,24 @@ function formatTokens(tokens, indent) {
 
 const presetEntries = presets
   .map((p) => {
-    const swatchesLiteral = JSON.stringify(p.sourceSwatches);
+    // Biome formats array literals with a space after each comma;
+    // JSON.stringify doesn't, so every preset's line failed `biome
+    // check` before this fix (pre-existing, not specific to Instrument).
+    const swatchesLiteral = JSON.stringify(p.sourceSwatches).replace(
+      /,/g,
+      ", ",
+    );
+    // fontSans/fontMono are optional and only set for Instrument today —
+    // every other preset relies on index.css's own default font stack.
+    const fontLines = p.fontSans
+      ? `\n    fontSans: "${p.fontSans}",\n    fontMono: "${p.fontMono}",`
+      : "";
     return `  {
     id: "${p.id}",
     name: "${p.name}",
     description: "${p.description}",
     sourceSwatches: ${swatchesLiteral},
-    visuallyEstimated: ${p.visuallyEstimated},
+    visuallyEstimated: ${p.visuallyEstimated},${fontLines}
     light: {
 ${formatTokens(p.light, "      ")}
     },
@@ -620,6 +840,12 @@ export interface ThemePreset {
    * codes (unlike the other 9), so these were visually estimated from
    * the swatch image rather than pixel-exact. */
   visuallyEstimated: boolean;
+  /** Optional per-preset font override (same family in light + dark —
+   * unlike ThemeModeTokens, typography doesn't change with mode). Unset
+   * for every preset except Instrument, which uses these in place of
+   * index.css's default Plus Jakarta Sans stack. */
+  fontSans?: string;
+  fontMono?: string;
   light: ThemeModeTokens;
   dark: ThemeModeTokens;
 }
@@ -675,7 +901,10 @@ const CSS_VAR_NAMES: Record<keyof ThemeModeTokens, string> = {
 
 /** Writes every token in \`tokens\` as a CSS custom property on \`el\`
  * (normally document.documentElement). Pure DOM mutation, no React. */
-export function applyThemeTokens(el: HTMLElement, tokens: ThemeModeTokens): void {
+export function applyThemeTokens(
+  el: HTMLElement,
+  tokens: ThemeModeTokens,
+): void {
   for (const key of Object.keys(CSS_VAR_NAMES) as (keyof ThemeModeTokens)[]) {
     el.style.setProperty(CSS_VAR_NAMES[key], tokens[key]);
   }
@@ -684,7 +913,34 @@ export function applyThemeTokens(el: HTMLElement, tokens: ThemeModeTokens): void
 export function getThemePreset(id: string): ThemePreset {
   return THEME_PRESETS.find((p) => p.id === id) ?? THEME_PRESETS[0];
 }
+
+/** Writes (or clears) the preset's font override as CSS custom
+ * properties. Only Instrument sets fontSans/fontMono today; switching
+ * to any other preset must remove them again rather than leaving a
+ * stale inline style behind, since el.style.setProperty persists across
+ * re-renders. index.css's own font-family falls back to Plus Jakarta
+ * Sans / the default mono stack via var(--font-x, <fallback>) whenever
+ * these are unset. */
+export function applyThemeFonts(el: HTMLElement, preset: ThemePreset): void {
+  if (preset.fontSans) el.style.setProperty("--font-sans", preset.fontSans);
+  else el.style.removeProperty("--font-sans");
+  if (preset.fontMono) el.style.setProperty("--font-mono", preset.fontMono);
+  else el.style.removeProperty("--font-mono");
+}
 `;
 
 writeFileSync(OUT_PATH, fileContent, "utf-8");
+// Line-wrapping (e.g. long `description` strings) needs to match the
+// project's own Biome print-width rules exactly, which is brittle to
+// hand-replicate in the template above — running the project's real
+// formatter here is both simpler and guaranteed correct.
+try {
+  execFileSync("npx", ["--yes", "biome", "format", "--write", OUT_PATH], {
+    stdio: "inherit",
+  });
+} catch {
+  console.warn(
+    "Biome formatting failed — run `pnpm fix` manually before committing.",
+  );
+}
 console.log(`Wrote ${presets.length} presets to ${OUT_PATH}`);

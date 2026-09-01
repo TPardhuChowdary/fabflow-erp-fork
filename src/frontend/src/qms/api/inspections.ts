@@ -1,7 +1,12 @@
 // Phase 2 — Inspection Sheets. Kept as its own file, separate from
 // qms/api/index.ts, so the Phase 1 Characteristic Library API surface is
-// never touched. Same pattern as index.ts: pure async functions backed by
-// IndexedDB today, the seam a future backend would replace.
+// never touched. Pure async functions over the shared Repository method
+// shape (get/put/queryByIndex/...) — originally IndexedDB-backed, now
+// Supabase-backed since Phase 46 via an adapter swap in
+// qms/db/repositories.ts (inspectionSheetRepo et al. now alias the
+// *Supabase implementations from lib/qmsInspectionWorkflowApi.ts) that
+// needed zero changes here, since this file never talks to IndexedDB
+// directly.
 
 import { getSupabase } from "@/lib/supabaseClient";
 import {

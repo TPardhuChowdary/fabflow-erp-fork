@@ -2,16 +2,48 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 // Phase 22 — repeatProject creates a real Project row remotely; every
 // other domain's remote calls are initiated from page components, but
-// repeatProject's local-only child-cloning logic (design files/BOM
-// items/costing/production stages - none of those domains migrated) is
-// tightly coupled to store.ts's own synchronous local-state reads, so
-// the remote call is made from here instead of relocating that logic.
+// repeatProject's local-only child-cloning logic is tightly coupled to
+// store.ts's own synchronous local-state reads, so the remote call is
+// made from here instead of relocating that logic.
+//
+// Monster-2/3 — the Phase 22 comment this used to carry ("design files/
+// BOM items/costing/production stages - none of those domains migrated")
+// was stale: BOM items and Production Stages were migrated in later
+// phases (their own save paths are remote-first) but repeatProject's own
+// clone-on-copy logic was never revisited to match, so a repeat order
+// created with "copy BOM"/"copy stages"/"copy costing" checked would
+// lose those specific copies on the next reload even though the domains
+// themselves were otherwise fully persisted. Internal Costing (Monster-
+// 2), BOM items and Production Stages (Monster-3) are now all remote-
+// first here too, each via the exact same *Remote() function its own
+// regular (non-repeat-order) save path already uses — no new API, no
+// schema change, no behavior change beyond "also persisted."
+import { createBomItemRemote } from "./lib/bomItemsApi";
+import { hydrateBomRequisitions } from "./lib/hydration";
+import { upsertInternalCostingRemote } from "./lib/internalCostingApi";
 import { updateMachineRemote } from "./lib/machinesApi";
 import {
   recordStageTransactionRemote,
   upsertProjectionStagesRemote,
 } from "./lib/productionStagesApi";
-import { createProjectRemote, updateProjectRemote } from "./lib/projectsApi";
+import {
+  createProjectItemRemote,
+  deleteProjectItemRemote,
+  updateProjectItemRemote,
+} from "./lib/projectItemsApi";
+import {
+  addProjectActivityRemote,
+  createProjectRemote,
+} from "./lib/projectsApi";
+// Monster-4 — QC Structure clone (repeatProject) reads/writes through
+// useQmsStore's own actions, the same ones ProductionStageInspectionControl.tsx
+// already uses to link an inspection to a stage. project_qms_inspections and
+// project_qms_inspection_characteristics live in a separate Zustand store
+// from this one; Zustand stores are plain objects outside React, so calling
+// another store's .getState()/actions directly is safe with no new
+// abstraction — this is this store's first such cross-store call, but the
+// same shape agent/actions.ts already uses for useStore itself.
+import { useQmsStore } from "./qms/store/useQmsStore";
 import type {
   AdvanceRecord,
   AppSettings,
@@ -36,6 +68,7 @@ import type {
   InventoryItem,
   InventoryPurchase,
   Invoice,
+  JobCard,
   Machine,
   MachineCondition,
   MachineDie,
@@ -55,7 +88,6 @@ import type {
   PettyExpense,
   ProductionMovement,
   Project,
-  ProjectActivity,
   ProjectActivityType,
   ProjectDelivery,
   ProjectItem,
@@ -345,64 +377,6 @@ const sampleInventory: InventoryItem[] = [
     unit: "kg",
     quantityAvailable: 25,
     lastUpdated: Date.now(),
-  },
-];
-
-const samplePayables: Payable[] = [
-  {
-    id: "pay-1",
-    vendorName: "Steel India Pvt Ltd",
-    paymentType: "Material",
-    totalAmount: 45000,
-    paidAmount: 20000,
-    dueDate: "2026-04-10",
-    projectId: "proj1",
-    notes: "MS Sheet supply invoice SI-2026-4521",
-    createdAt: Date.now() - 86400000 * 15,
-  },
-  {
-    id: "pay-2",
-    vendorName: "CNC Laser Works",
-    paymentType: "CNC",
-    totalAmount: 8500,
-    paidAmount: 8500,
-    dueDate: "2026-03-30",
-    projectId: "proj1",
-    notes: "Laser cutting charges for Enclosure batch",
-    createdAt: Date.now() - 86400000 * 10,
-  },
-  {
-    id: "pay-3",
-    vendorName: "FastTrack Logistics",
-    paymentType: "Transport",
-    totalAmount: 6200,
-    paidAmount: 0,
-    dueDate: "2026-03-15",
-    notes: "Freight charges - Pune to Mumbai",
-    createdAt: Date.now() - 86400000 * 8,
-  },
-];
-
-const samplePayablePayments: PayablePayment[] = [
-  {
-    id: "pp-1",
-    payableId: "pay-1",
-    amount: 20000,
-    paymentDate: "2026-03-18",
-    mode: "NEFT",
-    referenceNo: "NEFT20260318001",
-    notes: "Advance payment",
-    createdAt: Date.now() - 86400000 * 12,
-  },
-  {
-    id: "pp-2",
-    payableId: "pay-2",
-    amount: 8500,
-    paymentDate: "2026-03-28",
-    mode: "UPI",
-    referenceNo: "UPI20260328002",
-    notes: "Full payment cleared",
-    createdAt: Date.now() - 86400000 * 2,
   },
 ];
 
@@ -707,7 +681,25 @@ interface Store {
   updateProjectPO: (projectId: string, po: ProjectPO) => void;
   addDesignFile: (f: DesignFile) => void;
   deleteDesignFile: (id: string) => void;
-  upsertInternalCosting: (c: InternalCosting) => void;
+  upsertInternalCosting: (c: Omit<InternalCosting, "id">) => Promise<boolean>;
+  setInternalCostingsFromServer: (costings: InternalCosting[]) => void;
+  internalCostingsHydration: {
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated";
+    error?: string;
+  };
+  setInternalCostingsHydrationStatus: (
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated",
+    error?: string,
+  ) => void;
+  setProjectItemsFromServer: (items: ProjectItem[]) => void;
+  projectItemsHydration: {
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated";
+    error?: string;
+  };
+  setProjectItemsHydrationStatus: (
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated",
+    error?: string,
+  ) => void;
   addMaterialPurchase: (m: MaterialPurchase) => void;
   updateMaterialPurchase: (m: MaterialPurchase) => void;
   deleteMaterialPurchase: (id: string) => void;
@@ -792,6 +784,17 @@ interface Store {
   ) => void;
   setVendorsFromServer: (vendors: Vendor[]) => void;
 
+  // Job Cards feature (see chat) — same shape, for the job_cards domain.
+  jobCardsHydration: {
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated";
+    error?: string;
+  };
+  setJobCardsHydrationStatus: (
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated",
+    error?: string,
+  ) => void;
+  setJobCardsFromServer: (jobCards: JobCard[]) => void;
+
   // Phase 21B — same shape, for the company POs domain.
   companyPOsHydration: {
     status: "idle" | "loading" | "success" | "error" | "unauthenticated";
@@ -802,6 +805,26 @@ interface Store {
     error?: string,
   ) => void;
   setCompanyPOsFromServer: (pos: CompanyPO[]) => void;
+
+  // Phase M.1 — same shape, for the newly-persisted payables domain.
+  payablesHydration: {
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated";
+    error?: string;
+  };
+  setPayablesHydrationStatus: (
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated",
+    error?: string,
+  ) => void;
+  setPayablesFromServer: (payables: Payable[]) => void;
+  payablePaymentsHydration: {
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated";
+    error?: string;
+  };
+  setPayablePaymentsHydrationStatus: (
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated",
+    error?: string,
+  ) => void;
+  setPayablePaymentsFromServer: (payments: PayablePayment[]) => void;
 
   // Phase 22 — same shape, for the projects domain. setProjectsFromServer
   // is NOT a wholesale replace like every prior domain: assignedEmployeeIds/
@@ -875,6 +898,13 @@ interface Store {
   ) => void;
   setInventoryPurchasesFromServer: (purchases: InventoryPurchase[]) => void;
 
+  materialPurchasesHydration: { status: HydrationStatusValue; error?: string };
+  setMaterialPurchasesHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setMaterialPurchasesFromServer: (purchases: MaterialPurchase[]) => void;
+
   inventoryUsagesHydration: { status: HydrationStatusValue; error?: string };
   setInventoryUsagesHydrationStatus: (
     status: HydrationStatusValue,
@@ -895,6 +925,13 @@ interface Store {
     error?: string,
   ) => void;
   setBomRequisitionsFromServer: (reqs: BomRequisition[]) => void;
+
+  scrapRecordsHydration: { status: HydrationStatusValue; error?: string };
+  setScrapRecordsHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setScrapRecordsFromServer: (records: ScrapRecord[]) => void;
 
   // project_employees — no dedicated array; feeds Project.
   // assignedEmployeeIds only (see lib/hydration.ts's ProjectEmployeeRow).
@@ -1088,6 +1125,7 @@ interface Store {
   updatePayable: (p: Payable) => void;
   deletePayable: (id: string) => void;
   addPayablePayment: (p: PayablePayment) => void;
+  deletePayablePayment: (id: string) => void;
 
   // BOM
   bomItems: BomItem[];
@@ -1105,6 +1143,12 @@ interface Store {
   updateVendor: (v: Vendor) => void;
   deleteVendor: (id: string) => void;
 
+  // Job Cards feature (see chat) — employee-assigned, time-based work.
+  jobCards: JobCard[];
+  addJobCard: (jc: JobCard) => void;
+  updateJobCard: (jc: JobCard) => void;
+  deleteJobCard: (id: string) => void;
+
   // Quality Inspections
   qualityInspections: QualityInspection[];
   addQualityInspection: (q: QualityInspection) => void;
@@ -1112,9 +1156,14 @@ interface Store {
 
   // Project Items
   projectItems: ProjectItem[];
-  addProjectItem: (item: Omit<ProjectItem, "id" | "createdAt">) => void;
-  updateProjectItem: (id: string, updates: Partial<ProjectItem>) => void;
-  deleteProjectItem: (id: string) => void;
+  addProjectItem: (
+    item: Omit<ProjectItem, "id" | "createdAt">,
+  ) => Promise<boolean>;
+  updateProjectItem: (
+    id: string,
+    updates: Partial<Omit<ProjectItem, "id" | "createdAt">>,
+  ) => Promise<boolean>;
+  deleteProjectItem: (id: string) => Promise<boolean>;
 
   // Petty Expenses
   pettyExpenses: PettyExpense[];
@@ -1378,6 +1427,12 @@ interface Store {
       copyStages: boolean;
       copyQC: boolean;
       copyNotes: boolean;
+      // Attribution for cloned project_qms_inspections rows (copyQC) —
+      // optional since only ProjectDetail.tsx's UI caller has a real
+      // current user; the Agent's bare-project caller omits both and
+      // always passes copyQC: false anyway.
+      byUserId?: string;
+      byUserName?: string;
     },
   ) => Promise<string | null>;
 }
@@ -1670,7 +1725,11 @@ export const useStore = create<Store>()(
       customersHydration: { status: "idle" },
       inventoryItemsHydration: { status: "idle" },
       vendorsHydration: { status: "idle" },
+      jobCards: [],
+      jobCardsHydration: { status: "idle" },
       companyPOsHydration: { status: "idle" },
+      payablesHydration: { status: "idle" },
+      payablePaymentsHydration: { status: "idle" },
       projectsHydration: { status: "idle" },
       outsourcedWorksHydration: { status: "idle" },
       advanceRecordsHydration: { status: "idle" },
@@ -1678,6 +1737,7 @@ export const useStore = create<Store>()(
       employeeDocumentsHydration: { status: "idle" },
       salaryPaymentsHydration: { status: "idle" },
       inventoryPurchasesHydration: { status: "idle" },
+      materialPurchasesHydration: { status: "idle" },
       inventoryUsagesHydration: { status: "idle" },
       bomItemsHydration: { status: "idle" },
       bomRequisitionsHydration: { status: "idle" },
@@ -1715,8 +1775,14 @@ export const useStore = create<Store>()(
       bomRequisitions: [],
 
       // Payables initial state
-      payables: samplePayables,
-      payablePayments: samplePayablePayments,
+      // Phase M.1 — payables/payablePayments are now Supabase-hydrated
+      // (see hydratePayables/hydratePayablePayments in lib/hydration.ts).
+      // The old samplePayables/samplePayablePayments seed was demo data
+      // only, never real accumulated user data, so there is nothing to
+      // migrate — this simply starts empty and waits for hydration, same
+      // as every other already-migrated domain.
+      payables: [],
+      payablePayments: [],
 
       // Project Items initial state
       projectItems: [],
@@ -1735,6 +1801,7 @@ export const useStore = create<Store>()(
 
       // Scrap Management
       scrapRecords: [],
+      scrapRecordsHydration: { status: "idle" },
 
       // Machinery initial state
       machines: sampleMachines,
@@ -2015,19 +2082,37 @@ export const useStore = create<Store>()(
       deleteDesignFile: (id) =>
         set((s) => ({ designFiles: s.designFiles.filter((f) => f.id !== id) })),
 
-      upsertInternalCosting: (c) =>
+      // Monster-2 — remote-first, same discipline as every other migrated
+      // domain: the real row (with its real id and server-confirmed
+      // values) is what gets written to local state, never the caller's
+      // optimistic guess. Returns false (nothing written, local or
+      // remote) on any non-success result so the caller can surface it.
+      upsertInternalCosting: async (c) => {
+        const result = await upsertInternalCostingRemote(c);
+        if (result.status !== "success" || !result.data) return false;
+        const saved = result.data;
         set((s) => {
           const exists = s.internalCostings.find(
-            (x) => x.projectId === c.projectId,
+            (x) => x.projectId === saved.projectId,
           );
           return {
             internalCostings: exists
               ? s.internalCostings.map((x) =>
-                  x.projectId === c.projectId ? c : x,
+                  x.projectId === saved.projectId ? saved : x,
                 )
-              : [...s.internalCostings, c],
+              : [...s.internalCostings, saved],
           };
+        });
+        return true;
+      },
+      setInternalCostingsFromServer: (internalCostings) =>
+        set({
+          internalCostings,
+          internalCostingsHydration: { status: "success" },
         }),
+      internalCostingsHydration: { status: "idle" },
+      setInternalCostingsHydrationStatus: (status, error) =>
+        set({ internalCostingsHydration: { status, error } }),
 
       addMaterialPurchase: (m) =>
         set((s) => {
@@ -2261,10 +2346,25 @@ export const useStore = create<Store>()(
         set({ vendorsHydration: { status, error } }),
       setVendorsFromServer: (vendors) =>
         set({ vendors, vendorsHydration: { status: "success" } }),
+      setJobCardsHydrationStatus: (status, error) =>
+        set({ jobCardsHydration: { status, error } }),
+      setJobCardsFromServer: (jobCards) =>
+        set({ jobCards, jobCardsHydration: { status: "success" } }),
       setCompanyPOsHydrationStatus: (status, error) =>
         set({ companyPOsHydration: { status, error } }),
       setCompanyPOsFromServer: (companyPOs) =>
         set({ companyPOs, companyPOsHydration: { status: "success" } }),
+      setPayablesHydrationStatus: (status, error) =>
+        set({ payablesHydration: { status, error } }),
+      setPayablesFromServer: (payables) =>
+        set({ payables, payablesHydration: { status: "success" } }),
+      setPayablePaymentsHydrationStatus: (status, error) =>
+        set({ payablePaymentsHydration: { status, error } }),
+      setPayablePaymentsFromServer: (payablePayments) =>
+        set({
+          payablePayments,
+          payablePaymentsHydration: { status: "success" },
+        }),
       setProjectsHydrationStatus: (status, error) =>
         set({ projectsHydration: { status, error } }),
       // Phase 22 Decision 3 + PO-fields follow-up (both explicitly
@@ -2358,6 +2458,14 @@ export const useStore = create<Store>()(
           inventoryPurchasesHydration: { status: "success" },
         }),
 
+      setMaterialPurchasesHydrationStatus: (status, error) =>
+        set({ materialPurchasesHydration: { status, error } }),
+      setMaterialPurchasesFromServer: (materialPurchases) =>
+        set({
+          materialPurchases,
+          materialPurchasesHydration: { status: "success" },
+        }),
+
       setInventoryUsagesHydrationStatus: (status, error) =>
         set({ inventoryUsagesHydration: { status, error } }),
       setInventoryUsagesFromServer: (materialUsages) =>
@@ -2378,6 +2486,22 @@ export const useStore = create<Store>()(
           bomRequisitions,
           bomRequisitionsHydration: { status: "success" },
         }),
+
+      setScrapRecordsHydrationStatus: (status, error) =>
+        set({ scrapRecordsHydration: { status, error } }),
+      // projectName is resolved here, once, against the projects already
+      // in state — the same denormalization ScrapManagement.tsx's own
+      // addScrapRecord call site already does locally, not a new rule.
+      setScrapRecordsFromServer: (records) =>
+        set((s) => ({
+          scrapRecords: records.map((r) => ({
+            ...r,
+            projectName: r.projectId
+              ? s.projects.find((p) => p.id === r.projectId)?.projectName
+              : undefined,
+          })),
+          scrapRecordsHydration: { status: "success" },
+        })),
 
       setProjectEmployeesHydrationStatus: (status, error) =>
         set({ projectEmployeesHydration: { status, error } }),
@@ -2884,6 +3008,15 @@ export const useStore = create<Store>()(
       deleteVendor: (id) =>
         set((s) => ({ vendors: s.vendors.filter((x) => x.id !== id) })),
 
+      // Job Cards actions (see chat)
+      addJobCard: (jc) => set((s) => ({ jobCards: [...s.jobCards, jc] })),
+      updateJobCard: (jc) =>
+        set((s) => ({
+          jobCards: s.jobCards.map((x) => (x.id === jc.id ? jc : x)),
+        })),
+      deleteJobCard: (id) =>
+        set((s) => ({ jobCards: s.jobCards.filter((x) => x.id !== id) })),
+
       addQualityInspection: (q) =>
         set((s) => ({ qualityInspections: [...s.qualityInspections, q] })),
       updateQualityInspection: (q) =>
@@ -2893,24 +3026,44 @@ export const useStore = create<Store>()(
           ),
         })),
 
-      // Project Items actions
-      addProjectItem: (item) =>
+      // Project Items actions — Monster-2, remote-first (same discipline
+      // as upsertInternalCosting above): the real server-confirmed row is
+      // what gets written locally, never an optimistic guess.
+      addProjectItem: async (item) => {
+        const result = await createProjectItemRemote(item);
+        if (result.status !== "success" || !result.data) return false;
+        const saved = result.data;
+        set((s) => ({ projectItems: [...s.projectItems, saved] }));
+        return true;
+      },
+      updateProjectItem: async (id, updates) => {
+        const existing = get().projectItems.find((x) => x.id === id);
+        if (!existing) return false;
+        const result = await updateProjectItemRemote({
+          ...existing,
+          ...updates,
+          id,
+        });
+        if (result.status !== "success" || !result.data) return false;
+        const saved = result.data;
         set((s) => ({
-          projectItems: [
-            ...s.projectItems,
-            { ...item, id: crypto.randomUUID(), createdAt: Date.now() },
-          ],
-        })),
-      updateProjectItem: (id, updates) =>
-        set((s) => ({
-          projectItems: s.projectItems.map((x) =>
-            x.id === id ? { ...x, ...updates } : x,
-          ),
-        })),
-      deleteProjectItem: (id) =>
+          projectItems: s.projectItems.map((x) => (x.id === id ? saved : x)),
+        }));
+        return true;
+      },
+      deleteProjectItem: async (id) => {
+        const result = await deleteProjectItemRemote(id);
+        if (result.status !== "success") return false;
         set((s) => ({
           projectItems: s.projectItems.filter((x) => x.id !== id),
-        })),
+        }));
+        return true;
+      },
+      setProjectItemsFromServer: (projectItems) =>
+        set({ projectItems, projectItemsHydration: { status: "success" } }),
+      projectItemsHydration: { status: "idle" },
+      setProjectItemsHydrationStatus: (status, error) =>
+        set({ projectItemsHydration: { status, error } }),
       // Phase 27 Batch 3 — petty_expenses/expense_floats are now
       // server-backed. The old local floatId-resolution (resolveFloatLink)
       // and float-recompute-on-every-mutation logic used to live here;
@@ -3073,19 +3226,21 @@ export const useStore = create<Store>()(
         const s = get();
         const project = (s.projects || []).find((p) => p.id === projectId);
         if (!project) return;
-        const entry: ProjectActivity = {
-          id: crypto.randomUUID(),
+        // Delegates to the add_project_activity() RPC — an atomic
+        // server-side JSONB append — rather than reading activityLog
+        // from local state, appending client-side, and writing the whole
+        // array back via updateProjectRemote's normal full-row update.
+        // Activity entries are appended from several independent
+        // triggers in quick succession (invoice generation, agent
+        // actions, manual notes); a client-computed full-array overwrite
+        // would silently drop whichever entry lost that race.
+        const result = await addProjectActivityRemote(
+          projectId,
           type,
           description,
           performedBy,
-          timestamp: Date.now(),
           metadata,
-        };
-        const updatedActivityLog = [...(project.activityLog || []), entry];
-        const result = await updateProjectRemote({
-          ...project,
-          activityLog: updatedActivityLog,
-        });
+        );
         // Never fabricate success - if the remote write failed (RLS
         // denial, no session, etc.), the entry is simply not added
         // locally either, so the UI never claims a note/event was saved
@@ -3658,12 +3813,13 @@ export const useStore = create<Store>()(
 
         // Phase 22 — remote-first. The Project row goes through the same
         // remote boundary and bounded project-number retry as primary
-        // creation. Design files/BOM items/internal costing/production
-        // stages stay local-only clones exactly as before - none of
-        // those domains are migrated this phase (Decision 1), so this is
-        // not a partial migration of repeatProject, it's the same "only
-        // this domain's own table moves" boundary already applied
-        // everywhere else.
+        // creation. Design Files stay a local-only clone deliberately —
+        // Design Files themselves are never persisted to Supabase
+        // anywhere in the app (see database/phase-33/..., Phase 14's own
+        // comment), a decided boundary, not a gap. BOM items, Internal
+        // Costing, Production Stages, and QC Structure below are all
+        // remote-first, each via the exact *Remote()/store action its
+        // own regular (non-repeat-order) path already uses.
         const result = await createProjectRemote({
           projectNo: initialProjectNo,
           customerId: src.customerId,
@@ -3714,74 +3870,199 @@ export const useStore = create<Store>()(
               .map((f) => ({ ...f, id: crypto.randomUUID(), projectId: newId }))
           : [];
 
-        // Deep-clone BOM items
-        const newBomItems = options.copyBOM
-          ? (s.bomItems || [])
-              .filter((b) => b.projectId === projectId)
-              .map((b) => ({
-                ...b,
-                id: crypto.randomUUID(),
+        // Deep-clone BOM items — Monster-3: remote-first, one
+        // createBomItemRemote() call per item, the exact function
+        // ProjectDetail.tsx's own "Add Material" flow already uses (the
+        // server assigns id/createdAt, never fabricated locally). A
+        // failed clone here just means that one item is missing from the
+        // new project's BOM, same as not checking "copy BOM" for it,
+        // never a silently-local row.
+        const srcBomItems = (s.bomItems || []).filter(
+          (b) => b.projectId === projectId,
+        );
+        let newBomItems: BomItem[] = [];
+        let newBomRequisitions = s.bomRequisitions;
+        if (options.copyBOM && srcBomItems.length > 0) {
+          const bomResults = await Promise.all(
+            srcBomItems.map((b) =>
+              createBomItemRemote({
                 projectId: newId,
-                createdAt: Date.now(),
-              }))
-          : [];
+                inventoryItemId: b.inventoryItemId,
+                materialName: b.materialName,
+                requiredQuantity: b.requiredQuantity,
+                estimatedPrice: b.estimatedPrice,
+              }),
+            ),
+          );
+          newBomItems = bomResults
+            .filter((r) => r.status === "success" && !!r.data)
+            .map((r) => r.data as BomItem);
+          // project_bom_items carries a BEFORE INSERT trigger
+          // (trg_project_bom_items_recompute) that upserts the matching
+          // bom_requisitions row server-side as a side effect of each
+          // insert above — re-hydrate once after the loop rather than
+          // computing the requisition locally, same rule
+          // bomItemsApi.ts's own header comment documents for every
+          // other BOM item write path.
+          if (newBomItems.length > 0) {
+            const reqResult = await hydrateBomRequisitions();
+            if (reqResult.status === "success" && reqResult.data) {
+              newBomRequisitions = reqResult.data;
+            }
+          }
+        }
 
-        // Deep-clone internal costing (structure only, not values)
+        // Deep-clone internal costing (structure only, not values) —
+        // Monster-2: remote-first, same as the Project row above. Never
+        // fabricates a local id/row on failure; a failed clone here just
+        // means the new project starts with no costing sheet (the same
+        // as not checking "copy costing" at all), not a silently-local
+        // one that would vanish on the next reload.
         const srcCosting = (s.internalCostings || []).find(
           (c) => c.projectId === projectId,
         );
-        const newCosting =
-          options.copyCosting && srcCosting
-            ? [{ ...srcCosting, id: crypto.randomUUID(), projectId: newId }]
-            : [];
+        let newCosting: InternalCosting[] = [];
+        if (options.copyCosting && srcCosting) {
+          const costingResult = await upsertInternalCostingRemote({
+            ...srcCosting,
+            projectId: newId,
+          });
+          if (costingResult.status === "success" && costingResult.data) {
+            newCosting = [costingResult.data];
+          }
+        }
 
-        // Deep-clone production stages (reset progress)
+        // Deep-clone production stages (reset progress) — Monster-3:
+        // remote-first via upsert_project_production_stages, the exact
+        // atomic RPC updateProjectStagesV2 (the regular, non-repeat-order
+        // save path) already uses. The locally-computed `clonedStages`
+        // array (not the RPC's returned rows) is what's written to local
+        // state below, matching updateProjectStagesV2's own established
+        // convention exactly — the RPC's SELECT has no ORDER BY, so its
+        // return order isn't guaranteed to match `position`, while the
+        // array built here already is. A failed clone here just means
+        // the new project starts with no stages, same as not checking
+        // "copy stages" at all.
         const srcProd = (s.projectProductions || []).find(
           (p) => p.projectId === projectId,
         );
-        const newProd: ProjectProduction[] =
-          options.copyStages && srcProd
-            ? [
-                {
-                  id: crypto.randomUUID(),
-                  projectId: newId,
-                  version: srcProd.version,
-                  stages: srcProd.stages.map((st) => ({
-                    ...st,
-                    status: "NotStarted" as ProjectStageStatus,
-                    notes: "",
-                    quantitySent: 0,
-                    sentDateTime: "",
-                    receivedQuantity: 0,
-                    receivedDateTime: "",
-                    startTime: "",
-                    endTime: "",
-                    transactions: [],
-                    sentQty: 0,
-                    receivedQty: 0,
-                    okQty: 0,
-                    rejectedQty: 0,
-                    reworkQty: 0,
-                    wipInProgressQty: 0,
-                    wipCompletedQty: 0,
-                    wipDispatchedQty: 0,
-                    // Phase 32 (Task #173) - this is a NEW, independent
-                    // stage instance in the new project, not the same
-                    // stage as the source; `...st` above would otherwise
-                    // carry the source's stageId over verbatim, making
-                    // two unrelated stages (in two different projects)
-                    // share one id. Every cloned stage gets its own fresh
-                    // id, same as every other stage-creation path.
-                    stageId: crypto.randomUUID(),
-                  })),
-                },
-              ]
-            : [];
+        let newProd: ProjectProduction[] = [];
+        if (options.copyStages && srcProd) {
+          const clonedStages = srcProd.stages.map((st) => ({
+            ...st,
+            status: "NotStarted" as ProjectStageStatus,
+            // copyNotes controls only this text field — everything else
+            // above/below it is progress data and always resets
+            // regardless of copyNotes, matching the dialog's own
+            // "Production Stages (progress reset)" label.
+            notes: options.copyNotes ? st.notes : "",
+            quantitySent: 0,
+            sentDateTime: "",
+            receivedQuantity: 0,
+            receivedDateTime: "",
+            startTime: "",
+            endTime: "",
+            transactions: [],
+            sentQty: 0,
+            receivedQty: 0,
+            okQty: 0,
+            rejectedQty: 0,
+            reworkQty: 0,
+            wipInProgressQty: 0,
+            wipCompletedQty: 0,
+            wipDispatchedQty: 0,
+            // Phase 32 (Task #173) - this is a NEW, independent stage
+            // instance in the new project, not the same stage as the
+            // source; `...st` above would otherwise carry the source's
+            // stageId over verbatim, making two unrelated stages (in two
+            // different projects) share one id. Every cloned stage gets
+            // its own fresh id, same as every other stage-creation path.
+            stageId: crypto.randomUUID(),
+          }));
+          const stagesResult = await upsertProjectionStagesRemote(
+            newId,
+            clonedStages,
+          );
+          if (stagesResult.status === "success") {
+            newProd = [
+              {
+                id: crypto.randomUUID(),
+                projectId: newId,
+                version: srcProd.version,
+                stages: clonedStages,
+              },
+            ];
+          }
+        }
+
+        // Deep-clone stage-linked QC Structure — Monster-4: only
+        // ProjectQmsInspection rows linked to a production stage
+        // (requiredProductionStageId set) are cloned, mapped onto the
+        // corresponding NEW stage by position; independent (non-stage-
+        // linked) QC inspections on the source project are left alone.
+        // Requires stages to have actually been cloned above, so there's
+        // a new stageId to link to — no-op if copyStages was unchecked
+        // or its clone failed. Copies each source inspection's EXACT
+        // characteristic snapshot as it exists today (not a re-derivation
+        // from the current Library state, which may have drifted since
+        // the source's snapshot was taken) via the same store actions
+        // ProductionStageInspectionControl.tsx already uses to link one
+        // inspection manually. A failed clone here just skips that one
+        // inspection, same "missing, not silently local" contract as
+        // every other clone above.
+        if (options.copyQC && srcProd && newProd.length > 0) {
+          const stageIdMap = new Map(
+            srcProd.stages.map((st, idx) => [
+              st.stageId,
+              newProd[0].stages[idx]?.stageId,
+            ]),
+          );
+          const srcStageIds = new Set(srcProd.stages.map((st) => st.stageId));
+          const qms = useQmsStore.getState();
+          const srcInspections = qms.projectQmsInspections.filter(
+            (i) =>
+              i.projectId === projectId &&
+              i.requiredProductionStageId &&
+              srcStageIds.has(i.requiredProductionStageId),
+          );
+          for (const insp of srcInspections) {
+            const newStageId = stageIdMap.get(
+              insp.requiredProductionStageId as string,
+            );
+            if (!newStageId) continue;
+            const created = await qms.createProjectQmsInspection({
+              projectId: newId,
+              libraryInspectionId: insp.libraryInspectionId,
+              libraryInspectionName: insp.libraryInspectionName,
+              requiredProductionStageId: newStageId,
+              mode: insp.mode,
+              byUserId: options.byUserId,
+              byUserName: options.byUserName,
+            });
+            if (created.status !== "success" || !created.data) continue;
+            const newInspectionId = created.data.id;
+            const srcChars = qms.projectQmsInspectionCharacteristics.filter(
+              (c) => c.projectQmsInspectionId === insp.id,
+            );
+            if (srcChars.length > 0) {
+              await qms.createProjectQmsInspectionCharacteristics(
+                srcChars.map((c) => ({
+                  projectQmsInspectionId: newInspectionId,
+                  libraryCharacteristicId: c.libraryCharacteristicId,
+                  nameSnapshot: c.nameSnapshot,
+                  categorySnapshot: c.categorySnapshot,
+                  sequence: c.sequence,
+                })),
+              );
+            }
+          }
+        }
 
         set((st) => ({
           projects: [...(st.projects || []), newProject],
           designFiles: [...(st.designFiles || []), ...newDesignFiles],
           bomItems: [...(st.bomItems || []), ...newBomItems],
+          bomRequisitions: newBomRequisitions,
           internalCostings: [...(st.internalCostings || []), ...newCosting],
           projectProductions: [...(st.projectProductions || []), ...newProd],
         }));
@@ -3876,22 +4157,19 @@ export const useStore = create<Store>()(
               (data.productionMovements as ProductionMovement[]) || [],
           };
         }),
+      // Phase M.1 — append-only. paidAmount is trigger-derived server-side
+      // (trg_recompute_payable_paid_amount); callers re-fetch the parent
+      // payable via getPayableRemote and apply it through updatePayable
+      // separately, rather than this setter guessing the new total.
       addPayablePayment: (p) =>
-        set((s) => {
-          const payable = s.payables.find((x) => x.id === p.payableId);
-          if (!payable) return {};
-          const newPaid = payable.paidAmount + p.amount;
-          const updatedPayable: Payable = {
-            ...payable,
-            paidAmount: newPaid,
-          };
-          return {
-            payablePayments: [...s.payablePayments, p],
-            payables: s.payables.map((x) =>
-              x.id === p.payableId ? updatedPayable : x,
-            ),
-          };
-        }),
+        set((s) => ({ payablePayments: [...s.payablePayments, p] })),
+      // Monster-1 — same "caller re-fetches the parent payable separately"
+      // contract as addPayablePayment above; this only removes the local
+      // payment record itself.
+      deletePayablePayment: (id) =>
+        set((s) => ({
+          payablePayments: s.payablePayments.filter((x) => x.id !== id),
+        })),
     }),
     {
       name: "fabflow-erp-store",

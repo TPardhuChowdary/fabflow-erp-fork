@@ -340,7 +340,7 @@ export function Projects({ onViewProject }: Props) {
                     </span>
                     {p.projectType === "REPEAT_ORDER" &&
                       p.internalOrderCode && (
-                        <span className="font-mono text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded shrink-0">
+                        <span className="font-mono text-[10px] text-info bg-info/10 border border-info/30 px-1.5 py-0.5 rounded shrink-0">
                           Repeat · {p.internalOrderCode}
                         </span>
                       )}
@@ -448,7 +448,7 @@ export function Projects({ onViewProject }: Props) {
                         <span>{getCustomerVisibleName(p)}</span>
                         {p.projectType === "REPEAT_ORDER" &&
                           p.internalOrderCode && (
-                            <span className="font-mono text-[10px] text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded shrink-0">
+                            <span className="font-mono text-[10px] text-info bg-info/10 border border-info/30 px-1.5 py-0.5 rounded shrink-0">
                               Repeat · {p.internalOrderCode}
                             </span>
                           )}
@@ -532,7 +532,6 @@ export function Projects({ onViewProject }: Props) {
           <form
             onSubmit={(e) => {
               e.preventDefault();
-              console.log("FORM SUBMITTED");
               handleSave();
             }}
           >

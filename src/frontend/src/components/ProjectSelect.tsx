@@ -102,7 +102,7 @@ export function ProjectSelect({
                     {getCustomerVisibleName(p)}
                   </span>
                   {p.internalOrderCode && (
-                    <span className="ml-1.5 font-mono text-[10px] text-amber-600 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded shrink-0">
+                    <span className="ml-1.5 font-mono text-[10px] text-info bg-info/10 border border-info/30 px-1.5 py-0.5 rounded shrink-0">
                       {p.internalOrderCode}
                     </span>
                   )}

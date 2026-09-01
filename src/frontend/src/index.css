@@ -9,6 +9,24 @@
   src: url("/assets/fonts/PlusJakartaSans.woff2") format("woff2");
 }
 
+/* Instrument visual system (Phase 3/generate-theme-tokens.mjs) — only
+   loaded/applied when the "Instrument" theme preset is active, via
+   ThemeContext's applyThemeFonts() setting --font-sans/--font-mono
+   below. Self-hosted the same way as Plus Jakarta Sans, for the app's
+   offline-first requirement. */
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-weight: 300 700;
+  font-display: swap;
+  src: url("/assets/fonts/IBMPlexSans.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-weight: 400;
+  font-display: swap;
+  src: url("/assets/fonts/IBMPlexMono.woff2") format("woff2");
+}
+
 @layer base {
   :root {
     --radius: 0.375rem;
@@ -93,7 +111,11 @@
   }
   body {
     @apply bg-background text-foreground;
-    font-family: "Plus Jakarta Sans", "Inter", system-ui, sans-serif;
+    /* --font-sans is unset for every preset except Instrument (see
+       applyThemeFonts in lib/themes/tokens.ts), so this falls through
+       to the original stack unchanged for existing users. */
+    font-family: var(--font-sans, "Plus Jakarta Sans"), "Inter", system-ui,
+      sans-serif;
   }
 }
 

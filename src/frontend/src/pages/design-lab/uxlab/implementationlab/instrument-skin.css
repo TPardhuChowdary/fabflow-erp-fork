@@ -1,0 +1,222 @@
+/* UX Implementation Lab — Instrument skin overlay.
+ *
+ * The reused screens from decisionlab/ and shared/GenericScreens.tsx are
+ * real, functional, store-wired components hand-styled with hardcoded
+ * Tailwind utility classes (bg-white, text-gray-900, bg-gray-900,
+ * text-blue-600, etc.) — the same pattern every module in this whole
+ * project has used since Phase 1. Rebuilding every one of those screens
+ * with token-driven inline styles just to reskin them would be exactly
+ * the "duplicate the existing prototype" this project has been told
+ * not to do, phase after phase.
+ *
+ * Instead: one semantic remap, scoped to `.instrument-skin`, mapping
+ * each Tailwind utility class actually used across those screens to its
+ * Instrument-token equivalent by MEANING, not by exact shade —
+ * bg-gray-900/border-gray-900 (this codebase's "primary action" color)
+ * and text-blue-600/border-blue-* (this codebase's "link/accent" color)
+ * both become Instrument's one accent, exactly as a real design-token
+ * migration would treat two different "primary" conventions merging
+ * into one system. Severity colors (emerald/red/amber) map to
+ * Instrument's success/warning/danger — kept fully independent of the
+ * accent, per the approved visual system's own rule (see
+ * ../visuallab/VISUAL_SYSTEM.md §3). violet/indigo (used for QMS's
+ * "TARGET DESIGN" badges and a few icon accents) map to a muted
+ * categorical tint, not the primary accent — same separation rule.
+ *
+ * !important is used deliberately and only here: Tailwind's own utility
+ * classes are single-class selectors loaded from the global stylesheet
+ * in an order this file doesn't control, so a scoped override needs
+ * guaranteed specificity to win reliably. This is a compatibility shim
+ * for the representative-screens pass, not a pattern to replicate
+ * app-wide — Phase 9's real per-module migration (Blueprint §18) should
+ * replace these classes at the source, not keep re-skinning them.
+ */
+
+.instrument-skin {
+  --i-page: #f4f3f0;
+  --i-surface: #ffffff;
+  --i-surface-alt: #eeece5;
+  --i-border: #e2e0d8;
+  --i-ink: #1a1917;
+  --i-ink-muted: #69665d;
+  --i-ink-faint: #93907f;
+  --i-accent: #1f6f78;
+  --i-accent-ink: #ffffff;
+  --i-success: #2f8f5b;
+  --i-success-wash: #e5f4ec;
+  --i-warning: #c98a2c;
+  --i-warning-wash: #faf0e0;
+  --i-danger: #c1443a;
+  --i-danger-wash: #fbe9e8;
+  --i-category: #6b6a86;
+  --i-category-wash: #ecebf2;
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  background: var(--i-page);
+  color: var(--i-ink);
+}
+
+.instrument-skin[data-mode="dark"] {
+  --i-page: #14171a;
+  --i-surface: #1b1f23;
+  --i-surface-alt: #22262b;
+  --i-border: #2c3136;
+  --i-ink: #eceae5;
+  --i-ink-muted: #9b988e;
+  --i-ink-faint: #6f6c62;
+  --i-accent: #5fb0b8;
+  --i-accent-ink: #0d1f21;
+  --i-success: #4ec98a;
+  --i-success-wash: #173023;
+  --i-warning: #e0a13c;
+  --i-warning-wash: #332510;
+  --i-danger: #e8756a;
+  --i-danger-wash: #331c1b;
+  --i-category: #a3a1c2;
+  --i-category-wash: #26243a;
+}
+
+/* Surfaces */
+.instrument-skin .bg-white {
+  background: var(--i-surface) !important;
+}
+.instrument-skin .bg-gray-50,
+.instrument-skin .bg-gray-100,
+.instrument-skin .bg-gray-200 {
+  background: var(--i-surface-alt) !important;
+}
+
+/* Borders */
+.instrument-skin .border,
+.instrument-skin [class*="border-b"],
+.instrument-skin [class*="border-t"],
+.instrument-skin [class*="border-l"],
+.instrument-skin [class*="border-r"],
+.instrument-skin .border-gray-200,
+.instrument-skin .border-gray-300 {
+  border-color: var(--i-border) !important;
+}
+
+/* Text — neutral scale */
+.instrument-skin .text-gray-900,
+.instrument-skin .text-gray-800 {
+  color: var(--i-ink) !important;
+}
+.instrument-skin .text-gray-700,
+.instrument-skin .text-gray-600,
+.instrument-skin .text-gray-500 {
+  color: var(--i-ink-muted) !important;
+}
+.instrument-skin .text-gray-400,
+.instrument-skin .text-gray-300 {
+  color: var(--i-ink-faint) !important;
+}
+
+/* Primary action / accent — this codebase's two different "primary"
+   conventions (dark filled buttons, blue links) both become the one
+   Instrument accent. */
+.instrument-skin .bg-gray-900 {
+  background: var(--i-accent) !important;
+  color: var(--i-accent-ink) !important;
+}
+.instrument-skin .border-gray-900 {
+  border-color: var(--i-accent) !important;
+}
+.instrument-skin .text-blue-600,
+.instrument-skin .text-blue-700 {
+  color: var(--i-accent) !important;
+}
+.instrument-skin .bg-blue-50,
+.instrument-skin .bg-blue-100 {
+  background: color-mix(in srgb, var(--i-accent) 12%, var(--i-surface)) !important;
+}
+.instrument-skin .border-blue-200,
+.instrument-skin .border-blue-400 {
+  border-color: var(--i-accent) !important;
+}
+
+/* Success */
+.instrument-skin .text-emerald-500,
+.instrument-skin .text-emerald-600,
+.instrument-skin .text-emerald-700 {
+  color: var(--i-success) !important;
+}
+.instrument-skin .bg-emerald-50,
+.instrument-skin .bg-emerald-100 {
+  background: var(--i-success-wash) !important;
+}
+.instrument-skin .border-emerald-100,
+.instrument-skin .border-emerald-200 {
+  border-color: var(--i-success) !important;
+}
+
+/* Warning */
+.instrument-skin .text-amber-500,
+.instrument-skin .text-amber-600,
+.instrument-skin .text-amber-700,
+.instrument-skin .text-amber-800 {
+  color: var(--i-warning) !important;
+}
+.instrument-skin .bg-amber-50,
+.instrument-skin .bg-amber-100 {
+  background: var(--i-warning-wash) !important;
+}
+.instrument-skin .border-amber-100,
+.instrument-skin .border-amber-200 {
+  border-color: var(--i-warning) !important;
+}
+
+/* Danger */
+.instrument-skin .text-red-500,
+.instrument-skin .text-red-600,
+.instrument-skin .text-red-700 {
+  color: var(--i-danger) !important;
+}
+.instrument-skin .bg-red-50,
+.instrument-skin .bg-red-100 {
+  background: var(--i-danger-wash) !important;
+}
+.instrument-skin .bg-red-600 {
+  background: var(--i-danger) !important;
+  color: #fff !important;
+}
+.instrument-skin .border-red-100,
+.instrument-skin .border-red-200,
+.instrument-skin .border-red-400 {
+  border-color: var(--i-danger) !important;
+}
+
+/* Category tint — QMS's "target design" badges, a few icon accents.
+   Deliberately NOT the accent — same separation rule as production
+   badges vs. severity. */
+.instrument-skin .text-violet-500,
+.instrument-skin .text-violet-700,
+.instrument-skin .text-violet-800,
+.instrument-skin .text-indigo-700 {
+  color: var(--i-category) !important;
+}
+.instrument-skin .bg-violet-50,
+.instrument-skin .bg-violet-100,
+.instrument-skin .bg-indigo-100 {
+  background: var(--i-category-wash) !important;
+}
+.instrument-skin .border-violet-200 {
+  border-color: var(--i-category) !important;
+}
+
+/* Radius — Instrument's tighter, more precise scale */
+.instrument-skin .rounded-xl,
+.instrument-skin .rounded-lg {
+  border-radius: 10px !important;
+}
+.instrument-skin .rounded,
+.instrument-skin .rounded-md {
+  border-radius: 6px !important;
+}
+
+/* Type — tabular figures for anything already using font-mono
+   (this codebase's existing convention for codes/quantities), swapped
+   to IBM Plex Mono per the approved system. */
+.instrument-skin .font-mono {
+  font-family: "IBM Plex Mono", ui-monospace, monospace !important;
+  font-variant-numeric: tabular-nums;
+}

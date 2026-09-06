@@ -1,3 +1,6 @@
+import { EmployeeSelect } from "@/components/EmployeeSelect";
+import { MachineSelect } from "@/components/MachineSelect";
+import { ProjectDrawingFiles } from "@/components/ProjectDrawingFiles";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -32,11 +35,13 @@ import { cn } from "@/lib/utils";
 import {
   AlertTriangle,
   ArrowLeft,
+  CalendarClock,
   ChevronDown,
   ChevronUp,
   Download,
   Eye,
   FileText,
+  FolderKanban,
   Paperclip,
   Pencil,
   Plus,
@@ -100,6 +105,7 @@ import {
   addProjectMachineRemote,
   removeProjectMachineRemote,
 } from "../lib/projectMachineryApi";
+import { updateProjectRemote } from "../lib/projectsApi";
 import { updateProjectPurchaseOrderStatusRemote } from "../lib/purchaseOrdersApi";
 import { getCustomerVisibleName } from "../lib/utils";
 import { createVendorRemote } from "../lib/vendorsApi";
@@ -118,6 +124,8 @@ import { useQmsStore } from "../qms/store/useQmsStore";
 import { useStore } from "../store";
 import type {
   BomItem,
+  CostBasis,
+  CustomCostEntry,
   DesignFile,
   InternalCosting,
   InventoryItem,
@@ -125,6 +133,7 @@ import type {
   ManualAdjustment,
   MaterialPurchase,
   MaterialUsage,
+  Project,
   ProjectDelivery,
   ProjectItem,
   ProjectItemStatus,
@@ -149,6 +158,25 @@ interface Props {
 }
 
 const fmt = (n: number) => `₹${n.toLocaleString("en-IN")}`;
+
+// Phase 57 (Group 2, Master Monster Prompt) — same labels as
+// Projects.tsx's WORK_TYPES, defined locally here too rather than
+// shared, matching this codebase's existing convention of small
+// per-file constant arrays (e.g. DieStatus's DIE_STATUSES).
+const WORK_TYPE_OPTIONS: {
+  value: NonNullable<Project["workType"]>;
+  label: string;
+}[] = [
+  { value: "full_manufacturing", label: "Full Manufacturing" },
+  { value: "sample", label: "Sample" },
+  { value: "prototype", label: "Prototype" },
+  { value: "trial", label: "Trial / Development" },
+  { value: "production", label: "Production" },
+  { value: "service", label: "Service / Processing" },
+  { value: "partial_manufacturing", label: "Partial Manufacturing" },
+  { value: "subcontract", label: "Subcontract / External Work" },
+  { value: "other", label: "Other" },
+];
 
 const STAGE_STATUS_COLORS: Record<ProjectStageStatus, string> = {
   NotStarted: "bg-muted text-muted-foreground",
@@ -179,6 +207,17 @@ const makeStage = (stageName: string): ProjectProductionStage => ({
   startTime: "",
   endTime: "",
 });
+
+// Phase 11 (Group 2) — display unit per costing basis, used both in the
+// Add Custom Cost form and the extra-costs table's "Qty × Rate" column.
+const BASIS_UNIT: Record<CostBasis, string> = {
+  fixed: "",
+  per_piece: "pcs",
+  per_kg: "kg",
+  per_hour: "hr",
+  per_meter: "m",
+  per_unit: "unit",
+};
 
 const DEFAULT_STAGES: ProjectProductionStage[] = [
   makeStage("Cutting (CNC / Laser)"),
@@ -498,6 +537,7 @@ export function ProjectDetail({
   const dView = canView(currentUser, "drawing_editor");
   const dEdit = canEdit(currentUser, "drawing_editor");
   const dDelete = canDelete(currentUser, "drawing_editor");
+  const dCreate = canCreate(currentUser, "drawing_editor");
   const revView = canView(currentUser, "machine_revenue");
   // Machine/Service Revenue (Phase 40) — readonly, grouped and labeled
   // by billable *service* name only, never by machine asset name (§17,
@@ -539,16 +579,24 @@ export function ProjectDetail({
   );
   const {
     drawings: allDrawings,
+    links: drawingLinks,
     loaded: drawingsLoaded,
+    linksLoaded,
     loadDrawings,
+    loadLinks,
     deleteDrawing: deleteDrawingDoc,
     findOrCreateMasterDrawing,
+    uploadDrawing: uploadDrawingDoc,
+    addLink: addDrawingLink,
+    removeLink: removeDrawingLink,
+    updateDrawing: updateDrawingDoc,
   } = useDrawingEditorStore();
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: load once on mount
   useEffect(() => {
     if (!drawingsLoaded) loadDrawings();
-  }, [drawingsLoaded]);
+    if (!linksLoaded) loadLinks();
+  }, [drawingsLoaded, linksLoaded]);
 
   // Feeds the dispatch-readiness badge and Production Summary panel below —
   // replaces the legacy standalone Quality Inspection module's per-project
@@ -806,12 +854,203 @@ export function ProjectDetail({
     }
   }, [existingCosting]);
 
+  // Phase 10 (Group 2) — Project Lifecycle Dates state, same
+  // useState-seeded-then-resynced-by-useEffect pattern as costing above.
+  const [projectDates, setProjectDates] = useState({
+    plannedStartDate: project?.plannedStartDate ?? "",
+    actualProductionStartDate: project?.actualProductionStartDate ?? "",
+    targetCompletionDate: project?.targetCompletionDate ?? "",
+    customerCommittedDeliveryDate: project?.customerCommittedDeliveryDate ?? "",
+    actualCompletionDate: project?.actualCompletionDate ?? "",
+  });
+  const [isSavingDates, setIsSavingDates] = useState(false);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only resync when the project identity changes, not on every field edit
+  useEffect(() => {
+    if (project) {
+      setProjectDates({
+        plannedStartDate: project.plannedStartDate ?? "",
+        actualProductionStartDate: project.actualProductionStartDate ?? "",
+        targetCompletionDate: project.targetCompletionDate ?? "",
+        customerCommittedDeliveryDate:
+          project.customerCommittedDeliveryDate ?? "",
+        actualCompletionDate: project.actualCompletionDate ?? "",
+      });
+    }
+  }, [project?.id]);
+
+  const handleSaveProjectDates = async () => {
+    if (!project || isSavingDates) return;
+    setIsSavingDates(true);
+    try {
+      const result = await updateProjectRemote({
+        ...project,
+        ...projectDates,
+      });
+      if (result.status === "unauthenticated") {
+        toast.error("Not signed in to the server - dates were not saved");
+        return;
+      }
+      if (result.status === "denied" || result.status === "error") {
+        toast.error(result.error ?? "Could not save project dates");
+        return;
+      }
+      if (!result.data) {
+        toast.error("Could not save project dates");
+        return;
+      }
+      // Same re-attach as Projects.tsx's handleEditSave — the returned row
+      // never carries the local-only fields.
+      updateProject({
+        ...result.data,
+        assignedEmployeeIds: project.assignedEmployeeIds,
+        pos: project.pos,
+        poNumber: project.poNumber,
+        poDate: project.poDate,
+        poFiles: project.poFiles,
+      });
+      toast.success("Project dates saved");
+    } finally {
+      setIsSavingDates(false);
+    }
+  };
+
+  // Phase 57 (Group 2, Master Monster Prompt) — Classification &
+  // Quantities. Same useState-seeded-then-resynced-by-useEffect pattern
+  // as Project Dates above. overproductionQuantity is deliberately NOT
+  // part of this editable state - it's a Postgres GENERATED column
+  // (always max(produced-ordered,0)), read directly from `project` for
+  // display only, never sent on save.
+  const [classification, setClassification] = useState({
+    workType: project?.workType ?? "full_manufacturing",
+    lifecycleStage: project?.lifecycleStage ?? "",
+    materialOwnership: project?.materialOwnership ?? "company",
+    receivedQuantity: project?.receivedQuantity?.toString() ?? "",
+    orderedQuantity: project?.orderedQuantity?.toString() ?? "",
+    plannedQuantity: project?.plannedQuantity?.toString() ?? "",
+    producedQuantity: project?.producedQuantity?.toString() ?? "",
+    acceptedQuantity: project?.acceptedQuantity?.toString() ?? "",
+    rejectedQuantity: project?.rejectedQuantity?.toString() ?? "",
+    reworkQuantity: project?.reworkQuantity?.toString() ?? "",
+    returnedQuantity: project?.returnedQuantity?.toString() ?? "",
+    remainingQuantity: project?.remainingQuantity?.toString() ?? "",
+  });
+  const [isSavingClassification, setIsSavingClassification] = useState(false);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only resync when the project identity changes, not on every field edit
+  useEffect(() => {
+    if (project) {
+      setClassification({
+        workType: project.workType ?? "full_manufacturing",
+        lifecycleStage: project.lifecycleStage ?? "",
+        materialOwnership: project.materialOwnership ?? "company",
+        receivedQuantity: project.receivedQuantity?.toString() ?? "",
+        orderedQuantity: project.orderedQuantity?.toString() ?? "",
+        plannedQuantity: project.plannedQuantity?.toString() ?? "",
+        producedQuantity: project.producedQuantity?.toString() ?? "",
+        acceptedQuantity: project.acceptedQuantity?.toString() ?? "",
+        rejectedQuantity: project.rejectedQuantity?.toString() ?? "",
+        reworkQuantity: project.reworkQuantity?.toString() ?? "",
+        returnedQuantity: project.returnedQuantity?.toString() ?? "",
+        remainingQuantity: project.remainingQuantity?.toString() ?? "",
+      });
+    }
+  }, [project?.id]);
+
+  const handleSaveClassification = async () => {
+    if (!project || isSavingClassification) return;
+    const num = (v: string) => (v === "" ? undefined : Number(v));
+    const parsed = {
+      receivedQuantity: num(classification.receivedQuantity),
+      orderedQuantity: num(classification.orderedQuantity),
+      plannedQuantity: num(classification.plannedQuantity),
+      producedQuantity: num(classification.producedQuantity),
+      acceptedQuantity: num(classification.acceptedQuantity),
+      rejectedQuantity: num(classification.rejectedQuantity),
+      reworkQuantity: num(classification.reworkQuantity),
+      returnedQuantity: num(classification.returnedQuantity),
+      remainingQuantity: num(classification.remainingQuantity),
+    };
+    for (const [label, v] of Object.entries(parsed)) {
+      if (v !== undefined && (Number.isNaN(v) || v < 0)) {
+        toast.error(`${label} cannot be negative`);
+        return;
+      }
+    }
+    // Logical-sense check (Phase 57 requirement 11): what actually left
+    // the process as accepted/rejected/rework cannot exceed what was
+    // produced. Only enforced once produced is actually set - never
+    // blocks a project that hasn't recorded production yet.
+    if (parsed.producedQuantity !== undefined) {
+      const disposed =
+        (parsed.acceptedQuantity ?? 0) +
+        (parsed.rejectedQuantity ?? 0) +
+        (parsed.reworkQuantity ?? 0);
+      if (disposed > parsed.producedQuantity) {
+        toast.error(
+          "Accepted + Rejected + Rework cannot exceed Produced Quantity",
+        );
+        return;
+      }
+    }
+    setIsSavingClassification(true);
+    try {
+      const result = await updateProjectRemote({
+        ...project,
+        workType: classification.workType,
+        lifecycleStage: (classification.lifecycleStage ||
+          undefined) as Project["lifecycleStage"],
+        materialOwnership: classification.materialOwnership,
+        ...parsed,
+      });
+      if (result.status === "unauthenticated") {
+        toast.error(
+          "Not signed in to the server - classification was not saved",
+        );
+        return;
+      }
+      if (result.status === "denied" || result.status === "error") {
+        toast.error(result.error ?? "Could not save classification");
+        return;
+      }
+      if (!result.data) {
+        toast.error("Could not save classification");
+        return;
+      }
+      updateProject({
+        ...result.data,
+        assignedEmployeeIds: project.assignedEmployeeIds,
+        pos: project.pos,
+        poNumber: project.poNumber,
+        poDate: project.poDate,
+        poFiles: project.poFiles,
+      });
+      toast.success("Project classification saved");
+    } finally {
+      setIsSavingClassification(false);
+    }
+  };
+
   // Production state
   const [newCustomCost, setNewCustomCost] = useState<{
     name: string;
     amount: string;
-    category: "Material" | "Process" | "Misc";
-  }>({ name: "", amount: "", category: "Misc" });
+    category: CustomCostEntry["category"];
+    basis: CostBasis;
+    quantity: string;
+    rate: string;
+    machineId: string;
+    employeeId: string;
+  }>({
+    name: "",
+    amount: "",
+    category: "Misc",
+    basis: "fixed",
+    quantity: "",
+    rate: "",
+    machineId: "",
+    employeeId: "",
+  });
   const [showAddCustomCost, setShowAddCustomCost] = useState(false);
 
   const [stages, setStages] = useState<ProjectProductionStage[]>(
@@ -869,6 +1108,16 @@ export function ProjectDetail({
   const [newStageName, setNewStageName] = useState("");
   const [newStageRequiresMaterial, setNewStageRequiresMaterial] =
     useState(false);
+  // Production <-> Job Card <-> Quantity integration (database/
+  // 20260906060000). stageType has no default — the UI must explicitly
+  // establish In-House vs External for every new stage (existing stages
+  // stay untouched, stageType null, no inference). targetQty is seeded
+  // from the project's own orderedQuantity when the dialog opens, but
+  // stays freely editable and is never written back to the project.
+  const [newStageType, setNewStageType] = useState<"inhouse" | "external" | "">(
+    "",
+  );
+  const [newStageTargetQty, setNewStageTargetQty] = useState("");
   const [sendForm, setSendForm] = useState({
     quantity: 0,
     dateTime: "",
@@ -1429,16 +1678,41 @@ export function ProjectDetail({
   };
 
   const handleAddCustomCost = () => {
-    const amt = Number(newCustomCost.amount);
-    if (!newCustomCost.name.trim() || amt <= 0) return;
-    const entry = {
+    const isQtyBasis = newCustomCost.basis !== "fixed";
+    const amt = isQtyBasis
+      ? Number(newCustomCost.quantity) * Number(newCustomCost.rate)
+      : Number(newCustomCost.amount);
+    if (!newCustomCost.name.trim() || !(amt > 0)) return;
+    const entry: CustomCostEntry = {
       id: `cc-${Date.now()}`,
       name: newCustomCost.name.trim(),
       amount: amt,
       category: newCustomCost.category,
+      basis: newCustomCost.basis,
+      ...(isQtyBasis
+        ? {
+            quantity: Number(newCustomCost.quantity),
+            rate: Number(newCustomCost.rate),
+          }
+        : {}),
+      ...(newCustomCost.category === "Machine" && newCustomCost.machineId
+        ? { machineId: newCustomCost.machineId }
+        : {}),
+      ...(newCustomCost.category === "Labour" && newCustomCost.employeeId
+        ? { employeeId: newCustomCost.employeeId }
+        : {}),
     };
     setCosting((c) => ({ ...c, extraCosts: [...(c.extraCosts || []), entry] }));
-    setNewCustomCost({ name: "", amount: "", category: "Misc" });
+    setNewCustomCost({
+      name: "",
+      amount: "",
+      category: "Misc",
+      basis: "fixed",
+      quantity: "",
+      rate: "",
+      machineId: "",
+      employeeId: "",
+    });
     setShowAddCustomCost(false);
   };
 
@@ -1732,6 +2006,17 @@ export function ProjectDetail({
       toast.error("Enter a stage name");
       return;
     }
+    if (!newStageType) {
+      toast.error("Select whether this stage is In-House or External");
+      return;
+    }
+    const parsedTargetQty = newStageTargetQty
+      ? Number.parseFloat(newStageTargetQty)
+      : undefined;
+    if (parsedTargetQty !== undefined && !(parsedTargetQty > 0)) {
+      toast.error("Target quantity must be greater than 0");
+      return;
+    }
     const newStage: ProjectProductionStage = {
       stageName: newStageName.trim(),
       status: "NotStarted",
@@ -1749,6 +2034,10 @@ export function ProjectDetail({
       // Phase 32 (Task #173) - stable identity, generated once here, never
       // touched by reorder/edit/remove.
       stageId: crypto.randomUUID(),
+      // Production <-> Job Card <-> Quantity integration (database/
+      // 20260906060000) - explicit choice at creation, never inferred.
+      stageType: newStageType,
+      targetQty: parsedTargetQty,
     };
     const ok = await updateProjectStagesV2(projectId, [...v2Stages, newStage]);
     if (!ok) {
@@ -1757,6 +2046,8 @@ export function ProjectDetail({
     }
     setAddStageDialog(false);
     setNewStageName("");
+    setNewStageType("");
+    setNewStageTargetQty("");
     setNewStageRequiresMaterial(false);
     toast.success("Stage added");
   };
@@ -2840,207 +3131,501 @@ export function ProjectDetail({
                 </CardContent>
               </Card>
             )}
+
+            {/* Phase 10 (Group 2) — Project Lifecycle Dates. Quotation/
+                design/planning does NOT mean production has started -
+                Actual Production Start is a separate field the user sets
+                explicitly, never auto-derived from anything else here. */}
+            <Card className="mt-4">
+              <CardHeader>
+                <CardTitle className="text-base flex items-center gap-2">
+                  <CalendarClock className="w-4 h-4 text-primary" />
+                  Project Dates
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {(
+                  [
+                    ["plannedStartDate", "Planned Start Date"],
+                    [
+                      "actualProductionStartDate",
+                      "Actual Production Start Date",
+                    ],
+                    ["targetCompletionDate", "Target Completion Date"],
+                    [
+                      "customerCommittedDeliveryDate",
+                      "Customer Committed Delivery Date",
+                    ],
+                    ["actualCompletionDate", "Actual Completion Date"],
+                  ] as [keyof typeof projectDates, string][]
+                ).map(([field, label]) => (
+                  <div key={field} className="space-y-1.5">
+                    <Label htmlFor={`project-date-${field}`}>{label}</Label>
+                    <Input
+                      id={`project-date-${field}`}
+                      type="date"
+                      value={projectDates[field]}
+                      disabled={!pEdit}
+                      onChange={(e) =>
+                        setProjectDates((d) => ({
+                          ...d,
+                          [field]: e.target.value,
+                        }))
+                      }
+                      data-ocid="project-detail.dates.input"
+                    />
+                  </div>
+                ))}
+              </CardContent>
+              {pEdit && (
+                <div className="px-6 pb-6 flex justify-end">
+                  <Button
+                    onClick={handleSaveProjectDates}
+                    disabled={isSavingDates}
+                    data-ocid="project-detail.dates.save_button"
+                  >
+                    <Save className="w-4 h-4 mr-1.5" />
+                    {isSavingDates ? "Saving…" : "Save Dates"}
+                  </Button>
+                </div>
+              )}
+            </Card>
+
+            {/* Phase 57 (Group 2, Master Monster Prompt) — Classification
+                & Quantities. Work Type and Lifecycle Stage are kept as
+                two separate controls (never merged into one field) so
+                they can't be confused with each other - a Production
+                work-type project never needs a lifecycle stage set at
+                all. Moving lifecycleStage forward is an update to this
+                same project row, never a new project. */}
+            <Card className="mt-4">
+              <CardHeader>
+                <CardTitle className="text-base flex items-center gap-2">
+                  <FolderKanban className="w-4 h-4 text-primary" />
+                  Classification &amp; Quantities
+                </CardTitle>
+                <p className="text-xs text-muted-foreground">
+                  What kind of work this is, who owns the material, and how much
+                  was ordered vs. actually produced. Overproduction is
+                  calculated automatically and can't be edited.
+                </p>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="pc-worktype">Work Type</Label>
+                    <Select
+                      value={classification.workType}
+                      disabled={!pEdit}
+                      onValueChange={(v) =>
+                        setClassification((c) => ({
+                          ...c,
+                          workType: v as NonNullable<Project["workType"]>,
+                        }))
+                      }
+                    >
+                      <SelectTrigger id="pc-worktype">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {WORK_TYPE_OPTIONS.map((t) => (
+                          <SelectItem key={t.value} value={t.value}>
+                            {t.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="pc-lifecycle">
+                      Lifecycle Stage{" "}
+                      <span className="text-muted-foreground font-normal">
+                        (sample track only)
+                      </span>
+                    </Label>
+                    <Select
+                      value={classification.lifecycleStage || "none"}
+                      disabled={!pEdit}
+                      onValueChange={(v) =>
+                        setClassification((c) => ({
+                          ...c,
+                          lifecycleStage: v === "none" ? "" : v,
+                        }))
+                      }
+                    >
+                      <SelectTrigger id="pc-lifecycle">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">Not applicable</SelectItem>
+                        <SelectItem value="sample">Sample</SelectItem>
+                        <SelectItem value="production_ready">
+                          Production Ready
+                        </SelectItem>
+                        <SelectItem value="production">Production</SelectItem>
+                        <SelectItem value="completed">Completed</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="pc-ownership">Material Ownership</Label>
+                    <Select
+                      value={classification.materialOwnership}
+                      disabled={!pEdit}
+                      onValueChange={(v) =>
+                        setClassification((c) => ({
+                          ...c,
+                          materialOwnership: v as NonNullable<
+                            Project["materialOwnership"]
+                          >,
+                        }))
+                      }
+                    >
+                      <SelectTrigger id="pc-ownership">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="company">Company</SelectItem>
+                        <SelectItem value="customer">Customer</SelectItem>
+                        <SelectItem value="mixed">Mixed</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                {classification.materialOwnership !== "company" && (
+                  <div className="rounded-md border bg-muted/30 p-3 space-y-1.5">
+                    <Label htmlFor="pc-received">Received from Customer</Label>
+                    <Input
+                      id="pc-received"
+                      type="number"
+                      min={0}
+                      disabled={!pEdit}
+                      placeholder="e.g. 100 chairs, or 10 (kg of powder)"
+                      value={classification.receivedQuantity}
+                      onChange={(e) =>
+                        setClassification((c) => ({
+                          ...c,
+                          receivedQuantity: e.target.value,
+                        }))
+                      }
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Customer-owned goods/material entering FabFlow for
+                      processing. Kept separate from company inventory - this
+                      quantity is never added to Inventory stock.
+                    </p>
+                  </div>
+                )}
+
+                <div>
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">
+                    Quantity Breakdown
+                  </p>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    {(
+                      [
+                        ["orderedQuantity", "Ordered"],
+                        ["plannedQuantity", "Planned"],
+                        ["producedQuantity", "Produced"],
+                        ["acceptedQuantity", "Accepted"],
+                        ["rejectedQuantity", "Rejected"],
+                        ["reworkQuantity", "Rework"],
+                        ["returnedQuantity", "Returned"],
+                        ["remainingQuantity", "Remaining"],
+                      ] as [
+                        Exclude<
+                          keyof typeof classification,
+                          | "workType"
+                          | "lifecycleStage"
+                          | "materialOwnership"
+                          | "receivedQuantity"
+                        >,
+                        string,
+                      ][]
+                    ).map(([field, label]) => (
+                      <div key={field} className="space-y-1.5">
+                        <Label htmlFor={`pc-${field}`} className="text-xs">
+                          {label}
+                        </Label>
+                        <Input
+                          id={`pc-${field}`}
+                          type="number"
+                          min={0}
+                          disabled={!pEdit}
+                          value={classification[field]}
+                          onChange={(e) =>
+                            setClassification((c) => ({
+                              ...c,
+                              [field]: e.target.value,
+                            }))
+                          }
+                          data-ocid={`project-detail.classification.${field}`}
+                        />
+                      </div>
+                    ))}
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Overproduction</Label>
+                      <div className="h-9 flex items-center px-3 rounded-md border bg-muted/30 text-sm font-medium tabular-nums">
+                        {/* Only meaningful once an ordered quantity
+                            actually exists — greatest(produced-ordered,0)
+                            treats a never-set ordered_quantity as 0,
+                            which would otherwise show every unit
+                            produced on a service/no-order project as
+                            "overproduction". Confirmed live: a real
+                            service-type test project with no ordered
+                            quantity and producedQuantity=95 computed
+                            overproductionQuantity=95 — correct per the
+                            formula, misleading to display here. */}
+                        {project.orderedQuantity !== undefined
+                          ? (project.overproductionQuantity ?? 0)
+                          : "—"}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </CardContent>
+              {pEdit && (
+                <div className="px-6 pb-6 flex justify-end">
+                  <Button
+                    onClick={handleSaveClassification}
+                    disabled={isSavingClassification}
+                    data-ocid="project-detail.classification.save_button"
+                  >
+                    <Save className="w-4 h-4 mr-1.5" />
+                    {isSavingClassification ? "Saving…" : "Save Classification"}
+                  </Button>
+                </div>
+              )}
+            </Card>
           </section>
 
           {/* Tab 2 — Design Files.
-            Monster-1 — retired: this tab's storage is local-only (base64
-            file data directly in the Zustand-persisted localStorage blob,
-            informal `df-${Date.now()}` ids) and functionally superseded by
-            the Drawing Repository (drawingEditor/, Supabase Storage-backed,
-            multi-device, has its own upload flow that doesn't depend on
-            this tab at all). New uploads are disabled here so no further
-            local-only data accumulates; existing entries for this project
-            (if any were uploaded before this change) remain visible below,
-            including "Edit in Drawing Editor" (which already creates a
-            real, Supabase-backed drawing), so nothing already-created is
-            hidden or lost. */}
+            Project → Design Files workflow (see chat): "+ Add Files" here
+            uploads directly into the central Drawing Repository
+            (drawings.project_id = this project) or links an existing
+            Repository drawing (drawing_links, linked_type "project") — no
+            second storage location, never a duplicate file. See
+            components/ProjectDrawingFiles.tsx.
+            The legacy local-only list below (Monster-1 — retired: base64
+            blobs in the Zustand-persisted store, informal `df-${Date.now()}`
+            ids) no longer accepts new uploads, but existing pre-this-change
+            entries for this project stay visible and untouched, including
+            "Edit in Drawing Editor" for any already promoted to a real
+            Repository drawing. */}
           <section id="section-design" className="mt-4 space-y-4 scroll-mt-24">
             <div className="flex items-center justify-between">
               <h2 className="text-sm font-semibold">Design & Drawing Files</h2>
             </div>
-            <div
-              className="rounded-md border border-warning/30 bg-warning/15 px-3 py-2 text-xs text-warning"
-              data-ocid="project-detail.design.retired_notice"
-            >
-              This tab is retired and no longer accepts new uploads. Use{" "}
-              <strong>Drawing Repository</strong> (in the sidebar) to upload and
-              manage drawings — it's the same capability, properly synced across
-              devices. Files already listed below remain accessible.
-            </div>
-            <div className="table-wrapper">
-              <div
-                className="rounded-md border"
-                data-ocid="project-detail.design.table"
-              >
-                <Table>
-                  <TableHeader>
-                    <TableRow className="bg-muted/40">
-                      <TableHead className="text-xs font-semibold">
-                        File Name
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold">
-                        Uploaded
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold w-24">
-                        Actions
-                      </TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {projDesignFiles.map((f, i) => {
-                      // Read-only lookup — never findOrCreateMasterDrawing,
-                      // which would create a hidden Working Drawing just from
-                      // rendering this list. Only Edit (below) may create one.
-                      const master = allDrawings.find(
-                        (d) => d.sourceDesignFileId === f.id,
-                      );
-                      const workDrawings = master
-                        ? buildDrawingSubtree(master, allDrawings).children
-                        : [];
-                      return (
-                        <Fragment key={f.id}>
-                          <TableRow
-                            data-ocid={`project-detail.design.item.${i + 1}`}
-                          >
-                            <TableCell className="text-sm font-medium">
-                              <div className="flex items-center gap-1.5">
-                                <span>{f.fileName}</span>
-                                <Badge
-                                  variant="outline"
-                                  className="text-[10px] px-1 py-0"
-                                >
-                                  Original
-                                </Badge>
-                                {master && (
+
+            <ProjectDrawingFiles
+              projectId={project.id}
+              drawings={allDrawings}
+              links={drawingLinks}
+              canCreate={dCreate}
+              canEdit={dEdit}
+              canDelete={dDelete}
+              userId={userId}
+              userName={userName}
+              onUpload={uploadDrawingDoc}
+              onAddLink={addDrawingLink}
+              onRemoveLink={removeDrawingLink}
+              onUpdateDrawing={updateDrawingDoc}
+              onDeleteDrawing={deleteDrawingDoc}
+              onAudit={addAuditLog}
+            />
+
+            {projDesignFiles.length > 0 && (
+              <>
+                <h3 className="text-xs font-semibold text-muted-foreground pt-2">
+                  Legacy Files (pre-Repository)
+                </h3>
+                <div
+                  className="rounded-md border border-warning/30 bg-warning/15 px-3 py-2 text-xs text-warning"
+                  data-ocid="project-detail.design.retired_notice"
+                >
+                  These files were uploaded before the Drawing Repository
+                  workflow existed and no longer accept new uploads here — use
+                  "+ Add Files" above instead. They remain accessible below.
+                </div>
+              </>
+            )}
+            {projDesignFiles.length > 0 && (
+              <div className="table-wrapper">
+                <div
+                  className="rounded-md border"
+                  data-ocid="project-detail.design.table"
+                >
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="bg-muted/40">
+                        <TableHead className="text-xs font-semibold">
+                          File Name
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold">
+                          Uploaded
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold w-24">
+                          Actions
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {projDesignFiles.map((f, i) => {
+                        // Read-only lookup — never findOrCreateMasterDrawing,
+                        // which would create a hidden Working Drawing just from
+                        // rendering this list. Only Edit (below) may create one.
+                        const master = allDrawings.find(
+                          (d) => d.sourceDesignFileId === f.id,
+                        );
+                        const workDrawings = master
+                          ? buildDrawingSubtree(master, allDrawings).children
+                          : [];
+                        return (
+                          <Fragment key={f.id}>
+                            <TableRow
+                              data-ocid={`project-detail.design.item.${i + 1}`}
+                            >
+                              <TableCell className="text-sm font-medium">
+                                <div className="flex items-center gap-1.5">
+                                  <span>{f.fileName}</span>
                                   <Badge
                                     variant="outline"
-                                    className="text-[10px] px-1 py-0 border-info/40 text-info"
+                                    className="text-[10px] px-1 py-0"
                                   >
-                                    Edited
+                                    Original
                                   </Badge>
+                                  {master && (
+                                    <Badge
+                                      variant="outline"
+                                      className="text-[10px] px-1 py-0 border-info/40 text-info"
+                                    >
+                                      Edited
+                                    </Badge>
+                                  )}
+                                </div>
+                              </TableCell>
+                              <TableCell className="text-xs text-muted-foreground">
+                                {new Date(f.uploadedAt).toLocaleDateString(
+                                  "en-IN",
                                 )}
-                              </div>
-                            </TableCell>
-                            <TableCell className="text-xs text-muted-foreground">
-                              {new Date(f.uploadedAt).toLocaleDateString(
-                                "en-IN",
-                              )}
-                            </TableCell>
-                            <TableCell className="flex gap-1">
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-6 px-2"
-                                onClick={() =>
-                                  master
-                                    ? setPreviewWorkDrawing(master)
-                                    : setPreviewFile(f)
-                                }
-                                title={
-                                  master
-                                    ? "Preview — latest saved edited version"
-                                    : "Preview Original"
-                                }
-                                data-ocid={`project-detail.design.preview_button.${i + 1}`}
-                              >
-                                <Eye className="w-3.5 h-3.5" />
-                              </Button>
-                              {master && (
+                              </TableCell>
+                              <TableCell className="flex gap-1">
                                 <Button
                                   variant="ghost"
                                   size="sm"
                                   className="h-6 px-2"
-                                  onClick={() => setPreviewFile(f)}
-                                  title="Preview Original — untouched uploaded file"
-                                  data-ocid={`project-detail.design.preview_original_button.${i + 1}`}
+                                  onClick={() =>
+                                    master
+                                      ? setPreviewWorkDrawing(master)
+                                      : setPreviewFile(f)
+                                  }
+                                  title={
+                                    master
+                                      ? "Preview — latest saved edited version"
+                                      : "Preview Original"
+                                  }
+                                  data-ocid={`project-detail.design.preview_button.${i + 1}`}
                                 >
-                                  <FileText className="w-3.5 h-3.5" />
+                                  <Eye className="w-3.5 h-3.5" />
                                 </Button>
-                              )}
-                              {dEdit && (
+                                {master && (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 px-2"
+                                    onClick={() => setPreviewFile(f)}
+                                    title="Preview Original — untouched uploaded file"
+                                    data-ocid={`project-detail.design.preview_original_button.${i + 1}`}
+                                  >
+                                    <FileText className="w-3.5 h-3.5" />
+                                  </Button>
+                                )}
+                                {dEdit && (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 px-2"
+                                    onClick={() => handleEditDesignFile(f)}
+                                    title="Edit"
+                                    data-ocid={`project-detail.design.edit_button.${i + 1}`}
+                                  >
+                                    <Pencil className="w-3.5 h-3.5" />
+                                  </Button>
+                                )}
                                 <Button
                                   variant="ghost"
                                   size="sm"
                                   className="h-6 px-2"
-                                  onClick={() => handleEditDesignFile(f)}
-                                  title="Edit"
-                                  data-ocid={`project-detail.design.edit_button.${i + 1}`}
+                                  onClick={() => handleDownloadFile(f)}
+                                  title="Download Original"
+                                  data-ocid={`project-detail.design.secondary_button.${i + 1}`}
                                 >
-                                  <Pencil className="w-3.5 h-3.5" />
+                                  <Download className="w-3.5 h-3.5" />
                                 </Button>
-                              )}
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                className="h-6 px-2"
-                                onClick={() => handleDownloadFile(f)}
-                                title="Download Original"
-                                data-ocid={`project-detail.design.secondary_button.${i + 1}`}
-                              >
-                                <Download className="w-3.5 h-3.5" />
-                              </Button>
-                              {pDelete && (
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-6 px-2 text-destructive hover:text-destructive"
-                                  onClick={() => {
-                                    if (!pDelete) {
-                                      alert("Access restricted");
-                                      return;
-                                    }
-                                    deleteDesignFile(f.id);
-                                    toast.success("File removed");
-                                  }}
-                                  data-ocid={`project-detail.design.delete_button.${i + 1}`}
-                                >
-                                  ×
-                                </Button>
-                              )}
-                            </TableCell>
-                          </TableRow>
-                          {dView &&
-                            workDrawings.map((child) => (
-                              <DrawingTreeRow
-                                key={child.drawing.id}
-                                node={child}
-                                depth={1}
-                                canEdit={dEdit}
-                                canDelete={dDelete}
-                                onOpen={(d) =>
-                                  onOpenDrawingEditor?.({
-                                    projectId,
-                                    drawingId: d.id,
-                                  })
-                                }
-                                onDelete={handleDrawingDelete}
-                                onPreview={setPreviewWorkDrawing}
-                                onPrint={handlePrintWorkDrawing}
-                                showRename={false}
-                                showLink={false}
-                                showDuplicate={false}
-                                openLabel="Edit"
-                                compact
-                              />
-                            ))}
-                        </Fragment>
-                      );
-                    })}
-                    {projDesignFiles.length === 0 && (
-                      <TableRow>
-                        <TableCell
-                          colSpan={3}
-                          className="text-center py-8 text-sm text-muted-foreground"
-                          data-ocid="project-detail.design.empty_state"
-                        >
-                          No design files uploaded yet
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
+                                {pDelete && (
+                                  <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    className="h-6 px-2 text-destructive hover:text-destructive"
+                                    onClick={() => {
+                                      if (!pDelete) {
+                                        alert("Access restricted");
+                                        return;
+                                      }
+                                      deleteDesignFile(f.id);
+                                      toast.success("File removed");
+                                    }}
+                                    data-ocid={`project-detail.design.delete_button.${i + 1}`}
+                                  >
+                                    ×
+                                  </Button>
+                                )}
+                              </TableCell>
+                            </TableRow>
+                            {dView &&
+                              workDrawings.map((child) => (
+                                <DrawingTreeRow
+                                  key={child.drawing.id}
+                                  node={child}
+                                  depth={1}
+                                  canEdit={dEdit}
+                                  canDelete={dDelete}
+                                  onOpen={(d) =>
+                                    onOpenDrawingEditor?.({
+                                      projectId,
+                                      drawingId: d.id,
+                                    })
+                                  }
+                                  onDelete={handleDrawingDelete}
+                                  onPreview={setPreviewWorkDrawing}
+                                  onPrint={handlePrintWorkDrawing}
+                                  showRename={false}
+                                  showLink={false}
+                                  showDuplicate={false}
+                                  openLabel="Edit"
+                                  compact
+                                />
+                              ))}
+                          </Fragment>
+                        );
+                      })}
+                      {projDesignFiles.length === 0 && (
+                        <TableRow>
+                          <TableCell
+                            colSpan={3}
+                            className="text-center py-8 text-sm text-muted-foreground"
+                            data-ocid="project-detail.design.empty_state"
+                          >
+                            No design files uploaded yet
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
               </div>
-            </div>
+            )}
             <DesignFilePreviewDialog
               file={previewFile}
               open={!!previewFile}
@@ -3107,6 +3692,11 @@ export function ProjectDetail({
                     </div>
                   ))}
                 </div>
+                <p className="text-xs text-muted-foreground -mt-2">
+                  If you itemize machine or labour costs as Extra Cost lines
+                  below (with quantity × rate), leave Labour Cost / Machine Cost
+                  above at ₹0 to avoid counting them twice.
+                </p>
                 {/* Custom Costs Section */}
                 <div className="space-y-3 pt-2">
                   <div className="flex items-center justify-between">
@@ -3143,6 +3733,9 @@ export function ProjectDetail({
                                 Category
                               </th>
                               <th className="px-3 py-2 text-right font-medium text-muted-foreground">
+                                Qty × Rate
+                              </th>
+                              <th className="px-3 py-2 text-right font-medium text-muted-foreground">
                                 Amount
                               </th>
                               <th className="px-3 py-2 text-center font-medium text-muted-foreground">
@@ -3165,6 +3758,11 @@ export function ProjectDetail({
                                   <span className="text-xs px-2 py-0.5 rounded-full bg-muted">
                                     {entry.category}
                                   </span>
+                                </td>
+                                <td className="px-3 py-2 text-right text-xs text-muted-foreground">
+                                  {entry.basis && entry.basis !== "fixed"
+                                    ? `${entry.quantity} ${BASIS_UNIT[entry.basis]} × ${fmt(entry.rate ?? 0)}`
+                                    : "—"}
                                 </td>
                                 <td className="px-3 py-2 text-right font-medium">
                                   {fmt(entry.amount)}
@@ -3189,65 +3787,161 @@ export function ProjectDetail({
                     </div>
                   )}
                   {showAddCustomCost && (
-                    <div className="flex flex-col sm:flex-row gap-2 p-3 rounded-md border bg-muted/30">
-                      <Input
-                        placeholder="Cost Name"
-                        value={newCustomCost.name}
-                        onChange={(e) =>
-                          setNewCustomCost((c) => ({
-                            ...c,
-                            name: e.target.value,
-                          }))
-                        }
-                        className="flex-1"
-                        data-ocid="project-detail.costing.input"
-                      />
-                      <select
-                        value={newCustomCost.category}
-                        onChange={(e) =>
-                          setNewCustomCost((c) => ({
-                            ...c,
-                            category: e.target.value as
-                              | "Material"
-                              | "Process"
-                              | "Misc",
-                          }))
-                        }
-                        className="border border-input rounded-md px-3 py-2 text-sm bg-background"
-                      >
-                        <option>Material</option>
-                        <option>Process</option>
-                        <option>Misc</option>
-                      </select>
-                      <Input
-                        type="number"
-                        placeholder="Amount"
-                        min={0}
-                        value={newCustomCost.amount}
-                        onChange={(e) =>
-                          setNewCustomCost((c) => ({
-                            ...c,
-                            amount: e.target.value,
-                          }))
-                        }
-                        className="w-28"
-                        data-ocid="project-detail.costing.input"
-                      />
-                      <Button
-                        size="sm"
-                        onClick={handleAddCustomCost}
-                        data-ocid="project-detail.costing.save_button"
-                      >
-                        Add
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => setShowAddCustomCost(false)}
-                        data-ocid="project-detail.costing.cancel_button"
-                      >
-                        Cancel
-                      </Button>
+                    <div className="flex flex-col gap-2 p-3 rounded-md border bg-muted/30">
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <Input
+                          placeholder="Cost Name"
+                          value={newCustomCost.name}
+                          onChange={(e) =>
+                            setNewCustomCost((c) => ({
+                              ...c,
+                              name: e.target.value,
+                            }))
+                          }
+                          className="flex-1"
+                          data-ocid="project-detail.costing.input"
+                        />
+                        <select
+                          value={newCustomCost.category}
+                          onChange={(e) =>
+                            setNewCustomCost((c) => ({
+                              ...c,
+                              category: e.target
+                                .value as CustomCostEntry["category"],
+                              machineId: "",
+                              employeeId: "",
+                            }))
+                          }
+                          className="border border-input rounded-md px-3 py-2 text-sm bg-background"
+                          data-ocid="project-detail.costing.category_select"
+                        >
+                          <option>Material</option>
+                          <option>Process</option>
+                          <option>Machine</option>
+                          <option>Labour</option>
+                          <option>Misc</option>
+                        </select>
+                        <select
+                          value={newCustomCost.basis}
+                          onChange={(e) =>
+                            setNewCustomCost((c) => ({
+                              ...c,
+                              basis: e.target.value as CostBasis,
+                            }))
+                          }
+                          className="border border-input rounded-md px-3 py-2 text-sm bg-background"
+                          data-ocid="project-detail.costing.basis_select"
+                        >
+                          <option value="fixed">Fixed Amount</option>
+                          <option value="per_piece">Per Piece</option>
+                          <option value="per_kg">Per Kg</option>
+                          <option value="per_hour">Per Hour</option>
+                          <option value="per_meter">Per Meter</option>
+                          <option value="per_unit">Per Unit</option>
+                        </select>
+                      </div>
+
+                      {newCustomCost.category === "Machine" && (
+                        <MachineSelect
+                          value={newCustomCost.machineId}
+                          onChange={(id) => {
+                            const m = (machines || []).find((x) => x.id === id);
+                            setNewCustomCost((c) => ({
+                              ...c,
+                              machineId: id,
+                              rate:
+                                m?.hourlyRate != null
+                                  ? String(m.hourlyRate)
+                                  : c.rate,
+                            }));
+                          }}
+                          placeholder="Select machine (optional, fills rate)"
+                          data-ocid="project-detail.costing.machine_select"
+                        />
+                      )}
+                      {newCustomCost.category === "Labour" && (
+                        <EmployeeSelect
+                          value={newCustomCost.employeeId}
+                          onChange={(id) =>
+                            setNewCustomCost((c) => ({ ...c, employeeId: id }))
+                          }
+                          placeholder="Select employee (optional)"
+                          data-ocid="project-detail.costing.employee_select"
+                        />
+                      )}
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        {newCustomCost.basis === "fixed" ? (
+                          <Input
+                            type="number"
+                            placeholder="Amount"
+                            min={0}
+                            value={newCustomCost.amount}
+                            onChange={(e) =>
+                              setNewCustomCost((c) => ({
+                                ...c,
+                                amount: e.target.value,
+                              }))
+                            }
+                            className="w-28"
+                            data-ocid="project-detail.costing.input"
+                          />
+                        ) : (
+                          <>
+                            <Input
+                              type="number"
+                              placeholder={`Qty (${BASIS_UNIT[newCustomCost.basis]})`}
+                              min={0}
+                              value={newCustomCost.quantity}
+                              onChange={(e) =>
+                                setNewCustomCost((c) => ({
+                                  ...c,
+                                  quantity: e.target.value,
+                                }))
+                              }
+                              className="w-28"
+                              data-ocid="project-detail.costing.quantity_input"
+                            />
+                            <span className="text-muted-foreground">×</span>
+                            <Input
+                              type="number"
+                              placeholder="Rate (₹)"
+                              min={0}
+                              value={newCustomCost.rate}
+                              onChange={(e) =>
+                                setNewCustomCost((c) => ({
+                                  ...c,
+                                  rate: e.target.value,
+                                }))
+                              }
+                              className="w-28"
+                              data-ocid="project-detail.costing.rate_input"
+                            />
+                            <span className="text-sm font-medium">
+                              ={" "}
+                              {fmt(
+                                (Number(newCustomCost.quantity) || 0) *
+                                  (Number(newCustomCost.rate) || 0),
+                              )}
+                            </span>
+                          </>
+                        )}
+                        <Button
+                          size="sm"
+                          onClick={handleAddCustomCost}
+                          data-ocid="project-detail.costing.save_button"
+                        >
+                          Add
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => setShowAddCustomCost(false)}
+                          data-ocid="project-detail.costing.cancel_button"
+                        >
+                          Cancel
+                        </Button>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -4051,7 +4745,15 @@ export function ProjectDetail({
                     <Button
                       size="sm"
                       variant="outline"
-                      onClick={() => setAddStageDialog(true)}
+                      onClick={() => {
+                        setNewStageType("");
+                        setNewStageTargetQty(
+                          project?.orderedQuantity
+                            ? String(project.orderedQuantity)
+                            : "",
+                        );
+                        setAddStageDialog(true);
+                      }}
                     >
                       <Plus className="w-3.5 h-3.5 mr-1.5" /> Add Stage
                     </Button>
@@ -4666,6 +5368,60 @@ export function ProjectDetail({
                           value={newStageName}
                           onChange={(e) => setNewStageName(e.target.value)}
                         />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs">Workflow *</Label>
+                        <div className="flex gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={
+                              newStageType === "inhouse" ? "default" : "outline"
+                            }
+                            className="flex-1"
+                            onClick={() => setNewStageType("inhouse")}
+                          >
+                            🏭 In-House
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={
+                              newStageType === "external"
+                                ? "default"
+                                : "outline"
+                            }
+                            className="flex-1"
+                            onClick={() => setNewStageType("external")}
+                          >
+                            External
+                          </Button>
+                        </div>
+                        <p className="text-[11px] text-muted-foreground">
+                          {newStageType === "inhouse"
+                            ? "Job Cards will drive this stage's Accepted/Rejected/Rework."
+                            : newStageType === "external"
+                              ? "Send/Receive transactions will drive this stage's Sent/Received/Pending."
+                              : "Choose which workflow this stage exposes — cannot be inferred later."}
+                        </p>
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-xs">
+                          Target Quantity (pieces)
+                        </Label>
+                        <Input
+                          type="number"
+                          min={1}
+                          className="h-8 text-xs"
+                          placeholder="e.g. 100"
+                          value={newStageTargetQty}
+                          onChange={(e) => setNewStageTargetQty(e.target.value)}
+                        />
+                        <p className="text-[11px] text-muted-foreground">
+                          {project?.orderedQuantity
+                            ? `Seeded from the project's Ordered Quantity (${project.orderedQuantity}) — editable, never synced back.`
+                            : "How many output pieces this stage needs."}
+                        </p>
                       </div>
                       <div className="flex items-center gap-2">
                         <input
@@ -6491,6 +7247,7 @@ export function ProjectDetail({
                 payment_received: "💰",
                 machine_breakdown: "⚠️",
                 report_exported: "📊",
+                deadline_updated: "📅",
                 note: "💬",
               };
               return (

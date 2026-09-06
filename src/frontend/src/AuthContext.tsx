@@ -19,6 +19,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useRef,
   useState,
 } from "react";
 import { fetchMyRbacProfile, usernameToEmail } from "./lib/supabaseAuth";
@@ -66,6 +67,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isInitializing, setIsInitializing] = useState(true);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
 
+  // Go-live audit fix — under rapid sign-out/sign-in (or two auth events
+  // firing close together), two overlapping resolveSession() calls could
+  // race: an OLDER call's fetchMyRbacProfile() (still in flight, possibly
+  // hitting RLS with an already-rotated/invalidated token) could resolve
+  // and call setCurrentUser() *after* a NEWER call already set the
+  // correct state, clobbering it with stale or partially-failed data
+  // (observed live: a real admin momentarily resolving to
+  // role "employee"/permissions {} right after sign-out, and the
+  // originally-reported "zeroed dashboard on sign-out" symptom - both are
+  // this same race, just different timing outcomes). `cancelled` below
+  // already guards against a call outliving the *component*; this ref
+  // extends that same idea to guard against a call being outlived by a
+  // *newer call*, without changing anything about how sessions/RBAC are
+  // actually resolved.
+  const latestRequestSeq = useRef(0);
+
   const buildAuthUser = async (userId: string): Promise<AuthUser | null> => {
     const profile = await fetchMyRbacProfile(userId);
     if (!profile) return null;
@@ -95,13 +112,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
 
     const resolveSession = async (userId: string | null) => {
+      const mySeq = ++latestRequestSeq.current;
+      const isStale = () => cancelled || mySeq !== latestRequestSeq.current;
+
       if (!userId) {
-        if (!cancelled) setCurrentUser(null);
+        if (!isStale()) setCurrentUser(null);
         return;
       }
       try {
         const user = await buildAuthUser(userId);
-        if (cancelled) return;
+        if (isStale()) return;
         if (!user) {
           setCurrentUser(null);
           return;
@@ -111,12 +131,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             "Your account has been deactivated. Contact your administrator.",
           );
           await supabase.auth.signOut();
+          if (isStale()) return;
           setCurrentUser(null);
           return;
         }
         setCurrentUser(user);
       } catch (err) {
-        if (!cancelled) {
+        if (!isStale()) {
           console.error("Failed to resolve session/RBAC profile:", err);
           setCurrentUser(null);
         }
@@ -132,6 +153,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === "SIGNED_OUT") {
+        // Authoritative "signed out" signal - bump the sequence so any
+        // still-in-flight resolveSession() from before this event can't
+        // clobber this with a stale result once it resolves.
+        latestRequestSeq.current++;
         setCurrentUser(null);
         return;
       }
@@ -176,11 +201,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       };
     }
 
+    // This explicit, deliberate sign-in should always win over any
+    // resolveSession() still in flight from a moment earlier (same
+    // sequencing guard as logout() and the SIGNED_OUT handler above).
+    latestRequestSeq.current++;
     setCurrentUser(user);
     return { ok: true };
   };
 
   const logout = async () => {
+    // Bump first, before the (possibly slow) network signOut() call, so a
+    // resolveSession() already in flight from before this deliberate
+    // logout can never win a race against it.
+    latestRequestSeq.current++;
     if (isSupabaseConfigured) {
       await getSupabase().auth.signOut();
     }

@@ -31,6 +31,7 @@
 // a single JSON object" error on zero rows - a symptom of the coercion
 // call itself, not a description of what RLS did) and check data.length.
 
+import { fetchAllRows } from "@/lib/hydration";
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
 import type { Employee, EmployeeType, EmploymentType, UserRole } from "@/types";
 
@@ -183,17 +184,21 @@ export function computeNextEmployeeCode(existingCodes: string[]): string {
   return `EMP-${year}-${String(next).padStart(3, "0")}`;
 }
 
+// Gap-closure fix — same silent-1,000-row-truncation risk as
+// jobCardsApi.ts's fetchExistingJobNos; see that file's comment.
 async function fetchExistingEmployeeCodes(
   client: ReturnType<typeof getSupabase>,
 ): Promise<string[] | null> {
-  const { data, error } = await client
-    .from("employees")
-    .select("employee_code")
-    .not("employee_code", "is", null);
-  if (error || !data) return null;
-  return (data as unknown as { employee_code: string }[]).map(
-    (r) => r.employee_code,
+  const { data, error } = await fetchAllRows<{ employee_code: string }>(
+    (from, to) =>
+      client
+        .from("employees")
+        .select("employee_code")
+        .not("employee_code", "is", null)
+        .range(from, to),
   );
+  if (error || !data) return null;
+  return data.map((r) => r.employee_code);
 }
 
 function isEmployeeCodeConflict(error: { code?: string; message?: string }) {

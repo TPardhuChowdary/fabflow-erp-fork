@@ -15,7 +15,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Edit2, History, Plus, Search, Trash2 } from "lucide-react";
+import { Edit2, Plus, Search, Trash2 } from "lucide-react";
 import { ShieldOff } from "lucide-react";
 import { useRef, useState } from "react";
 import { toast } from "sonner";
@@ -43,6 +43,11 @@ const empty = (): Omit<Customer, "id" | "createdAt"> => ({
   additionalDetails: [] as Array<{ key: string; value: string }>,
   emails: [] as Array<{ email: string; type: string }>,
   primaryEmail: "",
+  deliveryAddresses: [] as Array<{
+    id: string;
+    label: string;
+    address: string;
+  }>,
 });
 
 interface Props {
@@ -90,6 +95,7 @@ export function Customers({ onViewHistory }: Props) {
       additionalDetails: c.additionalDetails || [],
       emails: c.emails || [],
       primaryEmail: c.primaryEmail || c.email || "",
+      deliveryAddresses: c.deliveryAddresses || [],
     });
     setFormErrors({});
     setOpen(true);
@@ -223,19 +229,17 @@ export function Customers({ onViewHistory }: Props) {
     setDeleteTarget(c);
   };
 
+  // Global record-navigation rule (§1/§3) — "History" was the ONLY entry
+  // point into a customer (CustomerHistory.tsx is the customer's actual
+  // workspace: header, stats, Projects/Invoices/Quotations tabs — "History"
+  // is a legacy label, not a second, narrower feature next to it). The row
+  // itself is now the navigation target (see the TableRow onClick below),
+  // so this button would just be a second way to do the same thing —
+  // removed. Edit/Delete remain, since they are genuinely different
+  // actions, not navigation.
   const CustomerRowActions = ({ c, i }: { c: Customer; i: number }) => (
     <RowActions
       primary={[
-        ...(onViewHistory
-          ? [
-              {
-                label: "History",
-                icon: History,
-                onClick: () => onViewHistory(c.id),
-                "data-ocid": `customers.history_button.${i + 1}`,
-              },
-            ]
-          : []),
         ...(pEdit
           ? [
               {
@@ -332,9 +336,32 @@ export function Customers({ onViewHistory }: Props) {
             </TableHeader>
             <TableBody>
               {filtered.map((c, i) => (
-                <TableRow key={c.id} data-ocid={`customers.list.row.${i + 1}`}>
+                <TableRow
+                  key={c.id}
+                  className={
+                    onViewHistory ? "cursor-pointer hover:bg-muted/40" : ""
+                  }
+                  onClick={
+                    onViewHistory ? () => onViewHistory(c.id) : undefined
+                  }
+                  data-ocid={`customers.list.row.${i + 1}`}
+                >
                   <TableCell className="text-sm font-medium">
-                    {c.name}
+                    {onViewHistory ? (
+                      <button
+                        type="button"
+                        className="hover:underline focus-visible:underline"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onViewHistory(c.id);
+                        }}
+                        data-ocid={`customers.open_button.${i + 1}`}
+                      >
+                        {c.name}
+                      </button>
+                    ) : (
+                      c.name
+                    )}
                   </TableCell>
                   <TableCell className="text-sm">{c.contactPerson}</TableCell>
                   <TableCell className="text-sm">{c.phone}</TableCell>
@@ -602,6 +629,92 @@ export function Customers({ onViewHistory }: Props) {
                       }))
                     }
                     data-ocid={`customers.form.detail_remove.${i + 1}`}
+                  >
+                    <Trash2 className="w-3 h-3 text-destructive" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+
+            {/* Phase 54 (Group 2, roadmap Phase 15) — Delivery Addresses.
+                Same add/edit/remove-list pattern as Additional Details
+                above, so a delivery challan can pick a saved address
+                instead of retyping free text every time. */}
+            <div className="mt-3">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                  Delivery Addresses
+                </span>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={() =>
+                    setForm((p) => ({
+                      ...p,
+                      deliveryAddresses: [
+                        ...(p.deliveryAddresses || []),
+                        { id: crypto.randomUUID(), label: "", address: "" },
+                      ],
+                    }))
+                  }
+                  data-ocid="customers.form.add_delivery_address.button"
+                >
+                  <Plus className="w-3 h-3 mr-1" /> Add Address
+                </Button>
+              </div>
+              {(form.deliveryAddresses || []).map((entry, i) => (
+                <div key={entry.id} className="flex gap-2 mb-1.5 items-start">
+                  {/* Wrapper div carries the fixed width instead of the
+                      input itself — a global `input, select, textarea {
+                      width: 100% }` reset rule outranks a plain `w-32` on
+                      the input by specificity, which silently expanded
+                      this field to full width and squeezed the address
+                      textarea next to it down to a sliver (caught live). */}
+                  <div className="w-32 shrink-0">
+                    <input
+                      className="flex h-7 w-full rounded-md border border-input bg-background px-2 py-1 text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                      placeholder="Label (e.g. Factory)"
+                      value={entry.label}
+                      onChange={(e) =>
+                        setForm((p) => {
+                          const arr = [...(p.deliveryAddresses || [])];
+                          arr[i] = { ...arr[i], label: e.target.value };
+                          return { ...p, deliveryAddresses: arr };
+                        })
+                      }
+                      data-ocid={`customers.form.delivery_address_label.${i + 1}`}
+                    />
+                  </div>
+                  <textarea
+                    className="flex min-h-[28px] w-full rounded-md border border-input bg-background px-2 py-1 text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    placeholder="Full delivery address"
+                    rows={1}
+                    value={entry.address}
+                    onChange={(e) =>
+                      setForm((p) => {
+                        const arr = [...(p.deliveryAddresses || [])];
+                        arr[i] = { ...arr[i], address: e.target.value };
+                        return { ...p, deliveryAddresses: arr };
+                      })
+                    }
+                    data-ocid={`customers.form.delivery_address_value.${i + 1}`}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 px-2 shrink-0"
+                    onClick={() =>
+                      setForm((p) => ({
+                        ...p,
+                        deliveryAddresses: (p.deliveryAddresses || []).filter(
+                          (_, j) => j !== i,
+                        ),
+                      }))
+                    }
+                    data-ocid={`customers.form.delivery_address_remove.${i + 1}`}
                   >
                     <Trash2 className="w-3 h-3 text-destructive" />
                   </Button>

@@ -1,3 +1,5 @@
+import { AssetPhotoGallery } from "@/components/AssetPhotoGallery";
+import { ConnectedRecordLink } from "@/components/ConnectedRecordLink";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -10,6 +12,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { openAttachmentPreview } from "@/lib/utils";
 import {
   ArrowUpDown,
   FileText,
@@ -21,19 +24,30 @@ import {
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { Fragment, useMemo, useState } from "react";
+import { useAuth } from "../AuthContext";
+import type { WorkspaceRecordType } from "../RecentWorkspacesContext";
+import { canEdit } from "../permissions";
 import { useStore } from "../store";
 import type { InventoryItem } from "../types";
 
 interface MaterialDetailDrawerProps {
   item: InventoryItem | null;
   onClose: () => void;
+  // Phase 14 (Group 2) — Connected Records: lets Purchase History's
+  // vendor and Material Usage's project become real clickable links
+  // instead of plain text, via the app's one navigation chokepoint.
+  // Optional so this drawer still works standalone/in tests without it.
+  onNavigateToRecord?: (type: WorkspaceRecordType, id: string) => void;
 }
 
 export function MaterialDetailDrawer({
   item,
   onClose,
+  onNavigateToRecord,
 }: MaterialDetailDrawerProps) {
   const { inventoryPurchases, materialUsages, projects } = useStore();
+  const { currentUser } = useAuth();
+  const pEdit = canEdit(currentUser, "inventory");
   const [usageSortBy, setUsageSortBy] = useState<"date" | "project">("date");
   const [expandedPurchaseIds, setExpandedPurchaseIds] = useState<Set<string>>(
     new Set(),
@@ -209,6 +223,24 @@ export function MaterialDetailDrawer({
 
                 <Separator />
 
+                {/* Phase 51 (Group 2) — Photos. Inventory items never had
+                    any photo support before this; no legacy fallback
+                    exists to preserve here (unlike Machine/Die/Tool). */}
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2">
+                    <Package className="w-4 h-4 text-muted-foreground" />
+                    <h3 className="text-sm font-semibold">Photos</h3>
+                  </div>
+                  <AssetPhotoGallery
+                    ownerType="inventory_item"
+                    ownerId={item.id}
+                    canEdit={pEdit}
+                    data-ocid="inventory.detail.photos"
+                  />
+                </div>
+
+                <Separator />
+
                 {/* Purchase History */}
                 <div className="space-y-3">
                   <div className="flex items-center gap-2">
@@ -268,7 +300,19 @@ export function MaterialDetailDrawer({
                                     {formatDate(p.purchaseDate)}
                                   </TableCell>
                                   <TableCell className="text-xs py-2">
-                                    {p.supplierName || "—"}
+                                    <ConnectedRecordLink
+                                      label={p.supplierName || "—"}
+                                      onClick={
+                                        p.vendorId && onNavigateToRecord
+                                          ? () =>
+                                              onNavigateToRecord(
+                                                "vendor",
+                                                p.vendorId as string,
+                                              )
+                                          : undefined
+                                      }
+                                      data-ocid="inventory.detail.purchase.vendor_link"
+                                    />
                                   </TableCell>
                                   <TableCell className="text-xs py-2 font-medium">
                                     {p.quantityPurchased} {item.unit}
@@ -312,30 +356,31 @@ export function MaterialDetailDrawer({
                                         {attachments.map((att) =>
                                           att.type === "image" ? (
                                             <img
-                                              key={att.ref}
+                                              key={att.id ?? att.ref}
                                               src={att.ref}
                                               alt={att.name}
                                               className="max-h-20 rounded border cursor-pointer object-cover"
                                               onClick={() =>
-                                                window.open(att.ref)
+                                                openAttachmentPreview(att.ref)
                                               }
                                               onKeyDown={(e) =>
                                                 e.key === "Enter" &&
-                                                window.open(att.ref)
+                                                openAttachmentPreview(att.ref)
                                               }
                                               title={att.name}
                                             />
                                           ) : (
-                                            <a
-                                              key={att.ref}
-                                              href={att.ref}
-                                              target="_blank"
-                                              rel="noopener noreferrer"
+                                            <button
+                                              key={att.id ?? att.ref}
+                                              type="button"
+                                              onClick={() =>
+                                                openAttachmentPreview(att.ref)
+                                              }
                                               className="text-xs text-info underline flex items-center gap-1"
                                             >
                                               <FileText className="w-3 h-3" />
                                               {att.name}
-                                            </a>
+                                            </button>
                                           ),
                                         )}
                                       </div>
@@ -414,7 +459,19 @@ export function MaterialDetailDrawer({
                               data-ocid={`inventory.detail.usage.item.${i + 1}`}
                             >
                               <TableCell className="text-xs py-2 max-w-[140px] truncate">
-                                {u.projectName}
+                                <ConnectedRecordLink
+                                  label={u.projectName}
+                                  onClick={
+                                    u.projectId && onNavigateToRecord
+                                      ? () =>
+                                          onNavigateToRecord(
+                                            "project",
+                                            u.projectId,
+                                          )
+                                      : undefined
+                                  }
+                                  data-ocid="inventory.detail.usage.project_link"
+                                />
                               </TableCell>
                               <TableCell className="text-xs py-2 font-medium">
                                 {u.quantityUsed} {item.unit}

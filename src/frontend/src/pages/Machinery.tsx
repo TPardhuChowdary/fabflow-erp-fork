@@ -254,7 +254,12 @@ export function Machinery({ onViewMachine }: Props) {
         brand: form.brand,
         model: form.model,
         serialNumber: form.serialNumber,
-        assetId: form.assetId,
+        // Phase 3 (Group 2) — assetId is deprecated: machineCode (assigned
+        // above via generateMachineCode(), auto-generated + org-unique) is
+        // the real canonical Asset ID. assetId was a free-typed, never-
+        // unique field this form no longer offers to edit; the column
+        // itself is left alone (existing values untouched) — new machines
+        // simply never populate it.
         purchaseDate: form.purchaseDate,
         purchaseCost: form.purchaseCost ? Number(form.purchaseCost) : undefined,
         purchaseVendorId: form.purchaseVendorId,
@@ -501,14 +506,19 @@ export function Machinery({ onViewMachine }: Props) {
                 <div className="p-3 space-y-2">
                   <div>
                     <div className="flex items-start justify-between gap-1">
-                      {/* Static — the image button above and the explicit
-                          "View" button below already give this same real
-                          navigation two fully keyboard-accessible paths;
-                          a third click target on a heading, without its
-                          own keyboard handler, would be redundant. */}
-                      <h3 className="font-semibold text-sm leading-tight">
+                      {/* Global record-navigation rule (§1) — this is now
+                          the record's primary-identity click target (the
+                          image above stays clickable too, an accepted
+                          second natural target on a card); the separate
+                          "View" button below was removed as redundant with
+                          both. */}
+                      <button
+                        type="button"
+                        className="font-semibold text-sm leading-tight text-left hover:underline focus-visible:underline"
+                        onClick={() => onViewMachine(machine.id)}
+                      >
                         {machine.name}
-                      </h3>
+                      </button>
                     </div>
                     <p className="text-xs text-muted-foreground">
                       {machine.machineCode} ·{" "}
@@ -535,16 +545,9 @@ export function Machinery({ onViewMachine }: Props) {
                     )}
                   </div>
 
-                  {/* Actions */}
-                  <div className="flex items-center gap-2 pt-1">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="flex-1 h-7 text-xs"
-                      onClick={() => onViewMachine(machine.id)}
-                    >
-                      View
-                    </Button>
+                  {/* Actions — "View" removed (§1): the image and the
+                      name button above already open this record. */}
+                  <div className="flex items-center justify-end gap-2 pt-1">
                     <RowActions
                       primary={
                         pEdit
@@ -670,16 +673,6 @@ export function Machinery({ onViewMachine }: Props) {
                     onChange={(e) =>
                       setForm({ ...form, serialNumber: e.target.value })
                     }
-                  />
-                </div>
-                <div>
-                  <Label>Asset ID / Tag</Label>
-                  <Input
-                    value={form.assetId || ""}
-                    onChange={(e) =>
-                      setForm({ ...form, assetId: e.target.value })
-                    }
-                    placeholder="Internal asset code"
                   />
                 </div>
                 <div>

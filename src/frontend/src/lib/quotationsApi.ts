@@ -35,6 +35,7 @@ import {
   transformQuotationRevisionRow,
   transformQuotationRow,
 } from "./hydration";
+import { fetchAllRows } from "./hydration";
 import type { QuotationRevisionRow, QuotationRow } from "./hydration";
 
 export type WriteStatus = "success" | "denied" | "error" | "unauthenticated";
@@ -159,12 +160,16 @@ export function computeNextQtNumber(existingNumbers: string[]): string {
   return `QT-${year}-${String(next).padStart(3, "0")}`;
 }
 
+// Gap-closure fix — same silent-1,000-row-truncation risk as
+// jobCardsApi.ts's fetchExistingJobNos; see that file's comment.
 async function fetchExistingQtNumbers(
   client: ReturnType<typeof getSupabase>,
 ): Promise<string[] | null> {
-  const { data, error } = await client.from("quotations").select("qt_no");
+  const { data, error } = await fetchAllRows<{ qt_no: string }>((from, to) =>
+    client.from("quotations").select("qt_no").range(from, to),
+  );
   if (error || !data) return null;
-  return (data as unknown as { qt_no: string }[]).map((r) => r.qt_no);
+  return data.map((r) => r.qt_no);
 }
 
 function isQtNumberConflict(error: { code?: string; message?: string }) {

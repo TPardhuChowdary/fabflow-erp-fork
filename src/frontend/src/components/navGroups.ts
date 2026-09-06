@@ -16,12 +16,14 @@ import {
   CreditCard,
   DollarSign,
   Factory,
+  FileBox,
   FileText,
   FolderKanban,
   Hammer,
   LayoutDashboard,
   LibraryBig,
   ListChecks,
+  Mail,
   Package,
   PencilRuler,
   Receipt,
@@ -68,6 +70,36 @@ export const navGroups: NavGroup[] = [
         // user, since every action it can take is individually permission-
         // checked at execution time (agent/actions.ts's runAction).
         moduleKey: "__always__",
+      },
+      {
+        label: "Email Center",
+        page: "email-center",
+        icon: Mail,
+        // Universal Email Integration (see chat) — unlike AI Agent/Design
+        // Lab above, THIS is gated on a real permission module ("email",
+        // see permissions.ts + database/phase-50), not "__always__": it
+        // touches real external mailbox credentials, so it should be
+        // permission-gated from day one rather than visible to everyone
+        // by default.
+        moduleKey: "email",
+      },
+      {
+        label: "Company Documents",
+        page: "company-documents",
+        icon: FileBox,
+        // Phase 55 (Group 2, roadmap Phase 17) — same reasoning as Email
+        // Center above: gated on a real permission module
+        // ("company_documents"), not "__always__", since these are
+        // compliance-sensitive documents (GST/PAN/ISO/etc.).
+        moduleKey: "company_documents",
+      },
+      {
+        label: "Tenders",
+        page: "tenders",
+        icon: ClipboardList,
+        // Phase 56 (Group 2, roadmap Phases 19-24) — same reasoning as
+        // Company Documents above.
+        moduleKey: "tenders",
       },
     ],
   },
@@ -144,6 +176,12 @@ export const navGroups: NavGroup[] = [
         label: "Job Cards",
         page: "job-cards",
         icon: ListChecks,
+        moduleKey: "job_cards",
+      },
+      {
+        label: "My Jobs",
+        page: "my-jobs",
+        icon: UserCheck,
         moduleKey: "job_cards",
       },
       {

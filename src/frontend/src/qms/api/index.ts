@@ -15,6 +15,7 @@
 // disclosed behavior change from the old per-browser auto-seed, per
 // explicit instruction not to auto-copy demo/test data into production.
 
+import { fetchAllRows } from "@/lib/hydration";
 import { getSupabase } from "@/lib/supabaseClient";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type {
@@ -223,17 +224,22 @@ export async function getInspectionMethods(): Promise<InspectionMethod[]> {
 
 // ── Quality Characteristics ──────────────────────────────────────
 
+// Gap-closure fix — unlike the seeded master-data reads above (fixed,
+// code-defined catalogs), this library is user-grown via
+// createCharacteristic() and has no architectural bound, so it gets the
+// same .range() paging as every other genuinely growable business
+// collection.
 export async function getCharacteristicLibrary(): Promise<
   QualityCharacteristic[]
 > {
   await ensureSeeded();
   const client = getSupabase();
-  const { data, error } = await client
-    .from("quality_characteristics")
-    .select("*");
+  const { data, error } = await fetchAllRows<CharacteristicRow>((from, to) =>
+    client.from("quality_characteristics").select("*").range(from, to),
+  );
   if (error)
     throw new Error(`Failed to load characteristics: ${error.message}`);
-  return ((data as CharacteristicRow[]) ?? []).map(rowToCharacteristic);
+  return (data ?? []).map(rowToCharacteristic);
 }
 
 export type CreateCharacteristicInput = Omit<
@@ -453,12 +459,16 @@ export async function bulkAddFavorites(
 
 // ── Templates ─────────────────────────────────────────────────────
 
+// Gap-closure fix — same reasoning as getCharacteristicLibrary above:
+// user-grown via createTemplate(), no architectural bound.
 export async function getTemplates(): Promise<QmsTemplate[]> {
   await ensureSeeded();
   const client = getSupabase();
-  const { data, error } = await client.from("qms_templates").select("*");
+  const { data, error } = await fetchAllRows<TemplateRow>((from, to) =>
+    client.from("qms_templates").select("*").range(from, to),
+  );
   if (error) throw new Error(`Failed to load templates: ${error.message}`);
-  return ((data as TemplateRow[]) ?? []).map(rowToTemplate);
+  return (data ?? []).map(rowToTemplate);
 }
 
 export async function createTemplate(input: {

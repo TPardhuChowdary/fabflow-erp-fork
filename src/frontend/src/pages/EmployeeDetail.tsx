@@ -1,3 +1,4 @@
+import { ConfirmDeleteDialog } from "@/components/ConfirmDeleteDialog";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -29,12 +30,18 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  createEmployeeReward,
+  deleteEmployeeReward,
+} from "@/lib/employeeRewardsApi";
+import {
   ArrowLeft,
+  Award,
   CalendarDays,
   CreditCard,
   Download,
   Eye,
   FileText,
+  Gauge,
   Loader2,
   PenLine,
   Pencil,
@@ -78,7 +85,11 @@ import type {
   AttendanceRecord,
   EmployeeDocument,
   EmployeeDocumentType,
+  EmployeeReward,
+  EmployeeRewardType,
   EmployeeType,
+  JobCard,
+  JobCardStatus,
   SalaryPayment,
 } from "../types";
 
@@ -127,6 +138,11 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
     advanceRecords,
     pettyExpenses,
     employeeDocuments,
+    jobCards,
+    projects,
+    employeeRewards,
+    addEmployeeRewardLocal,
+    removeEmployeeRewardLocal,
     addAttendanceRecord,
     updateAttendanceRecord,
     addSalaryPayment,
@@ -226,6 +242,37 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
   const [selectedPersonalExpenseIds, setSelectedPersonalExpenseIds] = useState<
     Set<string>
   >(new Set());
+
+  // Phase 13 (Group 2) — Employee Rewards/Merit dialog state. Declared
+  // here, before the `if (!employee) return` guard below, so these hooks
+  // are never called conditionally.
+  const [rewardDialogOpen, setRewardDialogOpen] = useState(false);
+  const [isSavingReward, setIsSavingReward] = useState(false);
+  // Audit fix — deletes here previously fired immediately with no
+  // confirmation, unlike every other destructive action in the app (see
+  // ConfirmDeleteDialog usage elsewhere). Same pattern as TenderDetail's
+  // delete confirmation: hold the pending target, confirm, then delete.
+  const [pendingDeleteReward, setPendingDeleteReward] = useState<
+    EmployeeReward | undefined
+  >(undefined);
+  const [pendingDeleteDoc, setPendingDeleteDoc] = useState<
+    EmployeeDocument | undefined
+  >(undefined);
+  const [rewardForm, setRewardForm] = useState<{
+    rewardType: EmployeeRewardType;
+    title: string;
+    amount: string;
+    relatedJobCardId: string;
+    notes: string;
+    awardedAt: string;
+  }>({
+    rewardType: "Recognition",
+    title: "",
+    amount: "",
+    relatedJobCardId: "",
+    notes: "",
+    awardedAt: now.toISOString().split("T")[0],
+  });
 
   // canViewEmp/canEditEmp are computed earlier now (see above the
   // employee-code lazy-generation effect).
@@ -364,6 +411,141 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
   const halfDayCount = monthAttendance.filter(
     (r) => r.status === "Half Day",
   ).length;
+
+  // Phase 12 (Group 2) — Employee Performance, derived entirely from
+  // existing job-card fields (expectedQuantity, actualCompletedQty,
+  // rejectedQty, reworkQty, allocatedTimeMinutes, actualTimeSpentMinutes).
+  // No new columns, no new table — every number below is a sum/ratio over
+  // job_cards already filtered to this employee.
+  // Plain consts, not useMemo — this file already has an early return
+  // above (`if (!employee) return ...`) so hooks can't be added below it;
+  // these job-card lists are small (per-employee), so recomputing on every
+  // render costs nothing measurable, same tradeoff presentCount/
+  // absentCount above already make.
+  const empJobCards = (jobCards || []).filter(
+    (jc) => jc.employeeId === employeeId,
+  );
+  const completedJobCards = empJobCards.filter(
+    (jc) => jc.status === "Completed",
+  );
+  const perfTotals = (() => {
+    const sum = (f: (jc: JobCard) => number) =>
+      completedJobCards.reduce((acc, jc) => acc + (f(jc) || 0), 0);
+    const expectedQty = sum((jc) => jc.expectedQuantity);
+    const goodQty = sum((jc) => jc.actualCompletedQty);
+    const rejectedQty = sum((jc) => jc.rejectedQty);
+    const reworkQty = sum((jc) => jc.reworkQty);
+    const allocatedMin = sum((jc) => jc.allocatedTimeMinutes);
+    const actualMin = sum((jc) => jc.actualTimeSpentMinutes ?? 0);
+    const producedQty = goodQty + rejectedQty + reworkQty;
+    // Quality rate: share of everything produced that was good on the
+    // first pass. Undefined (shown as "—") when nothing has been produced
+    // yet, rather than a misleading 0%.
+    const qualityRate = producedQty > 0 ? goodQty / producedQty : null;
+    // Time efficiency: standard time planned vs. actual time taken. >100%
+    // means the job ran faster than planned; only meaningful once actual
+    // time has been logged (jobs with no start/end never set this field).
+    const timeEfficiency = actualMin > 0 ? allocatedMin / actualMin : null;
+    return {
+      expectedQty,
+      goodQty,
+      rejectedQty,
+      reworkQty,
+      producedQty,
+      allocatedMin,
+      actualMin,
+      qualityRate,
+      timeEfficiency,
+    };
+  })();
+  const jobLabel = (jc: JobCard) => {
+    const p = (projects || []).find((x) => x.id === jc.projectId);
+    return p ? `${p.projectNo} — ${jc.jobDescription}` : jc.jobDescription;
+  };
+  const statusBadgeClass: Record<JobCardStatus, string> = {
+    NotStarted: "bg-muted text-muted-foreground border-border",
+    InProgress: "bg-info/10 text-info border-info/30",
+    Completed: "bg-success/10 text-success border-success/30",
+    OnHold: "bg-warning/15 text-warning border-warning/30",
+  };
+
+  // Phase 13 (Group 2) — Employee Rewards/Merit. Not derived from
+  // job_cards (that's Performance above) - a separate, human-entered
+  // record of a bonus/recognition/warning, optionally traced back to the
+  // job card that justified it. Plain const (not useMemo) for the same
+  // reason as empJobCards above - this file's early return means hooks
+  // can't be added past that point; the useState calls the form needs are
+  // declared earlier, before the early return (see rewardDialogOpen etc.).
+  const empRewards = (employeeRewards || []).filter(
+    (r) => r.employeeId === employeeId,
+  );
+
+  const handleAddReward = async () => {
+    if (isSavingReward || !rewardForm.title.trim()) return;
+    setIsSavingReward(true);
+    try {
+      const result = await createEmployeeReward({
+        employeeId,
+        rewardType: rewardForm.rewardType,
+        title: rewardForm.title.trim(),
+        amount: rewardForm.amount ? Number(rewardForm.amount) : undefined,
+        relatedJobCardId: rewardForm.relatedJobCardId || undefined,
+        notes: rewardForm.notes || undefined,
+        awardedAt: rewardForm.awardedAt,
+      });
+      if (result.status === "unauthenticated") {
+        toast.error("Not signed in to the server - reward was not saved");
+        return;
+      }
+      if (
+        result.status === "denied" ||
+        result.status === "error" ||
+        !result.data
+      ) {
+        toast.error(result.error ?? "Could not save reward");
+        return;
+      }
+      addEmployeeRewardLocal(result.data);
+      toast.success("Reward recorded");
+      setRewardForm({
+        rewardType: "Recognition",
+        title: "",
+        amount: "",
+        relatedJobCardId: "",
+        notes: "",
+        awardedAt: now.toISOString().split("T")[0],
+      });
+      setRewardDialogOpen(false);
+    } finally {
+      setIsSavingReward(false);
+    }
+  };
+
+  const handleDeleteReward = async (id: string) => {
+    const result = await deleteEmployeeReward(id);
+    if (result.status === "unauthenticated") {
+      toast.error("Not signed in to the server - reward was not deleted");
+      return;
+    }
+    if (result.status === "denied" || result.status === "error") {
+      toast.error(result.error ?? "Could not delete reward");
+      return;
+    }
+    removeEmployeeRewardLocal(id);
+    toast.success("Reward deleted");
+  };
+
+  const confirmDeleteReward = async () => {
+    if (!pendingDeleteReward) return;
+    await handleDeleteReward(pendingDeleteReward.id);
+    setPendingDeleteReward(undefined);
+  };
+
+  const rewardBadgeClass: Record<EmployeeRewardType, string> = {
+    Bonus: "bg-success/10 text-success border-success/30",
+    Recognition: "bg-info/10 text-info border-info/30",
+    Warning: "bg-destructive/10 text-destructive border-destructive/30",
+  };
 
   // Salary & Advances
   const empSalaryPayments = salaryPayments.filter(
@@ -761,6 +943,12 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
     toast.success("Document deleted");
   };
 
+  const confirmDeleteDoc = async () => {
+    if (!pendingDeleteDoc) return;
+    await handleDeleteDoc(pendingDeleteDoc);
+    setPendingDeleteDoc(undefined);
+  };
+
   const handleEmployeeTypeChange = async (value: EmployeeType) => {
     if (!employee) return;
     // This handler is only reachable via the Employee Type <Select>, which
@@ -901,6 +1089,22 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
           >
             <CalendarDays className="w-3.5 h-3.5 mr-1" /> Attendance
           </TabsTrigger>
+          {isAdminOrAccountant && (
+            <TabsTrigger
+              value="performance"
+              data-ocid="employee-detail.performance.tab"
+            >
+              <Gauge className="w-3.5 h-3.5 mr-1" /> Performance
+            </TabsTrigger>
+          )}
+          {isAdminOrAccountant && (
+            <TabsTrigger
+              value="rewards"
+              data-ocid="employee-detail.rewards.tab"
+            >
+              <Award className="w-3.5 h-3.5 mr-1" /> Rewards
+            </TabsTrigger>
+          )}
           {isAdminOrAccountant && (
             <TabsTrigger value="salary" data-ocid="employee-detail.salary.tab">
               <Wallet className="w-3.5 h-3.5 mr-1" /> Salary & Advances
@@ -1215,6 +1419,347 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
               Click a day to cycle: — → Present → Absent → Half Day
             </p>
           )}
+        </TabsContent>
+
+        {/* Performance — derived from existing Job Card data, no new
+            records of its own (see perfTotals above). */}
+        <TabsContent value="performance" className="mt-4 space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <Card>
+              <CardContent className="pt-4 pb-3">
+                <p className="text-2xl font-bold">
+                  {perfTotals.qualityRate != null
+                    ? `${(perfTotals.qualityRate * 100).toFixed(0)}%`
+                    : "—"}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Quality Rate (good units first pass)
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="pt-4 pb-3">
+                <p className="text-2xl font-bold">
+                  {perfTotals.timeEfficiency != null
+                    ? `${(perfTotals.timeEfficiency * 100).toFixed(0)}%`
+                    : "—"}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  Time Efficiency (standard vs. actual)
+                </p>
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent className="pt-4 pb-3">
+                <p className="text-2xl font-bold">{completedJobCards.length}</p>
+                <p className="text-xs text-muted-foreground">
+                  Completed Job Cards
+                </p>
+              </CardContent>
+            </Card>
+          </div>
+
+          {perfTotals.producedQty > 0 && (
+            <div className="grid grid-cols-3 gap-3 text-center text-sm">
+              <div>
+                <p className="font-semibold text-success">
+                  {perfTotals.goodQty}
+                </p>
+                <p className="text-xs text-muted-foreground">Good Qty</p>
+              </div>
+              <div>
+                <p className="font-semibold text-warning">
+                  {perfTotals.reworkQty}
+                </p>
+                <p className="text-xs text-muted-foreground">Rework Qty</p>
+              </div>
+              <div>
+                <p className="font-semibold text-destructive">
+                  {perfTotals.rejectedQty}
+                </p>
+                <p className="text-xs text-muted-foreground">Rejected Qty</p>
+              </div>
+            </div>
+          )}
+
+          <div className="table-wrapper">
+            <div className="rounded-md border overflow-hidden">
+              <Table>
+                <TableHeader>
+                  <TableRow className="bg-muted/40">
+                    <TableHead className="text-xs font-semibold">Job</TableHead>
+                    <TableHead className="text-xs font-semibold">
+                      Status
+                    </TableHead>
+                    <TableHead className="text-xs font-semibold text-right">
+                      Expected
+                    </TableHead>
+                    <TableHead className="text-xs font-semibold text-right">
+                      Good
+                    </TableHead>
+                    <TableHead className="text-xs font-semibold text-right">
+                      Rejected
+                    </TableHead>
+                    <TableHead className="text-xs font-semibold text-right">
+                      Rework
+                    </TableHead>
+                    <TableHead className="text-xs font-semibold text-right">
+                      Time (planned/actual)
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {empJobCards.length === 0 ? (
+                    <TableRow>
+                      <TableCell
+                        colSpan={7}
+                        className="text-center text-sm text-muted-foreground py-6"
+                      >
+                        No job cards assigned to this employee yet.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    empJobCards.map((jc) => (
+                      <TableRow
+                        key={jc.id}
+                        data-ocid="employee-detail.performance.row"
+                      >
+                        <TableCell className="text-sm">
+                          <p className="font-medium">{jc.jobNo}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {jobLabel(jc)}
+                          </p>
+                        </TableCell>
+                        <TableCell>
+                          <span
+                            className={`text-xs px-2 py-0.5 rounded-full border ${statusBadgeClass[jc.status]}`}
+                          >
+                            {jc.status}
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-right text-sm">
+                          {jc.expectedQuantity}
+                        </TableCell>
+                        <TableCell className="text-right text-sm">
+                          {jc.actualCompletedQty}
+                        </TableCell>
+                        <TableCell className="text-right text-sm">
+                          {jc.rejectedQty}
+                        </TableCell>
+                        <TableCell className="text-right text-sm">
+                          {jc.reworkQty}
+                        </TableCell>
+                        <TableCell className="text-right text-sm">
+                          {jc.allocatedTimeMinutes}m /{" "}
+                          {jc.actualTimeSpentMinutes ?? "—"}
+                          {jc.actualTimeSpentMinutes != null ? "m" : ""}
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+        </TabsContent>
+
+        {/* Rewards / Merit — separate human-entered records, not derived
+            from job_cards (see empRewards above). */}
+        <TabsContent value="rewards" className="mt-4 space-y-4">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-muted-foreground">
+              Bonuses, recognition, and warnings for this employee.
+            </p>
+            {isAdmin && (
+              <Button
+                size="sm"
+                onClick={() => setRewardDialogOpen(true)}
+                data-ocid="employee-detail.rewards.add_button"
+              >
+                <Plus className="w-3.5 h-3.5 mr-1" /> Give Reward
+              </Button>
+            )}
+          </div>
+
+          {empRewards.length === 0 ? (
+            <p className="text-sm text-muted-foreground py-6 text-center">
+              No rewards recorded yet.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {empRewards.map((r) => (
+                <div
+                  key={r.id}
+                  className="flex items-start justify-between gap-3 rounded-md border bg-card p-3"
+                  data-ocid="employee-detail.rewards.row"
+                >
+                  <div className="space-y-0.5 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span
+                        className={`text-xs px-2 py-0.5 rounded-full border ${rewardBadgeClass[r.rewardType]}`}
+                      >
+                        {r.rewardType}
+                      </span>
+                      <span className="text-sm font-medium">{r.title}</span>
+                      {r.amount != null && (
+                        <span className="text-sm font-semibold text-success">
+                          ₹{r.amount.toLocaleString("en-IN")}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      {new Date(r.awardedAt).toLocaleDateString("en-IN")}
+                      {r.relatedJobCardId &&
+                        (() => {
+                          const jc = (jobCards || []).find(
+                            (x) => x.id === r.relatedJobCardId,
+                          );
+                          return jc ? ` · ${jc.jobNo}` : "";
+                        })()}
+                    </p>
+                    {r.notes && <p className="text-xs mt-1">{r.notes}</p>}
+                  </div>
+                  {isAdmin && (
+                    <button
+                      type="button"
+                      onClick={() => setPendingDeleteReward(r)}
+                      className="text-destructive hover:text-destructive/80 shrink-0"
+                      data-ocid="employee-detail.rewards.delete_button"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <Dialog open={rewardDialogOpen} onOpenChange={setRewardDialogOpen}>
+            <DialogContent className="max-w-md">
+              <DialogHeader>
+                <DialogTitle>Give Reward</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Type</Label>
+                  <Select
+                    value={rewardForm.rewardType}
+                    onValueChange={(v) =>
+                      setRewardForm((f) => ({
+                        ...f,
+                        rewardType: v as EmployeeRewardType,
+                      }))
+                    }
+                  >
+                    <SelectTrigger data-ocid="employee-detail.rewards.form.type">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="Bonus">Bonus</SelectItem>
+                      <SelectItem value="Recognition">Recognition</SelectItem>
+                      <SelectItem value="Warning">Warning</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Title</Label>
+                  <Input
+                    value={rewardForm.title}
+                    onChange={(e) =>
+                      setRewardForm((f) => ({ ...f, title: e.target.value }))
+                    }
+                    placeholder="e.g. Zero rejects across September batch"
+                    data-ocid="employee-detail.rewards.form.title"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Amount (₹, optional)</Label>
+                    <Input
+                      type="number"
+                      min={0}
+                      value={rewardForm.amount}
+                      onChange={(e) =>
+                        setRewardForm((f) => ({
+                          ...f,
+                          amount: e.target.value,
+                        }))
+                      }
+                      data-ocid="employee-detail.rewards.form.amount"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">Date</Label>
+                    <Input
+                      type="date"
+                      value={rewardForm.awardedAt}
+                      onChange={(e) =>
+                        setRewardForm((f) => ({
+                          ...f,
+                          awardedAt: e.target.value,
+                        }))
+                      }
+                      data-ocid="employee-detail.rewards.form.date"
+                    />
+                  </div>
+                </div>
+                {empJobCards.length > 0 && (
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">
+                      Related Job Card (optional)
+                    </Label>
+                    <Select
+                      value={rewardForm.relatedJobCardId || "none"}
+                      onValueChange={(v) =>
+                        setRewardForm((f) => ({
+                          ...f,
+                          relatedJobCardId: v === "none" ? "" : v,
+                        }))
+                      }
+                    >
+                      <SelectTrigger data-ocid="employee-detail.rewards.form.job_card">
+                        <SelectValue placeholder="None" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">None</SelectItem>
+                        {empJobCards.map((jc) => (
+                          <SelectItem key={jc.id} value={jc.id}>
+                            {jc.jobNo} — {jc.jobDescription}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Notes</Label>
+                  <Textarea
+                    value={rewardForm.notes}
+                    onChange={(e) =>
+                      setRewardForm((f) => ({ ...f, notes: e.target.value }))
+                    }
+                    rows={2}
+                    data-ocid="employee-detail.rewards.form.notes"
+                  />
+                </div>
+              </div>
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  onClick={() => setRewardDialogOpen(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={handleAddReward}
+                  disabled={isSavingReward || !rewardForm.title.trim()}
+                  data-ocid="employee-detail.rewards.form.save"
+                >
+                  {isSavingReward ? "Saving…" : "Give Reward"}
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </TabsContent>
 
         {/* Salary & Advances */}
@@ -1565,7 +2110,7 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
                                 size="sm"
                                 variant="ghost"
                                 className="h-7 w-7 p-0 text-destructive hover:text-destructive"
-                                onClick={() => handleDeleteDoc(doc)}
+                                onClick={() => setPendingDeleteDoc(doc)}
                                 title="Delete"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
@@ -2093,6 +2638,32 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
           )}
         </DialogContent>
       </Dialog>
+
+      <ConfirmDeleteDialog
+        open={!!pendingDeleteReward}
+        onOpenChange={(open) => {
+          if (!open) setPendingDeleteReward(undefined);
+        }}
+        onConfirm={confirmDeleteReward}
+        title="Delete Reward"
+        description={
+          pendingDeleteReward
+            ? `Delete "${pendingDeleteReward.title}" (${pendingDeleteReward.rewardType})?`
+            : ""
+        }
+      />
+
+      <ConfirmDeleteDialog
+        open={!!pendingDeleteDoc}
+        onOpenChange={(open) => {
+          if (!open) setPendingDeleteDoc(undefined);
+        }}
+        onConfirm={confirmDeleteDoc}
+        title="Delete Document"
+        description={
+          pendingDeleteDoc ? `Delete "${pendingDeleteDoc.documentName}"?` : ""
+        }
+      />
     </div>
   );
 }

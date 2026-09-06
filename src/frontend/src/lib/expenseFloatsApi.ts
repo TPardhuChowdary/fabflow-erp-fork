@@ -35,6 +35,7 @@ import {
   transformExpenseFloatRow,
   transformPettyExpenseRow,
 } from "./hydration";
+import { fetchAllRows } from "./hydration";
 import type { ExpenseFloatRow, PettyExpenseRow } from "./hydration";
 
 export type WriteStatus = "success" | "denied" | "error" | "unauthenticated";
@@ -113,14 +114,16 @@ export function computeNextFloatNumber(existingNumbers: string[]): string {
   return `FLT-${year}-${String(next).padStart(3, "0")}`;
 }
 
+// Gap-closure fix — same silent-1,000-row-truncation risk as
+// jobCardsApi.ts's fetchExistingJobNos; see that file's comment.
 async function fetchExistingFloatNumbers(
   client: ReturnType<typeof getSupabase>,
 ): Promise<string[] | null> {
-  const { data, error } = await client
-    .from("expense_floats")
-    .select("float_no");
+  const { data, error } = await fetchAllRows<{ float_no: string }>((from, to) =>
+    client.from("expense_floats").select("float_no").range(from, to),
+  );
   if (error || !data) return null;
-  return (data as unknown as { float_no: string }[]).map((r) => r.float_no);
+  return data.map((r) => r.float_no);
 }
 
 function isFloatNumberConflict(error: { code?: string; message?: string }) {

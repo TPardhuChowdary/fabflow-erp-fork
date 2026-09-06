@@ -103,3 +103,95 @@ export function projectsNeedingNewLineItems<
   }
   return result;
 }
+
+/**
+ * Phase 1 attachment-bug fix — the one place that converts a stored
+ * base64 data-URI attachment into an openable blob: URL. Extracted from
+ * CompanyPOs.tsx's pre-existing `openFile`, which already did this
+ * correctly; Inventory.tsx/MaterialDetailDrawer.tsx were instead
+ * navigating straight to the raw data: URI (`window.open(att.ref)` /
+ * `href={att.ref}`), which silently fails or hangs in several browsers
+ * once a scanned invoice/PDF pushes the data URI past a few MB. Never
+ * duplicate this conversion at a new call site again — import it.
+ *
+ * Returns false (and lets the caller show its own toast) if `dataUri`
+ * isn't a well-formed data: URI — never throws.
+ */
+export function openAttachmentPreview(dataUri: string): boolean {
+  try {
+    const [header, base64] = dataUri.split(",");
+    const mimeMatch = header.match(/^data:([^;]+);base64$/);
+    if (!mimeMatch || !base64) return false;
+    const byteString = atob(base64);
+    const bytes = new Uint8Array(byteString.length);
+    for (let i = 0; i < byteString.length; i++) {
+      bytes[i] = byteString.charCodeAt(i);
+    }
+    const blob = new Blob([bytes], { type: mimeMatch[1] });
+    const url = URL.createObjectURL(blob);
+    window.open(url, "_blank");
+    // Deliberately not revoked immediately — the new tab needs the blob
+    // to still resolve after this function returns. Left to the
+    // browser's own tab-lifetime GC, same tradeoff CompanyPOs.tsx's
+    // original version already made.
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Triggers a browser download of a stored base64 data-URI attachment
+ * under its original filename. A plain `<a download>` click handles a
+ * data: URI fine at any size (unlike navigating/`window.open` to one) —
+ * no blob conversion needed here, just centralized so every attachment
+ * download call site matches.
+ */
+export function downloadAttachment(dataUri: string, filename: string): void {
+  const a = document.createElement("a");
+  a.href = dataUri;
+  a.download = filename;
+  a.click();
+}
+
+/**
+ * Phase 2 automatic file naming — FabFlow's one filename generator for
+ * business documents that already have a standardized, auto-generated
+ * identity (Quotation.qtNo, Invoice.invNo, DeliveryChallan.dcNo,
+ * CompanyPO.cpoNumber, ...). The user never types this filename; every
+ * document-download call site builds it from the record's own already-
+ * unique number instead of inlining `${prefix}_${record.no}.pdf` itself
+ * (5 call sites did exactly that, each slightly differently, before this
+ * existed — see Quotations/Invoices/DeliveryChallans/CompanyPOs.tsx).
+ *
+ * `documentNumber` is expected to already be a real, unique business
+ * number (e.g. "QT-2026-011") — it IS the filename base, no extra
+ * "Quotation_" prefix needed, since the number is already self-
+ * describing. Falls back to `fallbackId` only for the (should-not-
+ * happen-in-practice) case a record's number is somehow missing, so a
+ * download never crashes for want of a name.
+ *
+ * `revision`, when given and greater than 1, appends `-REV{n}` — the
+ * base (first) revision of any document keeps its plain filename
+ * unchanged, exactly matching today's behavior; only an actual amendment
+ * gets the marker, where it adds real information.
+ */
+export function generateDocumentFilename(
+  documentNumber: string | undefined,
+  fallbackId: string,
+  opts?: { revision?: number; extension?: string },
+): string {
+  const base = sanitizeFilenameSegment(documentNumber || fallbackId);
+  const revisionSuffix =
+    opts?.revision && opts.revision > 1 ? `-REV${opts.revision}` : "";
+  const ext = opts?.extension ?? "pdf";
+  return `${base}${revisionSuffix}.${ext}`;
+}
+
+/** Strips characters illegal/problematic in a filename on Windows,
+ * macOS, and Linux alike. FabFlow's own generated business numbers never
+ * contain these, but this is the one place that guarantees it rather
+ * than trusting every future caller to. */
+function sanitizeFilenameSegment(s: string): string {
+  return s.replace(/[\\/:*?"<>|]/g, "-").trim();
+}

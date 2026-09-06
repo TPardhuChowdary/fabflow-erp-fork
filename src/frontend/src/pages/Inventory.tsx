@@ -26,6 +26,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { openAttachmentPreview } from "@/lib/utils";
 import {
   AlertOctagon,
   AlertTriangle,
@@ -45,6 +46,7 @@ import {
 import { Fragment, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import type { WorkspaceRecordType } from "../RecentWorkspacesContext";
 import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import { MaterialDetailDrawer } from "../components/MaterialDetailDrawer";
 import { VendorSelect } from "../components/VendorSelect";
@@ -98,11 +100,16 @@ interface InventoryProps {
   /** Scrolls to and highlights the matching Purchase History row on
    * mount — used by Petty Expense History's "View Inventory Record". */
   highlightPurchaseId?: string;
+  /** Phase 14 (Group 2) — Connected Records: threaded down to
+   * MaterialDetailDrawer so its vendor/project mentions become real
+   * clickable links via the app's one navigation chokepoint. */
+  onNavigateToRecord?: (type: WorkspaceRecordType, id: string) => void;
 }
 
 export function Inventory({
   initialTab,
   highlightPurchaseId,
+  onNavigateToRecord,
 }: InventoryProps = {}) {
   const { currentUser } = useAuth();
   const pCreate = canCreate(currentUser, "inventory");
@@ -332,7 +339,15 @@ export function Inventory({
       applyGST: p.applyGST ?? false,
       gstPercent: String(p.gstPercent ?? 18),
     });
-    setPendingAttachments(p.attachments ? [...p.attachments] : []);
+    // Phase 1 attachment-bug fix: backfill an id for any attachment saved
+    // before PurchaseAttachment.id existed — every attachment in this
+    // dialog session has a stable identity from here on, never keyed by
+    // its own (possibly duplicate) content again.
+    setPendingAttachments(
+      p.attachments
+        ? p.attachments.map((a) => ({ ...a, id: a.id ?? crypto.randomUUID() }))
+        : [],
+    );
     setPurchaseDialog(true);
   };
 
@@ -345,6 +360,7 @@ export function Inventory({
         const reader = new FileReader();
         reader.onload = () => {
           resolve({
+            id: crypto.randomUUID(),
             ref: reader.result as string,
             type: file.type === "application/pdf" ? "pdf" : "image",
             name: file.name,
@@ -359,8 +375,19 @@ export function Inventory({
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
-  const removeAttachment = (ref: string) => {
-    setPendingAttachments((prev) => prev.filter((a) => a.ref !== ref));
+  // Phase 1 attachment-bug fix: matches by id, not by the file's own
+  // content (`ref`) — two attachments can be byte-identical (a duplicate
+  // scan) and previously shared a `ref`, so removing one silently removed
+  // both. Every attachment reaching pendingAttachments already has an id
+  // (assigned on read in openEditPurchaseDialog, on capture in
+  // handleAttachFiles) — falling back to `ref` here only guards a
+  // theoretical caller that skipped both.
+  const removeAttachment = (target: PurchaseAttachment) => {
+    setPendingAttachments((prev) =>
+      prev.filter((a) =>
+        target.id ? a.id !== target.id : a.ref !== target.ref,
+      ),
+    );
   };
 
   const handleAddPurchase = async () => {
@@ -966,28 +993,31 @@ export function Inventory({
                                   {attachments.map((att) =>
                                     att.type === "image" ? (
                                       <img
-                                        key={att.ref}
+                                        key={att.id ?? att.ref}
                                         src={att.ref}
                                         alt={att.name}
                                         className="max-h-20 rounded border cursor-pointer object-cover"
-                                        onClick={() => window.open(att.ref)}
+                                        onClick={() =>
+                                          openAttachmentPreview(att.ref)
+                                        }
                                         onKeyDown={(e) =>
                                           e.key === "Enter" &&
-                                          window.open(att.ref)
+                                          openAttachmentPreview(att.ref)
                                         }
                                         title={att.name}
                                       />
                                     ) : (
-                                      <a
-                                        key={att.ref}
-                                        href={att.ref}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
+                                      <button
+                                        key={att.id ?? att.ref}
+                                        type="button"
+                                        onClick={() =>
+                                          openAttachmentPreview(att.ref)
+                                        }
                                         className="text-xs text-info underline flex items-center gap-1"
                                       >
                                         <FileText className="w-3 h-3" />
                                         {att.name}
-                                      </a>
+                                      </button>
                                     ),
                                   )}
                                 </div>
@@ -1284,6 +1314,7 @@ export function Inventory({
       <MaterialDetailDrawer
         item={selectedMaterial}
         onClose={() => setSelectedMaterial(null)}
+        onNavigateToRecord={onNavigateToRecord}
       />
 
       {/* Add Material Dialog */}
@@ -1649,7 +1680,7 @@ export function Inventory({
                     <div className="space-y-1.5">
                       {pendingAttachments.map((att) => (
                         <div
-                          key={att.ref}
+                          key={att.id ?? att.ref}
                           className="flex items-center gap-2 p-2 rounded-md bg-muted/50 border border-border"
                         >
                           {att.type === "image" ? (
@@ -1676,7 +1707,7 @@ export function Inventory({
                           )}
                           <button
                             type="button"
-                            onClick={() => removeAttachment(att.ref)}
+                            onClick={() => removeAttachment(att)}
                             className="p-1 rounded hover:bg-muted transition-colors shrink-0"
                             data-ocid="inventory.purchase.attachment.delete_button"
                           >

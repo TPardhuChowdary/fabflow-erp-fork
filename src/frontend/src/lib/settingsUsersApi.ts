@@ -11,6 +11,7 @@
 // static ROLE_DEFAULTS in permissions.ts is a frontend-only fallback
 // used before any real Supabase session exists and is NOT trusted here.
 
+import { fetchAllRows } from "@/lib/hydration";
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
 
 export type WriteStatus = "success" | "denied" | "error" | "unauthenticated";
@@ -43,16 +44,34 @@ export async function listOrgUsers(): Promise<WriteResult<OrgUserRow[]>> {
   } = await supabase.auth.getSession();
   if (!session) return unauth();
 
-  const { data: profiles, error: profilesError } = await supabase
-    .from("profiles")
-    .select("id, username, employee_id, is_active, must_change_password");
+  // Gap-closure fix — both queries below were single unbounded .select()s,
+  // silently truncating past 1,000 rows (same class as jobCardsApi.ts's
+  // fetchExistingJobNos; see that file's comment).
+  const { data: profiles, error: profilesError } = await fetchAllRows<{
+    id: string;
+    username: string;
+    employee_id: string | null;
+    is_active: boolean;
+    must_change_password: boolean;
+  }>((from, to) =>
+    supabase
+      .from("profiles")
+      .select("id, username, employee_id, is_active, must_change_password")
+      .range(from, to),
+  );
   if (profilesError) {
     return { status: "error", error: profilesError.message };
   }
 
-  const { data: roleRows, error: roleError } = await supabase
-    .from("user_roles")
-    .select("user_id, roles(name, is_admin)");
+  const { data: roleRows, error: roleError } = await fetchAllRows<{
+    user_id: string;
+    roles: { name: string; is_admin: boolean }[];
+  }>((from, to) =>
+    supabase
+      .from("user_roles")
+      .select("user_id, roles(name, is_admin)")
+      .range(from, to),
+  );
   if (roleError) {
     return { status: "error", error: roleError.message };
   }
@@ -225,6 +244,67 @@ export async function createOrgUser(
       id: data.id,
       username: data.username,
       employeeLinkError: data.employeeLinkError,
+    },
+  };
+}
+
+/**
+ * Administrator password-reset — sibling to createOrgUser above, same
+ * privileged-Edge-Function shape (Edge Function re-checks
+ * has_permission('users','reset_password') and organization membership
+ * server-side; never trust the UI). Returns success:true even when a
+ * secondary write failed (mustChangePasswordError / auditLogError) - the
+ * password itself was already reset at that point and there is no clean
+ * rollback, same non-atomicity admin-create-user's own employeeLinkError
+ * already documents. Never logs, stores, or echoes the new password
+ * itself beyond this one response, and the caller must not persist it
+ * past the immediate reveal-once UI.
+ */
+export async function resetUserPassword(
+  userId: string,
+  newPassword: string,
+): Promise<
+  WriteResult<{
+    mustChangePasswordError?: string;
+    auditLogError?: string;
+  }>
+> {
+  if (!isSupabaseConfigured) return unauth();
+  const supabase = getSupabase();
+  const { data, error } = await supabase.functions.invoke<{
+    success?: boolean;
+    mustChangePasswordError?: string;
+    auditLogError?: string;
+    error?: string;
+  }>("admin-reset-password", {
+    body: { userId, newPassword },
+  });
+
+  if (error) {
+    const context = (
+      error as { context?: { json?: () => Promise<{ error?: string }> } }
+    ).context;
+    if (context?.json) {
+      try {
+        const errBody = await context.json();
+        return { status: "error", error: errBody.error || error.message };
+      } catch {
+        // fall through to generic message below
+      }
+    }
+    return { status: "error", error: error.message };
+  }
+  if (!data || !data.success) {
+    return {
+      status: "error",
+      error: data?.error || "Unknown error resetting password.",
+    };
+  }
+  return {
+    status: "success",
+    data: {
+      mustChangePasswordError: data.mustChangePasswordError,
+      auditLogError: data.auditLogError,
     },
   };
 }

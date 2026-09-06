@@ -1,3 +1,6 @@
+import { AssetPhotoGallery } from "@/components/AssetPhotoGallery";
+import { AssetUsageSection } from "@/components/AssetUsageSection";
+import { ConnectedRecordLink } from "@/components/ConnectedRecordLink";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -9,7 +12,6 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { SearchableSelect } from "@/components/ui/searchable-select";
 import {
   Select,
   SelectContent,
@@ -34,7 +36,6 @@ import {
   Clock,
   FileText,
   Hammer,
-  Image,
   Info,
   Package,
   Plus,
@@ -68,7 +69,6 @@ import {
   removeMachineSparePartRemote,
 } from "../lib/machineCompatibilityApi";
 import { addServiceRateRemote } from "../lib/machineRevenueApi";
-import { updateMachineRemote } from "../lib/machinesApi";
 import { getCustomerVisibleName } from "../lib/utils";
 import {
   canCreate,
@@ -82,7 +82,6 @@ import type {
   BillableService,
   MachineCondition,
   MachineDocument,
-  MachineUsageLog,
   ServicePart,
   ServiceRecord,
   ServiceType,
@@ -140,6 +139,9 @@ interface Props {
   /** Scrolls to and highlights the matching Service History record on
    * mount — used by Petty Expense History's "View Machine History". */
   highlightServiceId?: string;
+  // Phase 14 (Group 2) — Connected Records: makes the Purchase Vendor
+  // field a real clickable link via the app's one navigation chokepoint.
+  onViewVendor?: (vendorId: string) => void;
 }
 
 export function MachineDetail({
@@ -148,6 +150,7 @@ export function MachineDetail({
   onOpenDrawingEditor,
   initialTab,
   highlightServiceId,
+  onViewVendor,
 }: Props) {
   const { currentUser } = useAuth();
   const pEdit = canEdit(currentUser, "machinery");
@@ -159,11 +162,9 @@ export function MachineDetail({
     serviceRecords,
     serviceParts,
     machineDocuments,
-    machineUsageLogs,
     projects,
     vendors,
     customers,
-    updateMachine,
     addServiceRecord,
     updateServiceRecord,
     deleteServiceRecord,
@@ -171,8 +172,6 @@ export function MachineDetail({
     deleteServicePart,
     addMachineDocument,
     deleteMachineDocument,
-    addMachineUsageLog,
-    deleteMachineUsageLog,
     reportBreakdown,
     resolveBreakdown,
     generateServiceNumber,
@@ -468,17 +467,6 @@ export function MachineDetail({
     [machineDocuments, machineId],
   );
 
-  const myUsageLogs = useMemo(
-    () =>
-      (machineUsageLogs || [])
-        .filter((l) => l.machineId === machineId)
-        .sort(
-          (a, b) =>
-            new Date(b.logDate).getTime() - new Date(a.logDate).getTime(),
-        ),
-    [machineUsageLogs, machineId],
-  );
-
   // Phase 38 — Compatible Spare Parts / Compatible Tooling.
   const compatibleSparePartIds = useMemo(
     () =>
@@ -561,17 +549,12 @@ export function MachineDetail({
     Omit<ServicePart, "id" | "serviceRecordId" | "machineId">[]
   >([]);
 
-  // Usage Log Form
-  const [showUsageForm, setShowUsageForm] = useState(false);
-  const [usageForm, setUsageForm] = useState<Partial<MachineUsageLog>>({});
-
   // Breakdown Form
   const [showBreakdownForm, setShowBreakdownForm] = useState(false);
   const [breakdownCause, setBreakdownCause] = useState("");
 
   // Doc Upload
   const docInputRef = useRef<HTMLInputElement>(null);
-  const photoInputRef = useRef<HTMLInputElement>(null);
 
   // Parts form for a specific service
   const [showPartsForm, setShowPartsForm] = useState<string | null>(null); // serviceRecordId
@@ -685,42 +668,6 @@ export function MachineDetail({
     setShowSvcForm(false);
   }
 
-  async function saveUsageLog() {
-    if (!machine) return;
-    if (!usageForm.logDate) {
-      toast.error("Date required");
-      return;
-    }
-    if (!usageForm.hoursUsed || usageForm.hoursUsed <= 0) {
-      toast.error("Hours must be > 0");
-      return;
-    }
-
-    const log: MachineUsageLog = {
-      id: crypto.randomUUID(),
-      machineId,
-      projectId: usageForm.projectId,
-      projectName: usageForm.projectId
-        ? (projects || []).find((p) => p.id === usageForm.projectId)
-            ?.projectName
-        : usageForm.projectName,
-      logDate: usageForm.logDate!,
-      hoursUsed: Number(usageForm.hoursUsed),
-      operatorName: usageForm.operatorName,
-      notes: usageForm.notes,
-      loggedBy: currentUser?.username || "admin",
-      createdAt: Date.now(),
-    };
-    const ok = await addMachineUsageLog(log);
-    if (!ok) {
-      toast.error("Could not log usage — machine sync to Supabase failed.");
-      return;
-    }
-    toast.success(`${log.hoursUsed}h logged for ${machine.name}`);
-    setShowUsageForm(false);
-    setUsageForm({});
-  }
-
   async function handleBreakdown() {
     if (!machine) return;
     if (!breakdownCause.trim()) {
@@ -825,52 +772,6 @@ export function MachineDetail({
       };
       addMachineDocument(doc);
       toast.success(`${file.name} uploaded`);
-    };
-    reader.readAsDataURL(file);
-    e.target.value = "";
-  }
-
-  async function handlePhotoUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    if (!machine) return;
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      // Compress: draw to canvas then export as JPEG
-      const img = new window.Image();
-      img.onload = async () => {
-        const canvas = document.createElement("canvas");
-        const MAX = 800;
-        const ratio = Math.min(MAX / img.width, MAX / img.height, 1);
-        canvas.width = img.width * ratio;
-        canvas.height = img.height * ratio;
-        const ctx = canvas.getContext("2d")!;
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        const compressed = canvas.toDataURL("image/jpeg", 0.75);
-        // Phase 35 — remote-first, same discipline as Machinery.tsx.
-        const result = await updateMachineRemote({
-          ...machine,
-          primaryImageData: compressed,
-          updatedAt: Date.now(),
-        });
-        if (result.status === "unauthenticated") {
-          toast.error("Not signed in to Supabase - photo was not saved.");
-          return;
-        }
-        if (
-          result.status === "error" ||
-          result.status === "denied" ||
-          !result.data
-        ) {
-          toast.error(
-            `Could not save photo: ${result.error ?? "unknown error"}`,
-          );
-          return;
-        }
-        updateMachine(result.data);
-        toast.success("Photo updated");
-      };
-      img.src = ev.target?.result as string;
     };
     reader.readAsDataURL(file);
     e.target.value = "";
@@ -1005,57 +906,27 @@ export function MachineDetail({
               <Wrench className="w-3.5 h-3.5" /> Log Service
             </Button>
           )}
-          {pSvcCreate && (
-            <Button
-              size="sm"
-              variant="outline"
-              className="gap-1.5"
-              onClick={() => setShowUsageForm(true)}
-            >
-              <Clock className="w-3.5 h-3.5" /> Log Usage
-            </Button>
-          )}
         </div>
       </div>
 
       {/* Machine photo + key stats row */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Photo — a real <label> wrapping the file input, not a div role
-            simulating a button: native label/input pairing gives click AND
-            keyboard (Enter/Space via the input's own focus) activation for
-            free, which the manual onClick+onKeyDown it replaces had to
-            hand-roll (and which can't correctly contain the input as a
-            <button> would, since interactive controls can't nest). */}
-        <label
-          className="relative rounded-xl border overflow-hidden bg-muted/30 flex items-center justify-center cursor-pointer group"
-          style={{ minHeight: 200 }}
-          title="Click to upload machine photo"
-        >
-          {machine.primaryImageData ? (
-            <img
-              src={machine.primaryImageData}
-              alt={machine.name}
-              className="w-full h-full object-cover"
-            />
-          ) : (
-            <div className="flex flex-col items-center gap-2 text-muted-foreground p-8">
-              <Image className="w-10 h-10 opacity-40" />
-              <p className="text-xs">Click to upload photo</p>
-            </div>
-          )}
-          {pEdit && (
-            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-              <p className="text-white text-xs font-medium">Change Photo</p>
-            </div>
-          )}
-          <input
-            ref={photoInputRef}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={handlePhotoUpload}
-          />
-        </label>
+        {/* Phase 51 (Group 2) — real asset_photos gallery, Storage-backed,
+            replacing the old <label>-wraps-input trick whose only click
+            target opened the upload dialog even when the user just wanted
+            to look at the existing photo (the exact bug named across every
+            Group 2 phase report). primaryImageData (legacy base64) is kept
+            as a read-only fallback only for machines with zero real
+            AssetPhoto rows yet — never touched, never migrated here. */}
+        <AssetPhotoGallery
+          ownerType="machine"
+          ownerId={machineId}
+          canEdit={pEdit}
+          legacyPhotoDataUrl={machine.primaryImageData || undefined}
+          heroMode
+          heroAlt={machine.name}
+          data-ocid="machine-detail.photo"
+        />
 
         {/* Key metrics */}
         <div className="lg:col-span-2 grid grid-cols-2 sm:grid-cols-3 gap-3">
@@ -1134,13 +1005,15 @@ export function MachineDetail({
             )}
           </TabsTrigger>
           <TabsTrigger value="parts">Parts Replaced</TabsTrigger>
-          <TabsTrigger value="usage">Usage Log</TabsTrigger>
           <TabsTrigger value="documents">Documents</TabsTrigger>
           <TabsTrigger
             value="compatibility"
             data-ocid="machine-detail.compatibility.tab"
           >
             Compatibility
+          </TabsTrigger>
+          <TabsTrigger value="activity" data-ocid="machine-detail.activity.tab">
+            Activity
           </TabsTrigger>
           {revView && (
             <TabsTrigger
@@ -1170,8 +1043,12 @@ export function MachineDetail({
                 Machine Details
               </h3>
               {[
+                // Phase 3 (Group 2) — machineCode (shown as the mono chip
+                // in the header above) is the real canonical Asset ID;
+                // the separate assetId field is deprecated (never unique,
+                // never auto-generated) and no longer surfaced here to
+                // avoid presenting a second, competing "Asset ID".
                 { label: "Serial Number", value: machine.serialNumber },
-                { label: "Asset ID", value: machine.assetId },
                 { label: "Location", value: machine.location },
                 { label: "Department", value: machine.department },
                 { label: "Purchase Date", value: machine.purchaseDate },
@@ -1198,7 +1075,23 @@ export function MachineDetail({
                     <span className="text-muted-foreground w-36 shrink-0">
                       {label}
                     </span>
-                    <span className="font-medium">{value}</span>
+                    {/* Phase 14 (Group 2) — Connected Records: Purchase
+                        Vendor is a real FK (purchaseVendorId), so it
+                        becomes a clickable link rather than plain text. */}
+                    {label === "Purchase Vendor" ? (
+                      <ConnectedRecordLink
+                        label={value as string}
+                        onClick={
+                          machine.purchaseVendorId && onViewVendor
+                            ? () =>
+                                onViewVendor(machine.purchaseVendorId as string)
+                            : undefined
+                        }
+                        data-ocid="machine-detail.purchase.vendor_link"
+                      />
+                    ) : (
+                      <span className="font-medium">{value}</span>
+                    )}
                   </div>
                 ))}
             </div>
@@ -1532,92 +1425,6 @@ export function MachineDetail({
           </div>
         </TabsContent>
 
-        {/* ── USAGE LOG TAB ── */}
-        <TabsContent value="usage" className="pt-4 space-y-3">
-          <div className="flex justify-between items-center">
-            <p className="text-sm text-muted-foreground">
-              Total: {machine.totalRunningHours.toLocaleString("en-IN")} hrs
-            </p>
-            {pSvcCreate && (
-              <Button
-                size="sm"
-                variant="outline"
-                className="gap-1.5"
-                onClick={() => {
-                  setUsageForm({
-                    logDate: new Date().toISOString().split("T")[0],
-                  });
-                  setShowUsageForm(true);
-                }}
-              >
-                <Plus className="w-3.5 h-3.5" /> Log Usage
-              </Button>
-            )}
-          </div>
-          <div className="rounded-lg border overflow-hidden">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Date</TableHead>
-                  <TableHead>Hours</TableHead>
-                  <TableHead>Project</TableHead>
-                  <TableHead>Operator</TableHead>
-                  <TableHead>Notes</TableHead>
-                  {pDelete && <TableHead />}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {myUsageLogs.length === 0 ? (
-                  <TableRow>
-                    <TableCell
-                      colSpan={6}
-                      className="text-center text-muted-foreground py-8"
-                    >
-                      No usage logs yet.
-                    </TableCell>
-                  </TableRow>
-                ) : (
-                  myUsageLogs.map((l) => (
-                    <TableRow key={l.id}>
-                      <TableCell>{l.logDate}</TableCell>
-                      <TableCell className="font-medium">
-                        {l.hoursUsed} hrs
-                      </TableCell>
-                      <TableCell>
-                        {l.projectName || l.projectId || "—"}
-                      </TableCell>
-                      <TableCell>{l.operatorName || "—"}</TableCell>
-                      <TableCell className="text-muted-foreground text-xs">
-                        {l.notes || "—"}
-                      </TableCell>
-                      {pDelete && (
-                        <TableCell>
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              const ok = await deleteMachineUsageLog(l.id);
-                              if (!ok) {
-                                toast.error(
-                                  "Could not remove log — machine sync to Supabase failed.",
-                                );
-                                return;
-                              }
-                              toast.success("Log removed");
-                            }}
-                            className="text-muted-foreground hover:text-destructive"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </TableCell>
-                      )}
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </div>
-        </TabsContent>
-
         {/* ── DOCUMENTS TAB ── */}
         <TabsContent value="documents" className="pt-4 space-y-3">
           <div className="flex justify-between items-center">
@@ -1798,6 +1605,15 @@ export function MachineDetail({
               )}
             </div>
           </div>
+        </TabsContent>
+
+        <TabsContent value="activity" className="pt-4">
+          <AssetUsageSection
+            assetType="machine"
+            assetId={machineId}
+            canEdit={pEdit}
+            data-ocid="machine-detail.activity"
+          />
         </TabsContent>
 
         {revView && (
@@ -2225,92 +2041,6 @@ export function MachineDetail({
             <Button onClick={saveSvcRecord}>
               {editingSvc ? "Save Changes" : "Log Service"}
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* ── USAGE LOG FORM ── */}
-      <Dialog open={showUsageForm} onOpenChange={setShowUsageForm}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Log Usage — {machine.name}</DialogTitle>
-          </DialogHeader>
-          <div className="space-y-3 py-2">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <Label>Date *</Label>
-                <Input
-                  type="date"
-                  value={usageForm.logDate || ""}
-                  onChange={(e) =>
-                    setUsageForm({ ...usageForm, logDate: e.target.value })
-                  }
-                />
-              </div>
-              <div>
-                <Label>Hours Used *</Label>
-                <Input
-                  type="number"
-                  step="0.5"
-                  value={usageForm.hoursUsed || ""}
-                  onChange={(e) =>
-                    setUsageForm({
-                      ...usageForm,
-                      hoursUsed: Number(e.target.value),
-                    })
-                  }
-                />
-              </div>
-            </div>
-            <div>
-              <Label>Project (optional)</Label>
-              <SearchableSelect
-                value={usageForm.projectId || "__none__"}
-                onChange={(v) =>
-                  setUsageForm({
-                    ...usageForm,
-                    projectId: v === "__none__" ? "" : v,
-                  })
-                }
-                options={[
-                  { value: "__none__", label: "— No project —" },
-                  ...(projects || []).map((p) => ({
-                    value: p.id,
-                    label: `${p.projectNo} · ${p.projectName}`,
-                  })),
-                ]}
-                placeholder="Select project"
-                searchPlaceholder="Search projects…"
-                emptyText="No projects found."
-                className="w-full"
-              />
-            </div>
-            <div>
-              <Label>Operator</Label>
-              <Input
-                value={usageForm.operatorName || ""}
-                onChange={(e) =>
-                  setUsageForm({ ...usageForm, operatorName: e.target.value })
-                }
-                placeholder="Operator name"
-              />
-            </div>
-            <div>
-              <Label>Notes</Label>
-              <Textarea
-                rows={2}
-                value={usageForm.notes || ""}
-                onChange={(e) =>
-                  setUsageForm({ ...usageForm, notes: e.target.value })
-                }
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowUsageForm(false)}>
-              Cancel
-            </Button>
-            <Button onClick={saveUsageLog}>Log Hours</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

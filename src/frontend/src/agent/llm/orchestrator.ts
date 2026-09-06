@@ -119,6 +119,12 @@ CONFIRMATION AND WRITES:
   later step fails after an earlier one succeeded, report exactly which
   steps succeeded and which did not. Never claim a full plan succeeded
   when only part of it did.
+- At most 6 write calls can be confirmed in one turn — the system
+  rejects anything larger outright rather than presenting an unreviewable
+  wall of pending actions. If a plan needs more than 6 writes (e.g.
+  extracting a long tender's requirement checklist), say up front how
+  many batches of up to 6 it will take, then propose the first batch —
+  never propose more than 6 write calls in a single turn.
 
 ENTITY RESOLUTION:
 - If a name matches more than one customer/project/employee, list the

@@ -26,6 +26,11 @@ import {
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  downloadAttachment,
+  generateDocumentFilename,
+  openAttachmentPreview,
+} from "@/lib/utils";
+import {
   Download,
   Eye,
   FileText,
@@ -198,7 +203,7 @@ function CompanyPOsInner() {
       );
     });
     try {
-      triggerDownload(docId, `PO_${po.cpoNumber ?? po.id}.pdf`);
+      triggerDownload(docId, generateDocumentFilename(po.cpoNumber, po.id));
     } catch (e) {
       console.error("DOWNLOAD FAILED", e);
     } finally {
@@ -330,28 +335,18 @@ function CompanyPOsInner() {
     reader.readAsDataURL(file);
   };
 
+  // Phase 1 attachment-bug fix: this blob-conversion logic now lives once,
+  // in lib/utils.ts (openAttachmentPreview/downloadAttachment) — reused
+  // here instead of duplicated, and reused by Inventory.tsx/
+  // MaterialDetailDrawer.tsx too, which previously navigated straight to
+  // the raw data: URI and silently failed on larger files.
   const openFile = (file: PurchaseAttachment) => {
-    try {
-      const byteString = atob(file.ref.split(",")[1]);
-      const mimeString = file.ref.split(",")[0].split(":")[1].split(";")[0];
-      const ab = new ArrayBuffer(byteString.length);
-      const ia = new Uint8Array(ab);
-      for (let i = 0; i < byteString.length; i++)
-        ia[i] = byteString.charCodeAt(i);
-      const blob = new Blob([ab], { type: mimeString });
-      const url = URL.createObjectURL(blob);
-      window.open(url, "_blank");
-    } catch {
-      toast.error("File not available");
-    }
+    if (!openAttachmentPreview(file.ref)) toast.error("File not available");
   };
 
   const downloadFile = (file: PurchaseAttachment) => {
     try {
-      const a = document.createElement("a");
-      a.href = file.ref;
-      a.download = file.name;
-      a.click();
+      downloadAttachment(file.ref, file.name);
     } catch {
       toast.error("File not available");
     }
@@ -499,12 +494,10 @@ function CompanyPOsInner() {
   }) => (
     <RowActions
       primary={[
-        {
-          label: "View",
-          icon: Eye,
-          onClick: () => setViewPO(po),
-          "data-ocid": `company-po.view_button.${idx + 1}`,
-        },
+        // Global record-navigation rule (§1/§4) — "View" removed: the row
+        // itself (desktop) and the PO Number button (both layouts) already
+        // open this exact same preview via setViewPO, so a duplicate
+        // explicit button here would be redundant.
         ...(pEdit
           ? [
               {
@@ -629,16 +622,29 @@ function CompanyPOsInner() {
             data-ocid="company-po.list.cards"
           >
             {safePos.map((po, idx) => (
+              // Card onClick is a mouse/touch convenience only — the real
+              // keyboard-accessible control is the PO Number <button>
+              // nested below, which calls the same handler.
+              // biome-ignore lint/a11y/useKeyWithClickEvents: see comment above
               <div
                 key={po.id}
-                className="rounded-lg border bg-card p-4 shadow-sm"
+                className="rounded-lg border bg-card p-4 shadow-sm cursor-pointer active:bg-muted/40"
+                onClick={() => setViewPO(po)}
                 data-ocid={`company-po.item.${idx + 1}`}
               >
                 <div className="flex items-start justify-between mb-3">
                   <div>
-                    <div className="font-mono font-bold text-sm">
+                    <button
+                      type="button"
+                      className="font-mono font-bold text-sm hover:underline focus-visible:underline"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setViewPO(po);
+                      }}
+                      data-ocid={`company-po.card_open_button.${idx + 1}`}
+                    >
                       {po.cpoNumber}
-                    </div>
+                    </button>
                     <div className="text-base font-semibold mt-0.5">
                       {po.vendorName}
                     </div>
@@ -703,9 +709,21 @@ function CompanyPOsInner() {
                     <TableRow
                       key={po.id}
                       data-ocid={`company-po.item.${idx + 1}`}
+                      onClick={() => setViewPO(po)}
+                      className="cursor-pointer hover:bg-muted/50"
                     >
                       <TableCell className="font-mono font-semibold">
-                        {po.cpoNumber}
+                        <button
+                          type="button"
+                          className="hover:underline focus-visible:underline"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setViewPO(po);
+                          }}
+                          data-ocid={`company-po.open_button.${idx + 1}`}
+                        >
+                          {po.cpoNumber}
+                        </button>
                       </TableCell>
                       <TableCell>{po.vendorName}</TableCell>
                       <TableCell>{(po.items || []).length} item(s)</TableCell>
@@ -721,7 +739,7 @@ function CompanyPOsInner() {
                         </Badge>
                       </TableCell>
                       <TableCell>{po.expectedDeliveryDate || "—"}</TableCell>
-                      <TableCell>
+                      <TableCell onClick={(e) => e.stopPropagation()}>
                         {po.file ? (
                           <div className="flex gap-1">
                             <Button
@@ -749,7 +767,7 @@ function CompanyPOsInner() {
                           </span>
                         )}
                       </TableCell>
-                      <TableCell>
+                      <TableCell onClick={(e) => e.stopPropagation()}>
                         <CompanyPoRowActions po={po} idx={idx} />
                       </TableCell>
                     </TableRow>

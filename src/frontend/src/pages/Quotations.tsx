@@ -72,6 +72,7 @@ import {
   updateQuotationRevisionRemote,
 } from "../lib/quotationsApi";
 import {
+  generateDocumentFilename,
   getCustomerVisibleName,
   projectsNeedingNewLineItems,
 } from "../lib/utils";
@@ -206,7 +207,12 @@ export function Quotations() {
       );
     });
     try {
-      triggerDownload(docId, `Quotation_${q.qtNo ?? q.id}.pdf`);
+      triggerDownload(
+        docId,
+        generateDocumentFilename(q.qtNo, q.id, {
+          revision: getCurrentRevision(q.id)?.revisionNumber,
+        }),
+      );
     } catch (e) {
       console.error("DOWNLOAD FAILED", e);
     } finally {
@@ -980,12 +986,11 @@ export function Quotations() {
     return (
       <RowActions
         primary={[
-          {
-            label: "View",
-            icon: Eye,
-            onClick: () => setPrintQuotation(q),
-            "data-ocid": `quotations.view_button.${i + 1}`,
-          },
+          // Global record-navigation rule (§1/§4) — "View" removed: the
+          // row itself (desktop) and the QT No. button (both layouts)
+          // already open this exact same print/preview via
+          // setPrintQuotation, so a duplicate explicit button here would
+          // be redundant.
           ...(pEdit
             ? [
                 {
@@ -1122,16 +1127,29 @@ export function Quotations() {
             .recordedPO;
           const qPOCount = getPOsForQuotation(q.id).length;
           return (
+            // Card onClick is a mouse/touch convenience only — the real
+            // keyboard-accessible control is the QT No. <button> nested
+            // below, which calls the same handler.
+            // biome-ignore lint/a11y/useKeyWithClickEvents: see comment above
             <div
               key={q.id}
-              className="rounded-md border p-3 space-y-2"
+              className="rounded-md border p-3 space-y-2 cursor-pointer active:bg-muted/40"
+              onClick={() => setPrintQuotation(q)}
               data-ocid={`quotations.list.card.${i + 1}`}
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <div className="text-sm font-mono font-semibold">
+                  <button
+                    type="button"
+                    className="text-sm font-mono font-semibold hover:underline focus-visible:underline"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setPrintQuotation(q);
+                    }}
+                    data-ocid={`quotations.list.card_open_button.${i + 1}`}
+                  >
                     {q.qtNo}
-                  </div>
+                  </button>
                   <div className="text-sm text-muted-foreground truncate">
                     {cust?.name ?? "—"}
                   </div>
@@ -1218,7 +1236,17 @@ export function Quotations() {
                     className="cursor-pointer hover:bg-muted/50"
                   >
                     <TableCell className="text-xs font-mono font-semibold">
-                      {q.qtNo}
+                      <button
+                        type="button"
+                        className="hover:underline focus-visible:underline"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setPrintQuotation(q);
+                        }}
+                        data-ocid={`quotations.list.open_button.${i + 1}`}
+                      >
+                        {q.qtNo}
+                      </button>
                     </TableCell>
                     <TableCell className="text-sm">
                       {cust?.name ?? "\u2014"}

@@ -22,6 +22,7 @@
 // - Every machine's outcome (migrated / already migrated / failed + why)
 //   is reported individually - nothing is silently dropped.
 
+import { fetchAllRows } from "@/lib/hydration";
 import { upsertMachineRemote } from "@/lib/machinesApi";
 import { getSupabase } from "@/lib/supabaseClient";
 import type { Machine } from "@/types";
@@ -62,17 +63,20 @@ export async function migrateMachinesToSupabase(
     machines: [],
   };
 
-  const { data: existingRows, error: existingErr } = await client
-    .from("machines")
-    .select("id");
+  // Gap-closure fix — was a single unbounded .select(), which silently
+  // truncates past 1,000 rows. Unlikely for a machine registry, but this
+  // idempotency check is what stands between a re-run and a real duplicate
+  // migration attempt, so it's worth being exactly right regardless of
+  // scale.
+  const { data: existingRows, error: existingErr } = await fetchAllRows<{
+    id: string;
+  }>((from, to) => client.from("machines").select("id").range(from, to));
   if (existingErr) {
     throw new Error(
       `Failed to check already-migrated machines: ${existingErr.message}`,
     );
   }
-  const existingIds = new Set(
-    ((existingRows as { id: string }[]) ?? []).map((r) => r.id),
-  );
+  const existingIds = new Set((existingRows ?? []).map((r) => r.id));
 
   for (const m of localMachines) {
     const label = `${m.machineCode} — ${m.name}`;

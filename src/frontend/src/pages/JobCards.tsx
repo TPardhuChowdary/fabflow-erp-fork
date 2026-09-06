@@ -39,25 +39,59 @@ import {
   ClipboardList,
   Pencil,
   Plus,
+  Printer,
   ShieldOff,
   Trash2,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { flushSync } from "react-dom";
+import { createRoot } from "react-dom/client";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import { CompleteJobCardDialog } from "../components/CompleteJobCardDialog";
 import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import { EmployeeSelect } from "../components/EmployeeSelect";
+import { JobCardTimerPanel } from "../components/JobCardTimerPanel";
 import { ProjectSelect } from "../components/ProjectSelect";
+import {
+  formatJobCardTimestamp,
+  useJobCardTimer,
+} from "../hooks/useJobCardTimer";
+import { getEvidenceRequirements } from "../lib/companySettingsApi";
+import { JobCardDocContent } from "../lib/documentRenderers";
+import { setJobCardExceptionStatusRemote } from "../lib/jobCardExceptionsApi";
+import type { WriteResult } from "../lib/jobCardsApi";
 import {
   computeNextJobNo,
   createJobCardRemote,
   deleteJobCardRemote,
+  pauseJobCardRemote,
+  resumeJobCardRemote,
+  startJobCardRemote,
   updateJobCardRemote,
 } from "../lib/jobCardsApi";
-import { canCreate, canDelete, canEdit, canView } from "../permissions";
+import {
+  canApprove,
+  canCreate,
+  canDelete,
+  canEdit,
+  canView,
+} from "../permissions";
 import { useStore } from "../store";
-import type { JobCard, JobCardStatus } from "../types";
+import type { JobCard, JobCardExceptionReason, JobCardStatus } from "../types";
+
+const REASON_LABEL: Record<JobCardExceptionReason, string> = {
+  machine_breakdown: "Machine breakdown",
+  material_unavailable: "Material unavailable",
+  incorrect_material: "Incorrect material",
+  design_specification_change: "Design/specification change",
+  supervisor_delay: "Supervisor delay",
+  customer_change: "Customer change",
+  technical_difficulty: "Technical difficulty",
+  safety_delay: "Safety issue",
+  other: "Other approved reason",
+};
 
 const STATUS_LABEL: Record<JobCardStatus, string> = {
   NotStarted: "Not Started",
@@ -81,13 +115,19 @@ const emptyForm = {
   employeeId: "",
   jobDescription: "",
   operationType: "",
+  stageId: "",
   standardTimePerUnitMinutes: "",
   allocatedTimeMinutes: "",
   actualCompletedQty: "0",
   rejectedQty: "0",
   reworkQty: "0",
-  startTime: "",
-  endTime: "",
+  // Start/End Date-Time are deliberately NOT form fields — they are
+  // owned by the server-authoritative timer (enforce_job_card_timer_
+  // transition) and set only by Start/Complete. The New/Edit form must
+  // never ask a user to type them (see chat, Job Card timer UX
+  // correction) — handleSaveEdit passes the existing job card's own
+  // startTime/endTime straight through unchanged so an edit to any other
+  // field can never reset or destroy them.
   status: "NotStarted" as JobCardStatus,
   notes: "",
 };
@@ -98,13 +138,45 @@ export function JobCards() {
     jobCards,
     employees,
     projects,
+    projectProductions,
+    jobCardExceptions,
+    settings,
     addJobCard,
     updateJobCard,
     deleteJobCard,
+    updateJobCardExceptionLocal,
   } = useStore();
   const pCreate = canCreate(currentUser, "job_cards");
   const pEdit = canEdit(currentUser, "job_cards");
   const pDelete = canDelete(currentUser, "job_cards");
+  const pApprove = canApprove(currentUser, "job_cards");
+  const pendingExceptions = jobCardExceptions.filter(
+    (e) => e.status === "pending",
+  );
+  const [resolvingException, setResolvingException] = useState(false);
+
+  async function resolveException(id: string, status: "approved" | "rejected") {
+    if (resolvingException) return;
+    setResolvingException(true);
+    try {
+      const result = await setJobCardExceptionStatusRemote(id, status);
+      if (result.status === "unauthenticated") {
+        toast.error("Not signed in - exception was not updated.");
+        return;
+      }
+      if (result.status === "denied" || result.status === "error") {
+        toast.error(result.error ?? "Could not update exception.");
+        return;
+      }
+      if (!result.data) return;
+      updateJobCardExceptionLocal(result.data);
+      toast.success(
+        status === "approved" ? "Exception approved" : "Exception rejected",
+      );
+    } finally {
+      setResolvingException(false);
+    }
+  }
 
   const [addOpen, setAddOpen] = useState(false);
   const [editCard, setEditCard] = useState<JobCard | null>(null);
@@ -112,6 +184,63 @@ export function JobCards() {
   const [viewCard, setViewCard] = useState<JobCard | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [form, setForm] = useState(emptyForm);
+
+  // Live-ticking Active Time for the View dialog's persisted Start/End
+  // block below — called unconditionally (Rules of Hooks) with a no-op
+  // fallback while the dialog is closed, so it stays in sync with
+  // JobCardTimerPanel's own identical computation for the same card.
+  const { formatted: viewCardActiveTime } = useJobCardTimer({
+    status: viewCard?.status ?? "NotStarted",
+    activeSeconds: viewCard?.activeSeconds ?? 0,
+    currentRunStartedAt: viewCard?.currentRunStartedAt,
+  });
+
+  // Job Card live timer (Start/Pause/Resume/Complete) — same evidence
+  // policy read and Complete flow as My Jobs (MyJobs.tsx), reused via
+  // CompleteJobCardDialog rather than a second copy of that logic.
+  const [completeOpen, setCompleteOpen] = useState(false);
+  const [evidencePolicy, setEvidencePolicy] = useState<{
+    job_card_completion?: boolean;
+    quality_rejection?: boolean;
+  }>({});
+  useEffect(() => {
+    getEvidenceRequirements().then((v) => {
+      if (v) setEvidencePolicy(v);
+    });
+  }, []);
+
+  async function handleTransition(
+    action: (id: string) => Promise<WriteResult<JobCard>>,
+    jc: JobCard,
+    successMessage: string,
+    failureMessage: string,
+  ) {
+    if (isSaving) return;
+    setIsSaving(true);
+    try {
+      const result = await action(jc.id);
+      if (result.status === "unauthenticated") {
+        toast.error(`Not signed in - ${failureMessage}`);
+        return;
+      }
+      if (result.status === "denied" || result.status === "error") {
+        toast.error(result.error ?? `Could not ${failureMessage}`);
+        return;
+      }
+      if (!result.data) return;
+      updateJobCard(result.data);
+      setViewCard(result.data);
+      toast.success(successMessage);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+  const handleStart = (jc: JobCard) =>
+    handleTransition(startJobCardRemote, jc, "Job started", "start job");
+  const handlePause = (jc: JobCard) =>
+    handleTransition(pauseJobCardRemote, jc, "Job paused", "pause job");
+  const handleResume = (jc: JobCard) =>
+    handleTransition(resumeJobCardRemote, jc, "Job resumed", "resume job");
 
   const openAdd = () => {
     setForm(emptyForm);
@@ -125,13 +254,12 @@ export function JobCards() {
       employeeId: jc.employeeId ?? "",
       jobDescription: jc.jobDescription,
       operationType: jc.operationType,
+      stageId: jc.stageId ?? "",
       standardTimePerUnitMinutes: String(jc.standardTimePerUnitMinutes),
       allocatedTimeMinutes: String(jc.allocatedTimeMinutes),
       actualCompletedQty: String(jc.actualCompletedQty),
       rejectedQty: String(jc.rejectedQty),
       reworkQty: String(jc.reworkQty),
-      startTime: jc.startTime ? jc.startTime.slice(0, 16) : "",
-      endTime: jc.endTime ? jc.endTime.slice(0, 16) : "",
       status: jc.status,
       notes: jc.notes ?? "",
     });
@@ -154,6 +282,61 @@ export function JobCards() {
     employees.find((e) => e.id === id)?.name ?? "";
   const projectNo = (id: string) =>
     projects.find((p) => p.id === id)?.projectNo ?? "—";
+  const stageName = (stageId: string | undefined) =>
+    stageId
+      ? projectProductions
+          .flatMap((pp) => pp.stages)
+          .find((s) => s.stageId === stageId)?.stageName
+      : undefined;
+  const projectLabel = (id: string) => {
+    const p = projects.find((x) => x.id === id);
+    return p ? `${p.projectNo} — ${p.projectName}` : "—";
+  };
+
+  // Feature: Printable Job Card — physical/paper copy of this exact,
+  // existing Job Card record for shop-floor employees without a phone or
+  // FabFlow login. Same off-screen-render → popup-window → window.print()
+  // pattern already used for Invoices/Quotations/Company POs/Delivery
+  // Challans (see lib/documentUtils.ts, pages/CompanyPOs.tsx's own
+  // handlePrint) — not a new print mechanism. The popup is a completely
+  // separate document (no sidebar/nav/app chrome can ever appear in it),
+  // and nothing here writes to the Job Card or any other table — it only
+  // reads the same fields the View dialog above already reads.
+  async function handlePrintJobCard(jc: JobCard) {
+    const container = document.createElement("div");
+    container.style.cssText =
+      "position:fixed;top:0;left:-9999px;width:800px;background:#fff;z-index:9999";
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const docId = `job-card-print-${jc.id}`;
+    flushSync(() => {
+      root.render(
+        <JobCardDocContent
+          id={docId}
+          jobCard={jc}
+          projectLabel={projectLabel(jc.projectId)}
+          stageLabel={stageName(jc.stageId) ?? null}
+          settings={settings as unknown as Record<string, string>}
+        />,
+      );
+    });
+    const el = document.getElementById(docId);
+    const content = el?.innerHTML || "";
+    root.unmount();
+    container.remove();
+    if (!content) return;
+    const win = window.open("", "_blank", "width=900,height=650");
+    if (!win) {
+      toast.error("Please allow popups for this site to print Job Cards.");
+      return;
+    }
+    win.document.write(
+      `<html><head><title>Job Card ${jc.jobNo}</title><style>body{font-family:Arial,sans-serif;padding:20px;color:#000;background:#fff;}table{border-collapse:collapse;width:100%;}@page{size:A4;margin:15mm;}@media print{body{padding:0;}}</style></head><body>${content}</body></html>`,
+    );
+    win.document.close();
+    win.focus();
+    setTimeout(() => win.print(), 300);
+  }
 
   const validate = () => {
     if (!form.projectId) {
@@ -196,13 +379,16 @@ export function JobCards() {
           employeeName: employeeName(form.employeeId),
           jobDescription: form.jobDescription.trim(),
           operationType: form.operationType.trim(),
+          stageId: form.stageId || undefined,
           standardTimePerUnitMinutes: standardTime,
           allocatedTimeMinutes: allocatedTime,
           actualCompletedQty: Number.parseInt(form.actualCompletedQty, 10) || 0,
           rejectedQty: Number.parseInt(form.rejectedQty, 10) || 0,
           reworkQty: Number.parseInt(form.reworkQty, 10) || 0,
-          startTime: form.startTime || undefined,
-          endTime: form.endTime || undefined,
+          // Never sent from this form — a new Job Card always starts with
+          // no timer data; Start/Complete are what set these, server-side.
+          startTime: undefined,
+          endTime: undefined,
           status: form.status,
           notes: form.notes.trim() || undefined,
         },
@@ -240,13 +426,18 @@ export function JobCards() {
         employeeName: employeeName(form.employeeId),
         jobDescription: form.jobDescription.trim(),
         operationType: form.operationType.trim(),
+        stageId: form.stageId || undefined,
         standardTimePerUnitMinutes: standardTime,
         allocatedTimeMinutes: allocatedTime,
         actualCompletedQty: Number.parseInt(form.actualCompletedQty, 10) || 0,
         rejectedQty: Number.parseInt(form.rejectedQty, 10) || 0,
         reworkQty: Number.parseInt(form.reworkQty, 10) || 0,
-        startTime: form.startTime || undefined,
-        endTime: form.endTime || undefined,
+        // Passed through unchanged, never from form state — this edit
+        // form has no Start/End Date-Time inputs (the timer owns them),
+        // so editing any other field here must never reset or destroy
+        // whatever the timer has already persisted.
+        startTime: editCard.startTime,
+        endTime: editCard.endTime,
         status: form.status,
         notes: form.notes.trim() || undefined,
       });
@@ -287,6 +478,14 @@ export function JobCards() {
     setDeleteTarget(null);
   };
 
+  // Scoped to the form's currently-selected project only — matches the
+  // server's own same-project validation (trg_validate_job_card_stage_
+  // reference, database/20260906060000) so the picker never offers a
+  // choice the save would reject.
+  const stagesForSelectedProject =
+    projectProductions.find((pp) => pp.projectId === form.projectId)?.stages ??
+    [];
+
   const formFields = (
     <div className="space-y-3 py-2">
       <div className="grid grid-cols-2 gap-3">
@@ -294,7 +493,13 @@ export function JobCards() {
           <Label className="text-xs">Project *</Label>
           <ProjectSelect
             value={form.projectId}
-            onChange={(id) => setForm((f) => ({ ...f, projectId: id }))}
+            onChange={(id) =>
+              // Clearing stageId on project change: a stage picked for a
+              // different project would fail the server's same-project
+              // validation trigger (database/20260906060000) — reset it
+              // here rather than let the user hit that error blind.
+              setForm((f) => ({ ...f, projectId: id, stageId: "" }))
+            }
             className="w-full"
           />
         </div>
@@ -327,6 +532,30 @@ export function JobCards() {
             }
             placeholder="e.g. Cutting"
           />
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1">
+          <Label className="text-xs">Production Stage</Label>
+          <Select
+            value={form.stageId || "__none__"}
+            onValueChange={(v) =>
+              setForm((f) => ({ ...f, stageId: v === "__none__" ? "" : v }))
+            }
+            disabled={!form.projectId}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue placeholder="No stage (ad-hoc)" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__none__">No stage (ad-hoc)</SelectItem>
+              {stagesForSelectedProject.map((s) => (
+                <SelectItem key={s.stageId} value={s.stageId ?? ""}>
+                  {s.stageName}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
       </div>
       <div className="grid grid-cols-2 gap-3">
@@ -404,28 +633,10 @@ export function JobCards() {
           />
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-3">
-        <div className="space-y-1">
-          <Label className="text-xs">Start Time</Label>
-          <Input
-            type="datetime-local"
-            value={form.startTime}
-            onChange={(e) =>
-              setForm((f) => ({ ...f, startTime: e.target.value }))
-            }
-          />
-        </div>
-        <div className="space-y-1">
-          <Label className="text-xs">End Time</Label>
-          <Input
-            type="datetime-local"
-            value={form.endTime}
-            onChange={(e) =>
-              setForm((f) => ({ ...f, endTime: e.target.value }))
-            }
-          />
-        </div>
-      </div>
+      {/* Start/End Date-Time are deliberately not editable here — the
+          server-authoritative timer (Start/Pause/Resume/Complete) owns
+          them entirely. See the read-only Start/End/Active Time block in
+          the View dialog below for the persisted values. */}
       <div className="space-y-1">
         <Label className="text-xs">Status</Label>
         <Select
@@ -493,6 +704,59 @@ export function JobCards() {
           </Button>
         )}
       </div>
+
+      {pApprove && pendingExceptions.length > 0 && (
+        <div
+          className="rounded-lg border bg-warning/10 border-warning/30 p-4 space-y-3"
+          data-ocid="jobcards.pending_exceptions"
+        >
+          <h2 className="text-sm font-semibold flex items-center gap-1.5">
+            Pending Exceptions ({pendingExceptions.length})
+          </h2>
+          {pendingExceptions.map((e) => {
+            const jc = jobCards.find((x) => x.id === e.jobCardId);
+            return (
+              <div
+                key={e.id}
+                className="flex items-start justify-between gap-3 rounded-md border bg-card p-3 text-sm"
+                data-ocid={`jobcards.pending_exceptions.${e.id}`}
+              >
+                <div className="min-w-0">
+                  <p className="font-medium">
+                    {jc?.jobNo ?? "—"} — {REASON_LABEL[e.reasonType]}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {jc?.employeeName ?? "Unknown employee"}
+                    {jc && ` · ${jc.jobDescription}`}
+                  </p>
+                  {e.description && (
+                    <p className="text-xs mt-1">{e.description}</p>
+                  )}
+                </div>
+                <div className="flex gap-2 shrink-0">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={resolvingException}
+                    onClick={() => resolveException(e.id, "rejected")}
+                    data-ocid={`jobcards.pending_exceptions.${e.id}.reject`}
+                  >
+                    Reject
+                  </Button>
+                  <Button
+                    size="sm"
+                    disabled={resolvingException}
+                    onClick={() => resolveException(e.id, "approved")}
+                    data-ocid={`jobcards.pending_exceptions.${e.id}.approve`}
+                  >
+                    Approve
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       <div className="table-wrapper">
         <div className="rounded-md border" data-ocid="jobcards.list.table">
@@ -562,9 +826,17 @@ export function JobCards() {
                     )}
                   </TableCell>
                   <TableCell>
-                    <Badge className={`text-xs ${statusCls(jc.status)}`}>
-                      {STATUS_LABEL[jc.status]}
-                    </Badge>
+                    <div className="flex items-center gap-1.5">
+                      <Badge className={`text-xs ${statusCls(jc.status)}`}>
+                        {STATUS_LABEL[jc.status]}
+                      </Badge>
+                      {/* Live timer glance right in the list — Admin
+                          doesn't need to open the row to see it ticking. */}
+                      {(jc.status === "InProgress" ||
+                        jc.status === "OnHold") && (
+                        <JobCardListTimerChip jc={jc} />
+                      )}
+                    </div>
                   </TableCell>
                   <TableCell>
                     <div
@@ -699,6 +971,17 @@ export function JobCards() {
                   </Button>
                 </div>
               </DialogHeader>
+              {/* Feature: Printable Job Card — physical/paper copy for a
+                  shop-floor employee without a phone/login. Reuses this
+                  exact Job Card's own data; nothing here writes to it. */}
+              <Button
+                variant="outline"
+                className="w-full"
+                onClick={() => handlePrintJobCard(viewCard)}
+                data-ocid="jobcards.view.print_button"
+              >
+                <Printer className="w-4 h-4 mr-2" /> Print Job Card
+              </Button>
               <div className="space-y-3 text-sm">
                 <div className="grid grid-cols-2 gap-2">
                   <div>
@@ -720,6 +1003,12 @@ export function JobCards() {
                       Operation Type
                     </p>
                     <p>{viewCard.operationType}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">
+                      Production Stage
+                    </p>
+                    <p>{stageName(viewCard.stageId) ?? "Ad-hoc (no stage)"}</p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Status</p>
@@ -788,6 +1077,50 @@ export function JobCards() {
                     <p>{viewCard.notes}</p>
                   </div>
                 )}
+                {/* Persisted timer timestamps — server-set only, never a
+                    form field (see JobCardTimerPanel below for the
+                    Start/Pause/Resume/Complete controls that set them).
+                    Reopening this dialog after a reload always reads
+                    these straight from the database row. */}
+                <div className="grid grid-cols-3 gap-2 rounded-md border bg-muted/30 p-2.5">
+                  <div>
+                    <p className="text-xs text-muted-foreground">
+                      Start Date &amp; Time
+                    </p>
+                    <p className="text-xs font-medium">
+                      {viewCard.startTime
+                        ? formatJobCardTimestamp(viewCard.startTime)
+                        : "Not started yet"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">
+                      End Date &amp; Time
+                    </p>
+                    <p className="text-xs font-medium">
+                      {viewCard.endTime
+                        ? formatJobCardTimestamp(viewCard.endTime)
+                        : "Not completed yet"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Active Time</p>
+                    <p className="text-xs font-mono font-semibold">
+                      {viewCardActiveTime}
+                    </p>
+                  </div>
+                </div>
+                <JobCardTimerPanel
+                  jobCard={viewCard}
+                  canEdit={pEdit}
+                  canPause={pApprove}
+                  onStart={() => handleStart(viewCard)}
+                  onPause={() => handlePause(viewCard)}
+                  onResume={() => handleResume(viewCard)}
+                  onComplete={() => setCompleteOpen(true)}
+                  isSaving={isSaving}
+                  dataOcidPrefix="jobcards.view.timer"
+                />
               </div>
               <DialogFooter>
                 {pEdit && (
@@ -808,6 +1141,22 @@ export function JobCards() {
         </DialogContent>
       </Dialog>
 
+      {viewCard && (
+        <CompleteJobCardDialog
+          job={viewCard}
+          open={completeOpen}
+          onOpenChange={setCompleteOpen}
+          evidenceRequired={evidencePolicy.job_card_completion === true}
+          requirePhotoOnReject={evidencePolicy.quality_rejection === true}
+          onSaved={(jc) => {
+            updateJobCard(jc);
+            setViewCard(jc);
+            setCompleteOpen(false);
+          }}
+          dataOcidPrefix="jobcards.complete"
+        />
+      )}
+
       <ConfirmDeleteDialog
         open={!!deleteTarget}
         onOpenChange={(o) => {
@@ -818,5 +1167,23 @@ export function JobCards() {
         onConfirm={confirmDelete}
       />
     </div>
+  );
+}
+
+// Tiny live-ticking chip for the list row — full status/actions live in
+// the JobCardTimerPanel inside the View dialog; this is just the
+// "visible without opening the row" glance.
+function JobCardListTimerChip({ jc }: { jc: JobCard }) {
+  const { formatted } = useJobCardTimer(jc);
+  return (
+    <span
+      className={`inline-flex items-center gap-1 text-[10px] font-mono tabular-nums px-1.5 py-0.5 rounded ${
+        jc.status === "InProgress"
+          ? "bg-success/10 text-success"
+          : "bg-warning/15 text-warning"
+      }`}
+    >
+      {jc.status === "InProgress" ? "⏱" : "⏸"} {formatted}
+    </span>
   );
 }

@@ -43,7 +43,25 @@ interface ResponsesInputImagePart {
   type: "input_image";
   image_url: string;
 }
-type ResponsesInputUserPart = ResponsesInputTextPart | ResponsesInputImagePart;
+// Phase 20 (Group 2) — PDF input via the Responses API's documented
+// input_file content part. file_url points at the same kind of signed
+// Storage URL "input_image" already uses (never raw bytes, never
+// permanent) — OpenAI's server fetches it directly, exactly like
+// image_url above. THIS IS THE UNVERIFIED PART OF THIS CHANGE: the
+// input_file/file_url shape matches OpenAI's published Responses API
+// documentation, but has not been exercised against the live API from
+// this codebase before — that's the explicit purpose of shipping this
+// as a minimal, isolated addition (touches no existing image/text
+// handling) and live-testing it immediately after deployment with a
+// real multi-page PDF, per the standing "no guessed API shapes" rule.
+interface ResponsesInputFilePart {
+  type: "input_file";
+  file_url: string;
+}
+type ResponsesInputUserPart =
+  | ResponsesInputTextPart
+  | ResponsesInputImagePart
+  | ResponsesInputFilePart;
 interface ResponsesOutputTextPart {
   type: "output_text";
   text: string;
@@ -109,6 +127,20 @@ function toResponsesInput(messages: ChatRequest["messages"]): ResponsesInputItem
           userParts.push({
             type: "input_text",
             text: `[Attached file: ${b.fileName} (${b.mimeType}) — not a visually-inspectable image type; its content was not read by the model.]`,
+          });
+        }
+      } else if (block.type === "document") {
+        // Phase 20 (Group 2) — genuine PDF input via input_file. Only
+        // application/pdf gets real document input; anything else on this
+        // block type gets the same honest "not read" stub as an
+        // unsupported "image" block, never silently dropped.
+        const b = block as unknown as { url: string; mimeType: string; fileName: string };
+        if (b.mimeType === "application/pdf") {
+          userParts.push({ type: "input_file", file_url: b.url });
+        } else {
+          userParts.push({
+            type: "input_text",
+            text: `[Attached file: ${b.fileName} (${b.mimeType}) — not a PDF; its content was not read by the model.]`,
           });
         }
       } else if (block.type === "tool_use") {

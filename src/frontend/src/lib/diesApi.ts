@@ -3,6 +3,8 @@
 // discipline). Dies is a net-new Supabase-backed module (public.dies,
 // see database/phase-38).
 
+import { getLinksForEntity, removeLink } from "@/drawingEditor/api/drawings";
+import { fetchAllRows } from "@/lib/hydration";
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
 import type { Die, DieStatus, MachineCondition } from "@/types";
 
@@ -134,12 +136,16 @@ export function computeNextDieCode(existingCodes: string[]): string {
   return `DIE-${String(next).padStart(3, "0")}`;
 }
 
+// Gap-closure fix — same silent-1,000-row-truncation risk as
+// jobCardsApi.ts's fetchExistingJobNos; see that file's comment.
 async function fetchExistingDieCodes(
   client: ReturnType<typeof getSupabase>,
 ): Promise<string[] | null> {
-  const { data, error } = await client.from("dies").select("die_code");
+  const { data, error } = await fetchAllRows<{ die_code: string }>((from, to) =>
+    client.from("dies").select("die_code").range(from, to),
+  );
   if (error || !data) return null;
-  return (data as unknown as { die_code: string }[]).map((r) => r.die_code);
+  return data.map((r) => r.die_code);
 }
 
 function isDieCodeConflict(error: { code?: string; message?: string }) {
@@ -215,9 +221,30 @@ export async function updateDieRemote(die: Die): Promise<WriteResult<Die>> {
   return { status: "success", data: rowToDie(rows[0]) };
 }
 
+// Confirmed live: deleting a die previously left its drawing_links row(s)
+// behind - drawing_links is a polymorphic join (linked_type/linked_id can
+// point at a machine, die, tool, or inventory_item), so it can't carry a
+// real FK/ON DELETE CASCADE to any single table. Cleaning up here, using
+// the exact same getLinksForEntity/removeLink primitives Dies.tsx's own
+// individual-unlink action already uses, scoped to linked_type "die" only
+// - never touches machine/tool/inventory_item links, and never touches
+// the drawings table itself (only the join row - the actual drawing and
+// its Storage file are untouched). deleteDieRemote is the only caller of
+// a die delete anywhere in this codebase (confirmed), so this is the one
+// place this needs to happen.
 export async function deleteDieRemote(id: string): Promise<WriteResult<never>> {
   const gate = await requireSession();
   if (!gate.ok) return gate.result;
+
+  const links = await getLinksForEntity("die", id).catch(() => []);
+  for (const link of links) {
+    await removeLink(link.id).catch(() => {
+      // Best-effort: a link that fails to remove here is not fatal to the
+      // die deletion itself. It would surface again as exactly the kind
+      // of orphan this function exists to prevent, but the die record
+      // being deleted is the operation the user actually asked for.
+    });
+  }
 
   const { data, error } = await gate.client
     .from("dies")

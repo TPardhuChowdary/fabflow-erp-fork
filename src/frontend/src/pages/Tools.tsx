@@ -74,7 +74,14 @@ const STATUS_COLOR: Record<ToolStatus, string> = {
   Retired: "bg-muted text-muted-foreground border-border",
 };
 
-export function Tools() {
+interface ToolsProps {
+  /** Opens the real ToolDetail workspace for a row - omitted (rather
+   * than defaulted to a no-op) when the caller doesn't wire navigation,
+   * so the overflow menu's View entry simply isn't offered. */
+  onViewTool?: (id: string) => void;
+}
+
+export function Tools({ onViewTool }: ToolsProps = {}) {
   const { currentUser } = useAuth();
   const pCreate = canCreate(currentUser, "tools");
   const pEdit = canEdit(currentUser, "tools");
@@ -372,6 +379,11 @@ export function Tools() {
           : []),
       ]}
       overflow={[
+        // Global record-navigation rule (§1/§4) — "View" removed: the tool
+        // name cell now opens ToolDetail directly when onViewTool is wired,
+        // so a second "View" entry here would be redundant. "History" above
+        // stays — it's the assignment-issue/return workflow, not a second
+        // way to view the record.
         ...(pDelete
           ? [
               {
@@ -507,9 +519,18 @@ export function Tools() {
               </thead>
               <tbody>
                 {filtered.map((t, i) => (
+                  // Row onClick is a mouse/touch convenience only — the
+                  // real keyboard-accessible control is the tool-name
+                  // <button> nested below, which calls the same handler.
+                  // biome-ignore lint/a11y/useKeyWithClickEvents: see comment above
                   <tr
                     key={t.id}
-                    className="border-t hover:bg-muted/30"
+                    className={
+                      onViewTool
+                        ? "border-t hover:bg-muted/30 cursor-pointer"
+                        : "border-t hover:bg-muted/30"
+                    }
+                    onClick={onViewTool ? () => onViewTool(t.id) : undefined}
                     data-ocid={`tools.item.${i + 1}`}
                   >
                     <td className="p-2">
@@ -527,7 +548,21 @@ export function Tools() {
                           </div>
                         )}
                         <div>
-                          <div className="font-medium">{t.name}</div>
+                          {onViewTool ? (
+                            <button
+                              type="button"
+                              className="font-medium text-left hover:underline focus-visible:underline"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onViewTool(t.id);
+                              }}
+                              data-ocid={`tools.open_button.${i + 1}`}
+                            >
+                              {t.name}
+                            </button>
+                          ) : (
+                            <div className="font-medium">{t.name}</div>
+                          )}
                           <div className="text-xs text-muted-foreground">
                             {t.toolCode}
                           </div>

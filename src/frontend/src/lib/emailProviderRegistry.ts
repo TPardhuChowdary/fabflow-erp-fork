@@ -1,0 +1,85 @@
+// FabFlow Email Integration — known-provider connection-settings registry.
+//
+// Single source of truth for "detected custom-domain provider → known
+// IMAP/SMTP settings", so ConnectEmailAccountDialog.tsx never hardcodes a
+// provider's server details itself. Matched against a domain's REAL MX
+// records (from email-detect-provider's live DNS lookup, see
+// emailProviderDetection.ts) — never assumed from the domain name alone,
+// so a custom domain that merely looks like it could be on a given host is
+// never silently misconfigured. A domain whose MX doesn't match anything
+// here falls through to manual configuration, exactly as an unrecognized
+// provider should (never guessed).
+//
+// Settings below are each provider's own publicly documented mail server
+// endpoints. The Hostinger entry is additionally confirmed live: a real
+// FabFlow mailbox (info@shanmukhasaiengineeringworks.com) connected
+// successfully with exactly this imap/smtp configuration on 2026-09-01 —
+// see the Phase 1B deployment report. The Zoho entry has not been
+// live-tested against a real Zoho mailbox this session; if it ever proves
+// wrong, worst case is a failed testConnection() and a fallback to
+// "Advanced / Custom IMAP configuration", never a silent bad connection.
+
+import type { EmailEncryption } from "@/types";
+
+export interface KnownProviderConfig {
+  imapHost: string;
+  imapPort: number;
+  imapEncryption: EmailEncryption;
+  smtpHost: string;
+  smtpPort: number;
+  smtpEncryption: EmailEncryption;
+}
+
+export interface KnownProviderEntry {
+  id: string;
+  label: string;
+  /** Real MX hostname suffixes this provider's mail is served from —
+   * matched case-insensitively as a suffix against the domain's actual MX
+   * records, never against the domain name itself. */
+  mxSuffixes: string[];
+  config: KnownProviderConfig;
+}
+
+export const KNOWN_PROVIDERS: KnownProviderEntry[] = [
+  {
+    id: "hostinger",
+    label: "Hostinger",
+    mxSuffixes: ["hostinger.com"],
+    config: {
+      imapHost: "imap.hostinger.com",
+      imapPort: 993,
+      imapEncryption: "ssl",
+      smtpHost: "smtp.hostinger.com",
+      smtpPort: 465,
+      smtpEncryption: "ssl",
+    },
+  },
+  {
+    id: "zoho",
+    label: "Zoho Mail",
+    mxSuffixes: ["zoho.com", "zohomail.com"],
+    config: {
+      imapHost: "imap.zoho.com",
+      imapPort: 993,
+      imapEncryption: "ssl",
+      smtpHost: "smtp.zoho.com",
+      smtpPort: 465,
+      smtpEncryption: "ssl",
+    },
+  },
+];
+
+/** Matches a domain's real MX hostnames against the registry. Returns null
+ * (never a guess) when nothing matches confidently — callers must fall
+ * back to manual configuration. */
+export function matchKnownProvider(
+  mxHosts: string[] | undefined,
+): KnownProviderEntry | null {
+  if (!mxHosts || mxHosts.length === 0) return null;
+  const lower = mxHosts.map((h) => h.toLowerCase());
+  return (
+    KNOWN_PROVIDERS.find((p) =>
+      lower.some((h) => p.mxSuffixes.some((s) => h.endsWith(s))),
+    ) ?? null
+  );
+}

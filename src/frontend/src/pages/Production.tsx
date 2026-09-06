@@ -23,7 +23,15 @@ import { ShieldOff } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import { DeadlineIndicator } from "../components/DeadlineIndicator";
+import { useUpdateProjectDeadline } from "../hooks/useUpdateProjectDeadline";
+import {
+  compareByDeadlinePriority,
+  formatDeadlineRelative,
+  getDeadlineInfo,
+} from "../lib/deadlinePriority";
 import { checkMaterialAvailability } from "../lib/materialAvailability";
+import { computeStageProductionTotals } from "../lib/stageProductionTotals";
 import { createVendorRemote } from "../lib/vendorsApi";
 import { canCreate, canEdit, canView, hasPermission } from "../permissions";
 import { ProductionGateStatusBadge } from "../qms/components/ProductionGateStatusBadge";
@@ -259,6 +267,10 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
     currentUser,
     "inspection_sheets.override",
   );
+  // Deadline updates write to the `projects` table (customerCommittedDeliveryDate),
+  // not the `production` module - reuses the existing projects.edit
+  // permission/RLS rather than Production's own (different) edit gate.
+  const { updateDeadline, canEditProjects } = useUpdateProjectDeadline();
 
   const {
     projects,
@@ -267,12 +279,14 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
     addStageTransaction,
     bomItems,
     inventoryItems,
+    jobCards,
   } = useStore();
 
   const {
     projectQmsInspections,
     projectQmsInspectionOverrides,
     createProjectQmsInspectionOverride,
+    stageCompletions,
   } = useQmsStore();
 
   // Which project is expanded
@@ -340,37 +354,63 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
     gate: Extract<ReturnType<typeof getStageInspectionGate>, { linked: true }>;
   } | null>(null);
 
-  // Build enriched project rows
-  const projectRows = projects.map((project) => {
-    const production = projectProductions.find(
-      (pp) => pp.projectId === project.id,
+  // Build enriched project rows — sorted by the one reusable deadline-
+  // priority rule (lib/deadlinePriority.ts): nearest customer deadline
+  // first, overdue projects surfaced ahead of everything else, no-
+  // deadline projects last, stable by createdAt on a tie. This is a
+  // sort only - the underlying `projects` set (all org projects, exactly
+  // what this page already showed before) is unchanged, so nothing that
+  // wasn't already visible here can newly appear; there is no project-
+  // level Completed/Cancelled status wired up anywhere in this codebase
+  // today for this list to filter on (only per-STAGE status exists).
+  const projectRows = projects
+    .map((project) => {
+      const production = projectProductions.find(
+        (pp) => pp.projectId === project.id,
+      );
+      const stages = production?.stages || [];
+      const isLegacy =
+        !project.productionVersion || project.productionVersion === "legacy";
+      const activeStage = stages.find(
+        (s) => s.status !== "Completed" && s.status !== "Received",
+      );
+      const completedCount = stages.filter(
+        (s) => s.status === "Completed" || s.status === "Received",
+      ).length;
+      return {
+        project,
+        production,
+        stages,
+        isLegacy,
+        activeStage,
+        completedCount,
+        totalStages: stages.length,
+      };
+    })
+    .sort((a, b) =>
+      compareByDeadlinePriority(
+        {
+          deadline: a.project.customerCommittedDeliveryDate,
+          tiebreaker: a.project.createdAt,
+        },
+        {
+          deadline: b.project.customerCommittedDeliveryDate,
+          tiebreaker: b.project.createdAt,
+        },
+      ),
     );
-    const stages = production?.stages || [];
-    const isLegacy =
-      !project.productionVersion || project.productionVersion === "legacy";
-    const activeStage = stages.find(
-      (s) => s.status !== "Completed" && s.status !== "Received",
-    );
-    const completedCount = stages.filter(
-      (s) => s.status === "Completed" || s.status === "Received",
-    ).length;
-    return {
-      project,
-      production,
-      stages,
-      isLegacy,
-      activeStage,
-      completedCount,
-      totalStages: stages.length,
-    };
-  });
 
   const totalProjects = projectRows.length;
   const inProductionCount = projectRows.filter(
     (r) => r.stages.length > 0,
   ).length;
 
-  // Production Queue — all active/in-progress stages across projects
+  // Production Queue — all active/in-progress stages across projects.
+  // Inherits the deadline-priority order from projectRows above (the
+  // owning project's deadline drives it - individual stages have no
+  // deadline field of their own), so stages of the same project stay
+  // grouped together in deadline order rather than a second, separately-
+  // computed sort.
   const productionQueue = projectRows.flatMap((r) =>
     r.stages
       .filter((s) => s.status === "InProgress" || s.status === "Sent")
@@ -743,32 +783,54 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
             </span>
           </div>
           <div className="divide-y">
-            {productionQueue.map(({ project, stage }) => (
-              <div
-                key={`${project.id}-${stage.stageName}`}
-                className="flex items-center gap-3 px-4 py-2.5"
-              >
-                <div className="flex-1 min-w-0">
-                  <span className="text-xs font-mono text-muted-foreground">
-                    {project.projectNo}
-                  </span>
-                  <span className="mx-2 text-muted-foreground">·</span>
-                  <span className="text-sm font-medium">{stage.stageName}</span>
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  {stage.requiresMaterialTracking && (
-                    <span className="text-[10px] bg-info/10 text-info border border-info/30 rounded px-1.5 py-0.5">
-                      Material
+            {productionQueue.map(({ project, stage }) => {
+              const deadlineInfo = getDeadlineInfo(
+                project.customerCommittedDeliveryDate,
+              );
+              return (
+                <div
+                  key={`${project.id}-${stage.stageName}`}
+                  className="flex items-center gap-3 px-4 py-2.5"
+                >
+                  <div className="flex-1 min-w-0">
+                    <span className="text-xs font-mono text-muted-foreground">
+                      {project.projectNo}
                     </span>
-                  )}
-                  <span
-                    className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${STAGE_STATUS_COLORS[stage.status]}`}
-                  >
-                    {STAGE_STATUS_LABELS[stage.status]}
-                  </span>
+                    <span className="mx-2 text-muted-foreground">·</span>
+                    <span className="text-sm font-medium">
+                      {stage.stageName}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {deadlineInfo.category === "overdue" && (
+                      <span className="text-[10px] font-semibold text-destructive bg-destructive/10 border border-destructive/30 rounded px-1.5 py-0.5">
+                        🔴 Overdue
+                      </span>
+                    )}
+                    {deadlineInfo.category === "due_today" && (
+                      <span className="text-[10px] font-semibold text-warning bg-warning/15 border border-warning/30 rounded px-1.5 py-0.5">
+                        🟠 Due Today
+                      </span>
+                    )}
+                    {deadlineInfo.category === "upcoming" && (
+                      <span className="text-[10px] text-muted-foreground">
+                        {formatDeadlineRelative(deadlineInfo)}
+                      </span>
+                    )}
+                    {stage.requiresMaterialTracking && (
+                      <span className="text-[10px] bg-info/10 text-info border border-info/30 rounded px-1.5 py-0.5">
+                        Material
+                      </span>
+                    )}
+                    <span
+                      className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${STAGE_STATUS_COLORS[stage.status]}`}
+                    >
+                      {STAGE_STATUS_LABELS[stage.status]}
+                    </span>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -852,6 +914,24 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                     )}
                   </div>
                 </button>
+
+                {/* Deadline row — outside the header toggle button above
+                    (DeadlineIndicator renders its own Button/Dialog, which
+                    cannot nest inside another <button>). Shown whenever
+                    this project has any production stage at all, matching
+                    the "active production work" scope this page already
+                    tracks via activeStage/totalStages above. */}
+                {totalStages > 0 && (
+                  <div className="px-4 pb-3 -mt-1">
+                    <DeadlineIndicator
+                      deadline={project.customerCommittedDeliveryDate}
+                      canEdit={canEditProjects}
+                      onUpdate={(newDate) => updateDeadline(project, newDate)}
+                      compact
+                      dataOcidPrefix={`production.project.${project.id}.deadline`}
+                    />
+                  </div>
+                )}
 
                 {/* Expanded Stage List */}
                 {isExpanded && (
@@ -942,14 +1022,48 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                           const isActive =
                             !isLocked && stage.status !== "Completed";
                           const txs = stage.transactions || [];
+                          // Scoped to ordinary vendor sends only
+                          // (sourceStageId undefined) — a stage-to-stage
+                          // transfer (source_stage_id set) is a distinct
+                          // "Downstream Consumed" figure, computed below,
+                          // and must never inflate this stage's own
+                          // external Sent/Received/Pending (design record
+                          // §12 finding — reusing type='send' for both
+                          // would otherwise corrupt this exact formula).
                           const totalSent = txs
-                            .filter((t) => t.type === "send")
+                            .filter(
+                              (t) => t.type === "send" && !t.sourceStageId,
+                            )
                             .reduce((a, t) => a + t.quantity, 0);
                           const totalReceived = txs
                             .filter((t) => t.type === "receive")
                             .reduce((a, t) => a + t.quantity, 0);
                           const pending = totalSent - totalReceived;
                           const hasRejected = (stage.rejectedQty ?? 0) > 0;
+
+                          // Production <-> Job Card <-> Quantity
+                          // integration (database/20260906060000) — only
+                          // meaningful for an in-house stage; external
+                          // stages keep using totalSent/totalReceived/
+                          // pending above, unchanged.
+                          const stageJobCards = jobCards.filter(
+                            (jc) => jc.stageId === stage.stageId,
+                          );
+                          const stageQmsCompletions = stageCompletions.filter(
+                            (c) => c.stageId === stage.stageId,
+                          );
+                          const totals =
+                            stage.stageType === "inhouse"
+                              ? computeStageProductionTotals(
+                                  stage,
+                                  stageJobCards,
+                                  stageQmsCompletions,
+                                  stages,
+                                )
+                              : null;
+                          const inProgressJobCards = stageJobCards.filter(
+                            (jc) => jc.status !== "Completed",
+                          );
 
                           const cardStyle = STAGE_CARD_STYLE[stage.status];
                           return (
@@ -1276,6 +1390,136 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                           </div>
                                         </div>
                                       )}
+                                      {/* Job Card-derived production (in-house
+                                          stages only — database/20260906060000).
+                                          Worker and QMS quantities are shown
+                                          as two separate layers, never
+                                          merged (design record §F). */}
+                                      {totals && (
+                                        <div className="space-y-2 bg-muted/30 rounded-md p-2">
+                                          <div className="flex items-center justify-between">
+                                            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">
+                                              Worker / Pre-QMS
+                                            </p>
+                                            {stage.targetQty !== undefined && (
+                                              <p className="text-[10px] text-muted-foreground">
+                                                Target: {stage.targetQty}
+                                              </p>
+                                            )}
+                                          </div>
+                                          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                                            <div className="text-center">
+                                              <div className="text-[10px] text-muted-foreground">
+                                                Processed
+                                              </div>
+                                              <div className="text-sm font-bold">
+                                                {totals.processed}
+                                              </div>
+                                            </div>
+                                            <div className="text-center">
+                                              <div className="text-[10px] text-success">
+                                                Accepted
+                                              </div>
+                                              <div className="text-sm font-bold text-success">
+                                                {totals.workerAccepted}
+                                              </div>
+                                            </div>
+                                            <div className="text-center">
+                                              <div className="text-[10px] text-destructive">
+                                                Rejected
+                                              </div>
+                                              <div className="text-sm font-bold text-destructive">
+                                                {totals.workerRejected}
+                                              </div>
+                                            </div>
+                                            <div className="text-center">
+                                              <div className="text-[10px] text-warning">
+                                                Rework
+                                              </div>
+                                              <div className="text-sm font-bold text-warning">
+                                                {totals.rework}
+                                              </div>
+                                            </div>
+                                          </div>
+                                          {stage.targetQty !== undefined && (
+                                            <p
+                                              className={`text-xs text-center font-medium ${
+                                                totals.overTarget > 0
+                                                  ? "text-warning"
+                                                  : totals.remaining === 0
+                                                    ? "text-success"
+                                                    : "text-muted-foreground"
+                                              }`}
+                                            >
+                                              {totals.overTarget > 0
+                                                ? `${totals.overTarget} over target`
+                                                : totals.remaining === 0
+                                                  ? "Target reached"
+                                                  : `Remaining: ${totals.remaining}`}
+                                            </p>
+                                          )}
+                                          {totals.qmsAccepted !== undefined && (
+                                            <div className="border-t pt-2">
+                                              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">
+                                                QMS
+                                              </p>
+                                              <div className="grid grid-cols-2 gap-2">
+                                                <div className="text-center">
+                                                  <div className="text-[10px] text-success">
+                                                    QMS Accepted
+                                                  </div>
+                                                  <div className="text-sm font-bold text-success">
+                                                    {totals.qmsAccepted}
+                                                  </div>
+                                                </div>
+                                                <div className="text-center">
+                                                  <div className="text-[10px] text-destructive">
+                                                    QMS Rejected
+                                                  </div>
+                                                  <div className="text-sm font-bold text-destructive">
+                                                    {totals.qmsRejected ?? 0}
+                                                  </div>
+                                                </div>
+                                              </div>
+                                            </div>
+                                          )}
+                                          <div className="flex items-center justify-between text-xs border-t pt-2">
+                                            <span className="text-muted-foreground">
+                                              Available for Next Stage
+                                            </span>
+                                            <span className="font-bold">
+                                              {totals.availableForNextStage}
+                                            </span>
+                                          </div>
+                                          {totals.downstreamConsumed > 0 && (
+                                            <div className="flex items-center justify-between text-xs">
+                                              <span className="text-muted-foreground">
+                                                Downstream Consumed
+                                              </span>
+                                              <span className="font-bold">
+                                                {totals.downstreamConsumed}
+                                              </span>
+                                            </div>
+                                          )}
+                                          {totals.downstreamShortfall > 0 && (
+                                            <p className="text-xs text-center font-medium text-destructive">
+                                              Shortfall:{" "}
+                                              {totals.downstreamShortfall}
+                                            </p>
+                                          )}
+                                          {inProgressJobCards.length > 0 && (
+                                            <p className="text-[10px] text-muted-foreground text-center">
+                                              {inProgressJobCards.length} Job
+                                              Card
+                                              {inProgressJobCards.length === 1
+                                                ? ""
+                                                : "s"}{" "}
+                                              planned/in progress (not yet
+                                              counted)
+                                            </p>
+                                          )}
+                                        </div>
+                                      )}
                                       {/* Transaction History */}
                                       {txs.length > 0 && (
                                         <div className="space-y-1">
@@ -1482,6 +1726,131 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                               {stage.rejectedQty ?? 0}
                                             </div>
                                           </div>
+                                        </div>
+                                      )}
+                                      {totals && (
+                                        <div className="space-y-2 bg-muted/30 rounded-md p-2">
+                                          <div className="flex items-center justify-between">
+                                            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">
+                                              Worker / Pre-QMS
+                                            </p>
+                                            {stage.targetQty !== undefined && (
+                                              <p className="text-[10px] text-muted-foreground">
+                                                Target: {stage.targetQty}
+                                              </p>
+                                            )}
+                                          </div>
+                                          <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                                            <div className="text-center">
+                                              <div className="text-[10px] text-muted-foreground">
+                                                Processed
+                                              </div>
+                                              <div className="text-sm font-bold">
+                                                {totals.processed}
+                                              </div>
+                                            </div>
+                                            <div className="text-center">
+                                              <div className="text-[10px] text-success">
+                                                Accepted
+                                              </div>
+                                              <div className="text-sm font-bold text-success">
+                                                {totals.workerAccepted}
+                                              </div>
+                                            </div>
+                                            <div className="text-center">
+                                              <div className="text-[10px] text-destructive">
+                                                Rejected
+                                              </div>
+                                              <div className="text-sm font-bold text-destructive">
+                                                {totals.workerRejected}
+                                              </div>
+                                            </div>
+                                            <div className="text-center">
+                                              <div className="text-[10px] text-warning">
+                                                Rework
+                                              </div>
+                                              <div className="text-sm font-bold text-warning">
+                                                {totals.rework}
+                                              </div>
+                                            </div>
+                                          </div>
+                                          {stage.targetQty !== undefined && (
+                                            <p
+                                              className={`text-xs text-center font-medium ${
+                                                totals.overTarget > 0
+                                                  ? "text-warning"
+                                                  : totals.remaining === 0
+                                                    ? "text-success"
+                                                    : "text-muted-foreground"
+                                              }`}
+                                            >
+                                              {totals.overTarget > 0
+                                                ? `${totals.overTarget} over target`
+                                                : totals.remaining === 0
+                                                  ? "Target reached"
+                                                  : `Remaining: ${totals.remaining}`}
+                                            </p>
+                                          )}
+                                          {totals.qmsAccepted !== undefined && (
+                                            <div className="border-t pt-2">
+                                              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-1">
+                                                QMS
+                                              </p>
+                                              <div className="grid grid-cols-2 gap-2">
+                                                <div className="text-center">
+                                                  <div className="text-[10px] text-success">
+                                                    QMS Accepted
+                                                  </div>
+                                                  <div className="text-sm font-bold text-success">
+                                                    {totals.qmsAccepted}
+                                                  </div>
+                                                </div>
+                                                <div className="text-center">
+                                                  <div className="text-[10px] text-destructive">
+                                                    QMS Rejected
+                                                  </div>
+                                                  <div className="text-sm font-bold text-destructive">
+                                                    {totals.qmsRejected ?? 0}
+                                                  </div>
+                                                </div>
+                                              </div>
+                                            </div>
+                                          )}
+                                          <div className="flex items-center justify-between text-xs border-t pt-2">
+                                            <span className="text-muted-foreground">
+                                              Available for Next Stage
+                                            </span>
+                                            <span className="font-bold">
+                                              {totals.availableForNextStage}
+                                            </span>
+                                          </div>
+                                          {totals.downstreamConsumed > 0 && (
+                                            <div className="flex items-center justify-between text-xs">
+                                              <span className="text-muted-foreground">
+                                                Downstream Consumed
+                                              </span>
+                                              <span className="font-bold">
+                                                {totals.downstreamConsumed}
+                                              </span>
+                                            </div>
+                                          )}
+                                          {totals.downstreamShortfall > 0 && (
+                                            <p className="text-xs text-center font-medium text-destructive">
+                                              Shortfall:{" "}
+                                              {totals.downstreamShortfall}
+                                            </p>
+                                          )}
+                                          {inProgressJobCards.length > 0 && (
+                                            <p className="text-[10px] text-muted-foreground text-center">
+                                              {inProgressJobCards.length} Job
+                                              Card
+                                              {inProgressJobCards.length === 1
+                                                ? ""
+                                                : "s"}{" "}
+                                              planned/in progress (not yet
+                                              counted)
+                                            </p>
+                                          )}
                                         </div>
                                       )}
                                     </div>

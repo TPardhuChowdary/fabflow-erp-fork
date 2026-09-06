@@ -26,6 +26,12 @@ import { MoreHorizontal } from "lucide-react";
 export interface RowAction {
   label: string;
   icon?: React.ComponentType<{ className?: string }>;
+  /** Given a plain () => void, not (e) => void, on purpose — every call
+   * site's handler is a simple action, never navigation itself. This
+   * component is the one place that knows it may sit inside a clickable
+   * row (§1 global record-navigation rule) and stops the click from also
+   * triggering that row's own onClick, so callers never have to remember
+   * to do it themselves. */
   onClick: () => void;
   /** Styles the action as destructive (delete, etc.) — both as a primary
    * button and inside the overflow menu. */
@@ -70,7 +76,10 @@ export function RowActions({
             action.destructive &&
               "text-destructive hover:text-destructive hover:bg-destructive/10",
           )}
-          onClick={action.onClick}
+          onClick={(e) => {
+            e.stopPropagation();
+            action.onClick();
+          }}
           disabled={action.disabled}
           data-ocid={action["data-ocid"]}
         >
@@ -87,6 +96,7 @@ export function RowActions({
               size="sm"
               className="h-7 w-7 p-0"
               aria-label="More actions"
+              onClick={(e) => e.stopPropagation()}
               data-ocid="row_actions.overflow.trigger"
             >
               <MoreHorizontal className="w-3.5 h-3.5" />
@@ -118,7 +128,10 @@ function RowActionsMenuItem({
     <>
       {separatorBefore && <DropdownMenuSeparator />}
       <DropdownMenuItem
-        onClick={action.onClick}
+        onClick={(e) => {
+          e.stopPropagation();
+          action.onClick();
+        }}
         disabled={action.disabled}
         variant={action.destructive ? "destructive" : "default"}
         data-ocid={action["data-ocid"]}

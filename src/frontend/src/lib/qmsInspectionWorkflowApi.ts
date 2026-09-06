@@ -86,12 +86,30 @@ class SupabaseTableRepo<T extends { id: string }, Row extends { id: string }> {
     private indexColumn?: string,
   ) {}
 
+  // Gap-closure fix — a single unbounded .select() here silently truncated
+  // at Supabase's default max-rows (confirmed live on an unrelated table:
+  // 2,506 real rows returned only 1,000, no error). Pages through with
+  // .range() until a page comes back short, so getAll() always returns
+  // every row regardless of table size — same {throw on error} contract
+  // as before, just never silently incomplete.
   async getAll(): Promise<T[]> {
     const client = getSupabase();
-    const { data, error } = await client.from(this.table).select(this.columns);
-    if (error)
-      throw new Error(`[${this.table}] getAll failed: ${error.message}`);
-    return ((data as unknown as Row[]) ?? []).map(this.rowToEntity);
+    const pageSize = 1000;
+    const all: Row[] = [];
+    let from = 0;
+    for (;;) {
+      const { data, error } = await client
+        .from(this.table)
+        .select(this.columns)
+        .range(from, from + pageSize - 1);
+      if (error)
+        throw new Error(`[${this.table}] getAll failed: ${error.message}`);
+      const page = (data as unknown as Row[]) ?? [];
+      all.push(...page);
+      if (page.length < pageSize) break;
+      from += pageSize;
+    }
+    return all.map(this.rowToEntity);
   }
 
   async getById(id: string): Promise<T | undefined> {
@@ -145,15 +163,25 @@ class SupabaseTableRepo<T extends { id: string }, Row extends { id: string }> {
       throw new Error(`[${this.table}] has no queryByIndex column configured`);
     }
     const client = getSupabase();
-    const { data, error } = await client
-      .from(this.table)
-      .select(this.columns)
-      .eq(this.indexColumn, String(value));
-    if (error)
-      throw new Error(
-        `[${this.table}] queryByIndex(${indexName}) failed: ${error.message}`,
-      );
-    return ((data as unknown as Row[]) ?? []).map(this.rowToEntity);
+    const pageSize = 1000;
+    const all: Row[] = [];
+    let from = 0;
+    for (;;) {
+      const { data, error } = await client
+        .from(this.table)
+        .select(this.columns)
+        .eq(this.indexColumn, String(value))
+        .range(from, from + pageSize - 1);
+      if (error)
+        throw new Error(
+          `[${this.table}] queryByIndex(${indexName}) failed: ${error.message}`,
+        );
+      const page = (data as unknown as Row[]) ?? [];
+      all.push(...page);
+      if (page.length < pageSize) break;
+      from += pageSize;
+    }
+    return all.map(this.rowToEntity);
   }
 
   async count(): Promise<number> {
@@ -525,16 +553,29 @@ function rowToDocument(row: InspectionDocumentRow): InspectionDocument {
 }
 
 export const inspectionDocumentRepoSupabase = {
+  // Gap-closure fix — same silent-truncation risk as every other unbounded
+  // .select() found in this codebase; paged with .range() for the same
+  // reason (see hydration.ts's fetchAllRows comment for the full story).
   async getAll(): Promise<InspectionDocument[]> {
     const client = getSupabase();
-    const { data, error } = await client
-      .from("inspection_documents")
-      .select(INSPECTION_DOCUMENT_COLUMNS);
-    if (error)
-      throw new Error(`[inspection_documents] getAll failed: ${error.message}`);
-    return ((data as unknown as InspectionDocumentRow[]) ?? []).map(
-      rowToDocument,
-    );
+    const pageSize = 1000;
+    const all: InspectionDocumentRow[] = [];
+    let from = 0;
+    for (;;) {
+      const { data, error } = await client
+        .from("inspection_documents")
+        .select(INSPECTION_DOCUMENT_COLUMNS)
+        .range(from, from + pageSize - 1);
+      if (error)
+        throw new Error(
+          `[inspection_documents] getAll failed: ${error.message}`,
+        );
+      const page = (data as unknown as InspectionDocumentRow[]) ?? [];
+      all.push(...page);
+      if (page.length < pageSize) break;
+      from += pageSize;
+    }
+    return all.map(rowToDocument);
   },
 
   async getById(id: string): Promise<InspectionDocument | undefined> {
@@ -635,17 +676,25 @@ export const inspectionDocumentRepoSupabase = {
     value: IDBValidKey,
   ): Promise<InspectionDocument[]> {
     const client = getSupabase();
-    const { data, error } = await client
-      .from("inspection_documents")
-      .select(INSPECTION_DOCUMENT_COLUMNS)
-      .eq("sheet_id", String(value));
-    if (error)
-      throw new Error(
-        `[inspection_documents] queryByIndex(${indexName}) failed: ${error.message}`,
-      );
-    return ((data as unknown as InspectionDocumentRow[]) ?? []).map(
-      rowToDocument,
-    );
+    const pageSize = 1000;
+    const all: InspectionDocumentRow[] = [];
+    let from = 0;
+    for (;;) {
+      const { data, error } = await client
+        .from("inspection_documents")
+        .select(INSPECTION_DOCUMENT_COLUMNS)
+        .eq("sheet_id", String(value))
+        .range(from, from + pageSize - 1);
+      if (error)
+        throw new Error(
+          `[inspection_documents] queryByIndex(${indexName}) failed: ${error.message}`,
+        );
+      const page = (data as unknown as InspectionDocumentRow[]) ?? [];
+      all.push(...page);
+      if (page.length < pageSize) break;
+      from += pageSize;
+    }
+    return all.map(rowToDocument);
   },
 
   async count(): Promise<number> {

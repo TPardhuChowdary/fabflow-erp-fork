@@ -13,6 +13,7 @@ import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
 import type { InventoryPurchase } from "@/types";
 import {
   INVENTORY_PURCHASE_COLUMNS,
+  fetchAllRows,
   transformInventoryPurchaseRow,
 } from "./hydration";
 import type { InventoryPurchaseRow } from "./hydration";
@@ -122,22 +123,40 @@ async function reconcileInventoryItemStock(
   client: ReturnType<typeof getSupabase>,
   inventoryItemId: string,
 ): Promise<WriteResult<never>> {
-  const { data: purchases, error: purchasesError } = await client
-    .from("inventory_purchases")
-    .select("quantity")
-    .eq("inventory_item_id", inventoryItemId);
+  // Gap-closure fix — both were single unbounded .select()s. A display
+  // list truncating at 1,000 is a UI gap; this one feeds a stock
+  // *reconciliation sum* (see the file comment above), so a truncated read
+  // here would silently compute the wrong on-hand quantity for any
+  // long-lived, high-turnover item once its purchase/usage history passes
+  // 1,000 rows - worth the same .range() paging as everything else.
+  const { data: purchases, error: purchasesError } = await fetchAllRows<{
+    quantity: number | null;
+  }>((from, to) =>
+    client
+      .from("inventory_purchases")
+      .select("quantity")
+      .eq("inventory_item_id", inventoryItemId)
+      .range(from, to),
+  );
   if (purchasesError) return { status: "error", error: purchasesError.message };
-  const { data: usages, error: usagesError } = await client
-    .from("inventory_usages")
-    .select("quantity_used")
-    .eq("inventory_item_id", inventoryItemId);
+  const { data: usages, error: usagesError } = await fetchAllRows<{
+    quantity_used: number | null;
+  }>((from, to) =>
+    client
+      .from("inventory_usages")
+      .select("quantity_used")
+      .eq("inventory_item_id", inventoryItemId)
+      .range(from, to),
+  );
   if (usagesError) return { status: "error", error: usagesError.message };
-  const totalPurchased = (
-    (purchases as unknown as { quantity: number | null }[]) ?? []
-  ).reduce((sum, p) => sum + (p.quantity ?? 0), 0);
-  const totalUsed = (
-    (usages as unknown as { quantity_used: number | null }[]) ?? []
-  ).reduce((sum, u) => sum + (u.quantity_used ?? 0), 0);
+  const totalPurchased = (purchases ?? []).reduce(
+    (sum, p) => sum + (p.quantity ?? 0),
+    0,
+  );
+  const totalUsed = (usages ?? []).reduce(
+    (sum, u) => sum + (u.quantity_used ?? 0),
+    0,
+  );
   const newStock = Math.max(0, totalPurchased - totalUsed);
   const { data, error } = await client
     .from("inventory_items")

@@ -1,6 +1,11 @@
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import {
   Dialog,
   DialogContent,
   DialogFooter,
@@ -16,6 +21,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -25,6 +31,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  ChevronDown,
   Edit2,
   Loader2,
   Plus,
@@ -112,7 +119,22 @@ export function Employees({ onViewEmployee }: Props) {
     tempStartDate: "",
     tempEndDate: "",
     dailyWageRate: "",
+    // Simplified employee creation — login is a separate, optional
+    // concern from the employee record itself (createEmployeeRemote
+    // never touches auth; createOrgUser is the one real account-
+    // provisioning path, called only when this is true). Defaults to
+    // true so existing behavior is unchanged unless an admin explicitly
+    // opts a worker out of having a login.
+    requiresLogin: true,
   });
+  // Daily Wage-only: collapses Photo/Phone/Joining Date/Designation/
+  // Blood Group/Emergency Contact behind "More details" so the common
+  // case (a worker who just needs a name, role, and daily rate) isn't
+  // buried under fields that don't apply. These fields are never removed
+  // or made unreadable — just collapsed by default for this one
+  // employment type; every other type keeps today's full, always-visible
+  // form exactly as it is.
+  const [showMoreDetails, setShowMoreDetails] = useState(false);
   const [editForm, setEditForm] = useState({
     name: "",
     phone: "",
@@ -190,11 +212,16 @@ export function Employees({ onViewEmployee }: Props) {
   const handleSave = async () => {
     const errors: Record<string, string> = {};
     if (!form.name.trim()) errors.name = "Name is required";
-    if (!form.username.trim()) errors.username = "Username is required";
-    if (!form.password.trim()) {
-      errors.password = "Temporary password is required";
-    } else if (form.password.trim().length < 8) {
-      errors.password = "Temporary password must be at least 8 characters";
+    // Username/password are only meaningful — and only required — when
+    // this employee actually needs a FabFlow login. A Daily Wage worker
+    // with no phone/login is a legitimate employee record on its own.
+    if (form.requiresLogin) {
+      if (!form.username.trim()) errors.username = "Username is required";
+      if (!form.password.trim()) {
+        errors.password = "Temporary password is required";
+      } else if (form.password.trim().length < 8) {
+        errors.password = "Temporary password must be at least 8 characters";
+      }
     }
     if (form.joiningDate && form.joiningDate > MAX_JOINING_DATE) {
       errors.joiningDate = "Joining date can't be more than a year out";
@@ -247,7 +274,15 @@ export function Employees({ onViewEmployee }: Props) {
       phone: form.phone.trim(),
       role: form.role,
       monthlySalary: Number.parseFloat(form.monthlySalary) || 0,
-      joiningDate: form.joiningDate,
+      // employees.joining_date is a NOT NULL date column (confirmed live
+      // — pre-existing, not something this pass changed) with no valid
+      // "empty" representation, unlike phone (''), monthly_salary (0), or
+      // the nullable optional fields below. Now that this field can be
+      // left blank (collapsed for Daily Wage), default it to today —
+      // exactly as reasonable a default as the day the record was
+      // actually created, and consistent with this same "never send a
+      // blank required value" convention every other field here follows.
+      joiningDate: form.joiningDate || new Date().toISOString().slice(0, 10),
       // No DB representation for userId - left unset here, filled in
       // below from the real Supabase Auth account created via
       // createOrgUser() (same provisioning path as Settings -> Users;
@@ -296,27 +331,36 @@ export function Employees({ onViewEmployee }: Props) {
     // no clean way to "roll back" a Supabase Auth account, so a saved
     // employee with no login yet is the correct failure mode, not a
     // silently-created local-only account - see settingsUsersApi.ts).
-    const accountResult = await createOrgUser(
-      form.username.trim(),
-      form.password.trim(),
-      form.role,
-      newEmp.id,
-    );
-    if (accountResult.status === "success" && accountResult.data) {
-      newEmp.userId = accountResult.data.id;
-      if (accountResult.data.employeeLinkError) {
+    // Skipped entirely when this employee doesn't need a login (e.g. a
+    // Daily Wage worker with no phone) - no fake/placeholder credentials
+    // are ever generated, and no Supabase Auth user is created for them.
+    if (form.requiresLogin) {
+      const accountResult = await createOrgUser(
+        form.username.trim(),
+        form.password.trim(),
+        form.role,
+        newEmp.id,
+      );
+      if (accountResult.status === "success" && accountResult.data) {
+        newEmp.userId = accountResult.data.id;
+        if (accountResult.data.employeeLinkError) {
+          toast.error(
+            `Login account created, but could not be linked to this employee: ${accountResult.data.employeeLinkError}`,
+          );
+        }
+      } else {
         toast.error(
-          `Login account created, but could not be linked to this employee: ${accountResult.data.employeeLinkError}`,
+          `Employee saved, but the login account could not be created: ${accountResult.error ?? "unknown error"}. You can create it separately from Settings → Users.`,
         );
       }
-    } else {
-      toast.error(
-        `Employee saved, but the login account could not be created: ${accountResult.error ?? "unknown error"}. You can create it separately from Settings → Users.`,
-      );
     }
 
     addEmployee(newEmp);
-    toast.success(`Employee ${newEmp.name} added`);
+    toast.success(
+      form.requiresLogin
+        ? `Employee ${newEmp.name} added`
+        : `Employee ${newEmp.name} added (no login)`,
+    );
     setDialogOpen(false);
     setPhotoFile(null);
     if (photoPreview) URL.revokeObjectURL(photoPreview);
@@ -338,7 +382,9 @@ export function Employees({ onViewEmployee }: Props) {
       tempStartDate: "",
       tempEndDate: "",
       dailyWageRate: "",
+      requiresLogin: true,
     });
+    setShowMoreDetails(false);
   };
 
   const openEditDialog = (emp: Employee) => {
@@ -539,7 +585,12 @@ export function Employees({ onViewEmployee }: Props) {
             </TableHeader>
             <TableBody>
               {employees.map((emp, i) => (
-                <TableRow key={emp.id} data-ocid={`employees.item.${i + 1}`}>
+                <TableRow
+                  key={emp.id}
+                  className="cursor-pointer hover:bg-muted/40"
+                  onClick={() => onViewEmployee(emp.id)}
+                  data-ocid={`employees.item.${i + 1}`}
+                >
                   <TableCell className="w-10">
                     <Avatar className="h-8 w-8">
                       <AvatarImage src={emp.photoRef} alt={emp.name} />
@@ -549,7 +600,17 @@ export function Employees({ onViewEmployee }: Props) {
                     </Avatar>
                   </TableCell>
                   <TableCell className="text-sm font-medium">
-                    {emp.name}
+                    <button
+                      type="button"
+                      className="hover:underline focus-visible:underline"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onViewEmployee(emp.id);
+                      }}
+                      data-ocid={`employees.open_button.${i + 1}`}
+                    >
+                      {emp.name}
+                    </button>
                   </TableCell>
                   <TableCell>
                     <span
@@ -577,21 +638,15 @@ export function Employees({ onViewEmployee }: Props) {
                   </TableCell>
                   <TableCell>
                     <div className="flex gap-1">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="h-7 px-2 text-xs"
-                        onClick={() => onViewEmployee(emp.id)}
-                        data-ocid={`employees.view_button.${i + 1}`}
-                      >
-                        View
-                      </Button>
                       {pEdit && (
                         <Button
                           variant="ghost"
                           size="sm"
                           className="h-7 px-2"
-                          onClick={() => openEditDialog(emp)}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openEditDialog(emp);
+                          }}
                           data-ocid={`employees.edit_button.${i + 1}`}
                           title="Edit employee"
                         >
@@ -603,7 +658,8 @@ export function Employees({ onViewEmployee }: Props) {
                           variant="ghost"
                           size="sm"
                           className="h-7 px-2"
-                          onClick={() => {
+                          onClick={(e) => {
+                            e.stopPropagation();
                             // Same local-only guard the store's own
                             // deleteEmployee() already enforces, checked
                             // first so a blocked delete never even offers
@@ -657,38 +713,42 @@ export function Employees({ onViewEmployee }: Props) {
           </DialogHeader>
           <form onSubmit={handleSubmit}>
             <div className="space-y-4 py-2">
-              {/* Photo upload */}
-              <div className="space-y-1.5">
-                <Label>Profile Photo (JPG/PNG)</Label>
-                <div className="flex items-center gap-3">
-                  <Avatar className="h-14 w-14">
-                    <AvatarImage
-                      src={photoPreview ?? undefined}
-                      alt="Preview"
+              {/* Photo upload — collapsed into "More details" for Daily
+                  Wage (see below); shown up front for every other
+                  employment type exactly as before. */}
+              {form.employmentType !== "Daily Wage" && (
+                <div className="space-y-1.5">
+                  <Label>Profile Photo (JPG/PNG)</Label>
+                  <div className="flex items-center gap-3">
+                    <Avatar className="h-14 w-14">
+                      <AvatarImage
+                        src={photoPreview ?? undefined}
+                        alt="Preview"
+                      />
+                      <AvatarFallback>
+                        <UserCircle2 className="h-7 w-7 text-muted-foreground" />
+                      </AvatarFallback>
+                    </Avatar>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => fileInputRef.current?.click()}
+                      data-ocid="employees.upload_button"
+                    >
+                      <Upload className="w-3.5 h-3.5 mr-1.5" />
+                      {photoFile ? "Change Photo" : "Upload Photo"}
+                    </Button>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/jpg,image/jpeg,image/png"
+                      className="hidden"
+                      onChange={handlePhotoChange}
                     />
-                    <AvatarFallback>
-                      <UserCircle2 className="h-7 w-7 text-muted-foreground" />
-                    </AvatarFallback>
-                  </Avatar>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => fileInputRef.current?.click()}
-                    data-ocid="employees.upload_button"
-                  >
-                    <Upload className="w-3.5 h-3.5 mr-1.5" />
-                    {photoFile ? "Change Photo" : "Upload Photo"}
-                  </Button>
-                  <input
-                    ref={fileInputRef}
-                    type="file"
-                    accept="image/jpg,image/jpeg,image/png"
-                    className="hidden"
-                    onChange={handlePhotoChange}
-                  />
+                  </div>
                 </div>
-              </div>
+              )}
 
               <div className="form-grid">
                 <div className="space-y-1.5 col-span-2">
@@ -711,17 +771,6 @@ export function Employees({ onViewEmployee }: Props) {
                   )}
                 </div>
                 <div className="space-y-1.5">
-                  <Label>Phone</Label>
-                  <Input
-                    placeholder="9876543210"
-                    value={form.phone}
-                    onChange={(e) =>
-                      setForm((f) => ({ ...f, phone: e.target.value }))
-                    }
-                    data-ocid="employees.input"
-                  />
-                </div>
-                <div className="space-y-1.5">
                   <Label>Role *</Label>
                   <Select
                     value={form.role}
@@ -737,112 +786,6 @@ export function Employees({ onViewEmployee }: Props) {
                       <SelectItem value="Accountant">Accountant</SelectItem>
                       <SelectItem value="Designer">Designer</SelectItem>
                       <SelectItem value="Worker">Worker</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1.5">
-                  <Label>Monthly Salary (₹)</Label>
-                  <Input
-                    type="number"
-                    placeholder="25000"
-                    value={form.monthlySalary}
-                    onChange={(e) =>
-                      setForm((f) => ({ ...f, monthlySalary: e.target.value }))
-                    }
-                    data-ocid="employees.input"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>Joining Date</Label>
-                  <Input
-                    type="date"
-                    max={MAX_JOINING_DATE}
-                    value={form.joiningDate}
-                    onChange={(e) => {
-                      setForm((f) => ({ ...f, joiningDate: e.target.value }));
-                      setFormErrors((p) => ({ ...p, joiningDate: "" }));
-                    }}
-                    className={
-                      formErrors.joiningDate ? "border-destructive" : ""
-                    }
-                    aria-invalid={!!formErrors.joiningDate}
-                    data-ocid="employees.input"
-                  />
-                  {formErrors.joiningDate && (
-                    <p className="text-xs text-destructive">
-                      {formErrors.joiningDate}
-                    </p>
-                  )}
-                </div>
-                <div className="space-y-1.5">
-                  <Label>Username *</Label>
-                  <Input
-                    placeholder="login username"
-                    value={form.username}
-                    onChange={(e) => {
-                      setForm((f) => ({ ...f, username: e.target.value }));
-                      setFormErrors((p) => ({ ...p, username: "" }));
-                    }}
-                    className={formErrors.username ? "border-destructive" : ""}
-                    aria-invalid={!!formErrors.username}
-                    data-ocid="employees.input"
-                  />
-                  {formErrors.username && (
-                    <p className="text-xs text-destructive">
-                      {formErrors.username}
-                    </p>
-                  )}
-                </div>
-                <div className="space-y-1.5">
-                  <Label>Temporary Password *</Label>
-                  <Input
-                    type="password"
-                    placeholder="At least 8 characters"
-                    value={form.password}
-                    onChange={(e) => {
-                      setForm((f) => ({ ...f, password: e.target.value }));
-                      setFormErrors((p) => ({ ...p, password: "" }));
-                    }}
-                    className={formErrors.password ? "border-destructive" : ""}
-                    aria-invalid={!!formErrors.password}
-                    data-ocid="employees.input"
-                  />
-                  {formErrors.password && (
-                    <p className="text-xs text-destructive">
-                      {formErrors.password}
-                    </p>
-                  )}
-                </div>
-                <div className="space-y-1.5">
-                  <Label>Designation</Label>
-                  <Input
-                    placeholder="e.g. Senior Fabricator"
-                    value={form.designation}
-                    onChange={(e) =>
-                      setForm((f) => ({ ...f, designation: e.target.value }))
-                    }
-                    data-ocid="employees.input"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>Blood Group</Label>
-                  <Select
-                    value={form.bloodGroup}
-                    onValueChange={(v) =>
-                      setForm((f) => ({ ...f, bloodGroup: v }))
-                    }
-                  >
-                    <SelectTrigger data-ocid="employees.select">
-                      <SelectValue placeholder="Select blood group" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"].map(
-                        (bg) => (
-                          <SelectItem key={bg} value={bg}>
-                            {bg}
-                          </SelectItem>
-                        ),
-                      )}
                     </SelectContent>
                   </Select>
                 </div>
@@ -867,6 +810,83 @@ export function Employees({ onViewEmployee }: Props) {
                     </SelectContent>
                   </Select>
                 </div>
+
+                {/* Daily Wage: only the wage rate — Monthly Salary does
+                    not apply and would only distract here (§2D). Every
+                    other employment type keeps Phone/Monthly Salary/
+                    Joining Date exactly where they've always been. */}
+                {form.employmentType === "Daily Wage" ? (
+                  <div className="space-y-1.5">
+                    <Label>Daily Wage Rate (₹) *</Label>
+                    <Input
+                      type="number"
+                      placeholder="800"
+                      value={form.dailyWageRate}
+                      onChange={(e) =>
+                        setForm((f) => ({
+                          ...f,
+                          dailyWageRate: e.target.value,
+                        }))
+                      }
+                      data-ocid="employees.form.daily_wage_rate.input"
+                    />
+                  </div>
+                ) : (
+                  <>
+                    <div className="space-y-1.5">
+                      <Label>Phone</Label>
+                      <Input
+                        placeholder="9876543210"
+                        value={form.phone}
+                        onChange={(e) =>
+                          setForm((f) => ({ ...f, phone: e.target.value }))
+                        }
+                        data-ocid="employees.input"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Monthly Salary (₹)</Label>
+                      <Input
+                        type="number"
+                        placeholder="25000"
+                        value={form.monthlySalary}
+                        onChange={(e) =>
+                          setForm((f) => ({
+                            ...f,
+                            monthlySalary: e.target.value,
+                          }))
+                        }
+                        data-ocid="employees.input"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Joining Date</Label>
+                      <Input
+                        type="date"
+                        max={MAX_JOINING_DATE}
+                        value={form.joiningDate}
+                        onChange={(e) => {
+                          setForm((f) => ({
+                            ...f,
+                            joiningDate: e.target.value,
+                          }));
+                          setFormErrors((p) => ({ ...p, joiningDate: "" }));
+                        }}
+                        className={
+                          formErrors.joiningDate ? "border-destructive" : ""
+                        }
+                        aria-invalid={!!formErrors.joiningDate}
+                        data-ocid="employees.input"
+                      />
+                      {formErrors.joiningDate && (
+                        <p className="text-xs text-destructive">
+                          {formErrors.joiningDate}
+                        </p>
+                      )}
+                    </div>
+                  </>
+                )}
+
                 {form.employmentType === "Temporary" && (
                   <>
                     <div className="space-y-1.5">
@@ -899,70 +919,367 @@ export function Employees({ onViewEmployee }: Props) {
                     </div>
                   </>
                 )}
-                {form.employmentType === "Daily Wage" && (
+              </div>
+
+              {/* Login is a separate concern from the employee record
+                  itself — createEmployeeRemote never touches auth, and
+                  createOrgUser (the existing, only real account-
+                  provisioning path) only runs when this is on. Defaults
+                  to on so nothing changes unless explicitly turned off. */}
+              <div className="rounded-md border p-3 space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <Label>Login Required?</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Off = employee record only, no FabFlow username/ password.
+                      Can be added later from Settings → Users.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={form.requiresLogin}
+                    onCheckedChange={(v) =>
+                      setForm((f) => ({
+                        ...f,
+                        requiresLogin: v,
+                        ...(v ? {} : { username: "", password: "" }),
+                      }))
+                    }
+                    data-ocid="employees.form.requires_login.switch"
+                  />
+                </div>
+                {form.requiresLogin && (
+                  <div className="form-grid">
+                    <div className="space-y-1.5">
+                      <Label>Username *</Label>
+                      <Input
+                        placeholder="login username"
+                        value={form.username}
+                        onChange={(e) => {
+                          setForm((f) => ({
+                            ...f,
+                            username: e.target.value,
+                          }));
+                          setFormErrors((p) => ({ ...p, username: "" }));
+                        }}
+                        className={
+                          formErrors.username ? "border-destructive" : ""
+                        }
+                        aria-invalid={!!formErrors.username}
+                        data-ocid="employees.input"
+                      />
+                      {formErrors.username && (
+                        <p className="text-xs text-destructive">
+                          {formErrors.username}
+                        </p>
+                      )}
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>Temporary Password *</Label>
+                      <Input
+                        type="password"
+                        placeholder="At least 8 characters"
+                        value={form.password}
+                        onChange={(e) => {
+                          setForm((f) => ({
+                            ...f,
+                            password: e.target.value,
+                          }));
+                          setFormErrors((p) => ({ ...p, password: "" }));
+                        }}
+                        className={
+                          formErrors.password ? "border-destructive" : ""
+                        }
+                        aria-invalid={!!formErrors.password}
+                        data-ocid="employees.input"
+                      />
+                      {formErrors.password && (
+                        <p className="text-xs text-destructive">
+                          {formErrors.password}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Designation/Blood Group/Emergency Contact — and, for
+                  Daily Wage only, Phone/Joining Date too (hidden from the
+                  main grid above) — collapsed behind "More details" only
+                  for Daily Wage; every other employment type keeps them
+                  visible exactly as before. Nothing here is removed, only
+                  de-emphasized for the one employment type that doesn't
+                  usually need it up front. */}
+              {form.employmentType === "Daily Wage" ? (
+                <Collapsible
+                  open={showMoreDetails}
+                  onOpenChange={setShowMoreDetails}
+                >
+                  <CollapsibleTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="w-full justify-between px-0"
+                      data-ocid="employees.form.more_details.trigger"
+                    >
+                      More details (optional)
+                      <ChevronDown
+                        className={`w-4 h-4 transition-transform ${showMoreDetails ? "rotate-180" : ""}`}
+                      />
+                    </Button>
+                  </CollapsibleTrigger>
+                  <CollapsibleContent className="space-y-4 pt-2">
+                    <div className="space-y-1.5">
+                      <Label>Profile Photo (JPG/PNG)</Label>
+                      <div className="flex items-center gap-3">
+                        <Avatar className="h-14 w-14">
+                          <AvatarImage
+                            src={photoPreview ?? undefined}
+                            alt="Preview"
+                          />
+                          <AvatarFallback>
+                            <UserCircle2 className="h-7 w-7 text-muted-foreground" />
+                          </AvatarFallback>
+                        </Avatar>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => fileInputRef.current?.click()}
+                          data-ocid="employees.upload_button"
+                        >
+                          <Upload className="w-3.5 h-3.5 mr-1.5" />
+                          {photoFile ? "Change Photo" : "Upload Photo"}
+                        </Button>
+                        <input
+                          ref={fileInputRef}
+                          type="file"
+                          accept="image/jpg,image/jpeg,image/png"
+                          className="hidden"
+                          onChange={handlePhotoChange}
+                        />
+                      </div>
+                    </div>
+                    <div className="form-grid">
+                      <div className="space-y-1.5">
+                        <Label>Phone</Label>
+                        <Input
+                          placeholder="9876543210"
+                          value={form.phone}
+                          onChange={(e) =>
+                            setForm((f) => ({ ...f, phone: e.target.value }))
+                          }
+                          data-ocid="employees.input"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Joining Date</Label>
+                        <Input
+                          type="date"
+                          max={MAX_JOINING_DATE}
+                          value={form.joiningDate}
+                          onChange={(e) => {
+                            setForm((f) => ({
+                              ...f,
+                              joiningDate: e.target.value,
+                            }));
+                            setFormErrors((p) => ({
+                              ...p,
+                              joiningDate: "",
+                            }));
+                          }}
+                          className={
+                            formErrors.joiningDate ? "border-destructive" : ""
+                          }
+                          aria-invalid={!!formErrors.joiningDate}
+                          data-ocid="employees.input"
+                        />
+                        {formErrors.joiningDate && (
+                          <p className="text-xs text-destructive">
+                            {formErrors.joiningDate}
+                          </p>
+                        )}
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Designation</Label>
+                        <Input
+                          placeholder="e.g. Senior Fabricator"
+                          value={form.designation}
+                          onChange={(e) =>
+                            setForm((f) => ({
+                              ...f,
+                              designation: e.target.value,
+                            }))
+                          }
+                          data-ocid="employees.input"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Blood Group</Label>
+                        <Select
+                          value={form.bloodGroup}
+                          onValueChange={(v) =>
+                            setForm((f) => ({ ...f, bloodGroup: v }))
+                          }
+                        >
+                          <SelectTrigger data-ocid="employees.select">
+                            <SelectValue placeholder="Select blood group" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {[
+                              "A+",
+                              "A-",
+                              "B+",
+                              "B-",
+                              "AB+",
+                              "AB-",
+                              "O+",
+                              "O-",
+                            ].map((bg) => (
+                              <SelectItem key={bg} value={bg}>
+                                {bg}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-1.5 col-span-2 pt-1">
+                        <Label className="text-xs text-muted-foreground uppercase tracking-wide">
+                          Emergency Contact
+                        </Label>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Contact Name</Label>
+                        <Input
+                          placeholder="e.g. Sunita Sharma"
+                          value={form.emergencyContactName}
+                          onChange={(e) =>
+                            setForm((f) => ({
+                              ...f,
+                              emergencyContactName: e.target.value,
+                            }))
+                          }
+                          data-ocid="employees.input"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Relationship</Label>
+                        <Input
+                          placeholder="e.g. Spouse"
+                          value={form.emergencyContactRelation}
+                          onChange={(e) =>
+                            setForm((f) => ({
+                              ...f,
+                              emergencyContactRelation: e.target.value,
+                            }))
+                          }
+                          data-ocid="employees.input"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Emergency Phone</Label>
+                        <Input
+                          placeholder="9876543210"
+                          value={form.emergencyContactPhone}
+                          onChange={(e) =>
+                            setForm((f) => ({
+                              ...f,
+                              emergencyContactPhone: e.target.value,
+                            }))
+                          }
+                          data-ocid="employees.input"
+                        />
+                      </div>
+                    </div>
+                  </CollapsibleContent>
+                </Collapsible>
+              ) : (
+                <div className="form-grid">
                   <div className="space-y-1.5">
-                    <Label>Daily Wage Rate (₹)</Label>
+                    <Label>Designation</Label>
                     <Input
-                      type="number"
-                      value={form.dailyWageRate}
+                      placeholder="e.g. Senior Fabricator"
+                      value={form.designation}
                       onChange={(e) =>
                         setForm((f) => ({
                           ...f,
-                          dailyWageRate: e.target.value,
+                          designation: e.target.value,
                         }))
                       }
-                      data-ocid="employees.form.daily_wage_rate.input"
+                      data-ocid="employees.input"
                     />
                   </div>
-                )}
-                <div className="space-y-1.5 col-span-2 pt-1">
-                  <Label className="text-xs text-muted-foreground uppercase tracking-wide">
-                    Emergency Contact
-                  </Label>
+                  <div className="space-y-1.5">
+                    <Label>Blood Group</Label>
+                    <Select
+                      value={form.bloodGroup}
+                      onValueChange={(v) =>
+                        setForm((f) => ({ ...f, bloodGroup: v }))
+                      }
+                    >
+                      <SelectTrigger data-ocid="employees.select">
+                        <SelectValue placeholder="Select blood group" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-"].map(
+                          (bg) => (
+                            <SelectItem key={bg} value={bg}>
+                              {bg}
+                            </SelectItem>
+                          ),
+                        )}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1.5 col-span-2 pt-1">
+                    <Label className="text-xs text-muted-foreground uppercase tracking-wide">
+                      Emergency Contact
+                    </Label>
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Contact Name</Label>
+                    <Input
+                      placeholder="e.g. Sunita Sharma"
+                      value={form.emergencyContactName}
+                      onChange={(e) =>
+                        setForm((f) => ({
+                          ...f,
+                          emergencyContactName: e.target.value,
+                        }))
+                      }
+                      data-ocid="employees.input"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Relationship</Label>
+                    <Input
+                      placeholder="e.g. Spouse"
+                      value={form.emergencyContactRelation}
+                      onChange={(e) =>
+                        setForm((f) => ({
+                          ...f,
+                          emergencyContactRelation: e.target.value,
+                        }))
+                      }
+                      data-ocid="employees.input"
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label>Emergency Phone</Label>
+                    <Input
+                      placeholder="9876543210"
+                      value={form.emergencyContactPhone}
+                      onChange={(e) =>
+                        setForm((f) => ({
+                          ...f,
+                          emergencyContactPhone: e.target.value,
+                        }))
+                      }
+                      data-ocid="employees.input"
+                    />
+                  </div>
                 </div>
-                <div className="space-y-1.5">
-                  <Label>Contact Name</Label>
-                  <Input
-                    placeholder="e.g. Sunita Sharma"
-                    value={form.emergencyContactName}
-                    onChange={(e) =>
-                      setForm((f) => ({
-                        ...f,
-                        emergencyContactName: e.target.value,
-                      }))
-                    }
-                    data-ocid="employees.input"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>Relationship</Label>
-                  <Input
-                    placeholder="e.g. Spouse"
-                    value={form.emergencyContactRelation}
-                    onChange={(e) =>
-                      setForm((f) => ({
-                        ...f,
-                        emergencyContactRelation: e.target.value,
-                      }))
-                    }
-                    data-ocid="employees.input"
-                  />
-                </div>
-                <div className="space-y-1.5">
-                  <Label>Emergency Phone</Label>
-                  <Input
-                    placeholder="9876543210"
-                    value={form.emergencyContactPhone}
-                    onChange={(e) =>
-                      setForm((f) => ({
-                        ...f,
-                        emergencyContactPhone: e.target.value,
-                      }))
-                    }
-                    data-ocid="employees.input"
-                  />
-                </div>
-              </div>
+              )}
             </div>
             <DialogFooter>
               <Button

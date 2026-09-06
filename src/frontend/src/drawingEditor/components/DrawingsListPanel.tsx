@@ -133,6 +133,16 @@ interface Props {
    * unset for the full, filterable global editor list. */
   focusedProjectId?: string;
   focusedMachineId?: string;
+  /** Same "hard-scope, no filter UI" behavior as focusedProjectId/
+   * focusedMachineId, generalized for entities that can only ever be a
+   * drawing_links target (never a drawings.owner_type) — Die today, Tool/
+   * Inventory Item once their own detail workspaces exist. Kept separate
+   * from focusedProjectId/focusedMachineId rather than folding those into
+   * this shape too, so the existing, tested project/machine behavior
+   * (which also matches drawings.owner_type, not just links) stays
+   * untouched. */
+  focusedLinkedType?: DrawingLink["linkedType"];
+  focusedLinkedId?: string;
   /** Seeds the filter when not focused (e.g. the remembered last owner). */
   initialOwnerType?: OwnerType;
   initialOwnerId?: string;
@@ -166,15 +176,20 @@ export function DrawingsListPanel({
   previewLabel = "Preview",
   focusedProjectId,
   focusedMachineId,
+  focusedLinkedType,
+  focusedLinkedId,
   initialOwnerType,
   initialOwnerId,
   onOwnerFilterChange,
 }: Props) {
-  const focused = focusedProjectId
-    ? { type: "project" as const, id: focusedProjectId }
-    : focusedMachineId
-      ? { type: "machine" as const, id: focusedMachineId }
-      : null;
+  const focused: { type: DrawingLink["linkedType"]; id: string } | null =
+    focusedProjectId
+      ? { type: "project", id: focusedProjectId }
+      : focusedMachineId
+        ? { type: "machine", id: focusedMachineId }
+        : focusedLinkedType && focusedLinkedId
+          ? { type: focusedLinkedType, id: focusedLinkedId }
+          : null;
 
   const [ownerTypeFilter, setOwnerTypeFilter] = useState<string>(
     initialOwnerType ?? ALL,
@@ -202,14 +217,23 @@ export function DrawingsListPanel({
   const [linkEntityId, setLinkEntityId] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const linkedDrawingIds = (type: OwnerType, id: string) =>
+  // Widened to DrawingLink["linkedType"] (a superset of OwnerType) so a
+  // linked-only entity (die today, tool/inventory_item later — see
+  // focusedLinkedType/focusedLinkedId above) can reuse this same lookup;
+  // effectiveOwner() below stays narrowly OwnerType-typed since a drawing
+  // can never actually be OWNED by one of those linked-only types.
+  const linkedDrawingIds = (type: DrawingLink["linkedType"], id: string) =>
     new Set(
       links
         .filter((l) => l.linkedType === type && l.linkedId === id)
         .map((l) => l.drawingId),
     );
 
-  const matchesOwner = (d: DrawingDocument, type: OwnerType, id: string) => {
+  const matchesOwner = (
+    d: DrawingDocument,
+    type: DrawingLink["linkedType"],
+    id: string,
+  ) => {
     const owner = effectiveOwner(d);
     if (owner.type === type && owner.id === id) return true;
     return linkedDrawingIds(type, id).has(d.id);
@@ -320,7 +344,18 @@ export function DrawingsListPanel({
     id?: string;
     category?: LibraryCategory;
   } | null => {
-    if (focused) return { type: focused.type, id: focused.id };
+    // focused.type can be a linked-only type (die today) when scoped via
+    // focusedLinkedType/focusedLinkedId — those can never be a drawing's
+    // actual owner_type (only project/machine/library can — and "library"
+    // itself was never a possible focused.type either, since there's no
+    // per-focus concept of "the whole library"), so a fresh upload from
+    // that focused view still asks explicitly rather than silently mis-
+    // tagging drawings.owner_type. Linking an *existing* drawing to the
+    // focused die still works via the regular "+ Add Link" action
+    // (onAddLink) below, unaffected by this.
+    if (focused && (focused.type === "project" || focused.type === "machine")) {
+      return { type: focused.type, id: focused.id };
+    }
     if (ownerTypeFilter === "project" && ownerEntityFilter !== ALL)
       return { type: "project", id: ownerEntityFilter };
     if (ownerTypeFilter === "machine" && ownerEntityFilter !== ALL)

@@ -5,6 +5,7 @@
 // database/phase-37) - there is no local-only predecessor to migrate,
 // unlike Machinery.
 
+import { fetchAllRows } from "@/lib/hydration";
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
 import type {
   MachineCondition,
@@ -138,12 +139,16 @@ export function computeNextToolCode(existingCodes: string[]): string {
   return `TL-${String(next).padStart(3, "0")}`;
 }
 
+// Gap-closure fix — same silent-1,000-row-truncation risk as
+// jobCardsApi.ts's fetchExistingJobNos; see that file's comment.
 async function fetchExistingToolCodes(
   client: ReturnType<typeof getSupabase>,
 ): Promise<string[] | null> {
-  const { data, error } = await client.from("tools").select("tool_code");
+  const { data, error } = await fetchAllRows<{ tool_code: string }>(
+    (from, to) => client.from("tools").select("tool_code").range(from, to),
+  );
   if (error || !data) return null;
-  return (data as unknown as { tool_code: string }[]).map((r) => r.tool_code);
+  return data.map((r) => r.tool_code);
 }
 
 function isToolCodeConflict(error: { code?: string; message?: string }) {

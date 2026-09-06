@@ -18,6 +18,7 @@
 // unchanged (never DB-generated) and be safely re-runnable — a plain
 // createMachineRemote() (always .insert()) can't do either.
 
+import { fetchAllRows } from "@/lib/hydration";
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
 import type { Machine, MachineStatus, MachineType } from "@/types";
 
@@ -199,14 +200,17 @@ export function computeNextMachineCode(existingCodes: string[]): string {
   return `MCH-${String(next).padStart(3, "0")}`;
 }
 
+// Gap-closure fix — same silent-1,000-row-truncation risk as
+// jobCardsApi.ts's fetchExistingJobNos; see that file's comment.
 async function fetchExistingMachineCodes(
   client: ReturnType<typeof getSupabase>,
 ): Promise<string[] | null> {
-  const { data, error } = await client.from("machines").select("machine_code");
-  if (error || !data) return null;
-  return (data as unknown as { machine_code: string }[]).map(
-    (r) => r.machine_code,
+  const { data, error } = await fetchAllRows<{ machine_code: string }>(
+    (from, to) =>
+      client.from("machines").select("machine_code").range(from, to),
   );
+  if (error || !data) return null;
+  return data.map((r) => r.machine_code);
 }
 
 // Postgres unique_violation. Confirmed via investigation: the only UNIQUE

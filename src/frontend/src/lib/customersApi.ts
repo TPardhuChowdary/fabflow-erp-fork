@@ -46,6 +46,11 @@ interface CustomerRow {
   additional_details: Array<{ key: string; value: string }> | null;
   emails: Array<{ email: string; type: string }> | null;
   primary_email: string | null;
+  delivery_addresses: Array<{
+    id: string;
+    label: string;
+    address: string;
+  }> | null;
   created_at: string;
 }
 
@@ -63,6 +68,7 @@ function rowToCustomer(row: CustomerRow): Customer {
     additionalDetails: row.additional_details ?? undefined,
     emails: row.emails ?? undefined,
     primaryEmail: row.primary_email ?? undefined,
+    deliveryAddresses: row.delivery_addresses ?? undefined,
     createdAt: new Date(row.created_at).getTime(),
   };
 }
@@ -84,12 +90,14 @@ function toCustomerFields(c: Omit<Customer, "id" | "createdAt">) {
     additional_details: c.additionalDetails ?? null,
     emails: c.emails ?? null,
     primary_email: c.primaryEmail ?? null,
+    delivery_addresses: c.deliveryAddresses ?? null,
   };
 }
 
 const SELECT_COLUMNS =
   "id, name, contact_person, phone, email, address, gstin, state_name, " +
-  "state_code, additional_details, emails, primary_email, created_at";
+  "state_code, additional_details, emails, primary_email, " +
+  "delivery_addresses, created_at";
 
 async function requireSession() {
   if (!isSupabaseConfigured) {

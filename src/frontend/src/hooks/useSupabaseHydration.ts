@@ -25,15 +25,19 @@
 import { useAuth } from "@/AuthContext";
 import {
   hydrateAdvanceRecords,
+  hydrateAssetPhotos,
+  hydrateAssetUsageEvents,
   hydrateAttendanceRecords,
   hydrateBillableServices,
   hydrateBomItems,
   hydrateBomRequisitions,
+  hydrateCompanyDocuments,
   hydrateCompanyPOs,
   hydrateCustomers,
   hydrateDeliveryChallans,
   hydrateDies,
   hydrateEmployeeDocuments,
+  hydrateEmployeeRewards,
   hydrateEmployees,
   hydrateExpenseFloats,
   hydrateInspectionSheets,
@@ -42,6 +46,7 @@ import {
   hydrateInventoryPurchases,
   hydrateInventoryUsages,
   hydrateInvoices,
+  hydrateJobCardExceptions,
   hydrateJobCards,
   hydrateMachineDies,
   hydrateMachineServiceRates,
@@ -72,6 +77,8 @@ import {
   hydrateQuotations,
   hydrateSalaryPayments,
   hydrateScrapRecords,
+  hydrateTenderRequirements,
+  hydrateTenders,
   hydrateToolAssignmentHistory,
   hydrateTools,
   hydrateVendors,
@@ -171,6 +178,12 @@ export function useSupabaseHydration() {
   const setJobCardsHydrationStatus = useStore(
     (s) => s.setJobCardsHydrationStatus,
   );
+  const setJobCardExceptionsFromServer = useStore(
+    (s) => s.setJobCardExceptionsFromServer,
+  );
+  const setJobCardExceptionsHydrationStatus = useStore(
+    (s) => s.setJobCardExceptionsHydrationStatus,
+  );
   const setCompanyPOsFromServer = useStore((s) => s.setCompanyPOsFromServer);
   const setCompanyPOsHydrationStatus = useStore(
     (s) => s.setCompanyPOsHydrationStatus,
@@ -229,6 +242,12 @@ export function useSupabaseHydration() {
     hydrateJobCards,
     setJobCardsHydrationStatus,
     setJobCardsFromServer,
+    authKey,
+  );
+  useHydrationEffect(
+    hydrateJobCardExceptions,
+    setJobCardExceptionsHydrationStatus,
+    setJobCardExceptionsFromServer,
     authKey,
   );
   useHydrationEffect(
@@ -312,6 +331,49 @@ export function useSupabaseHydration() {
     hydrateMachineDies,
     useStore((s) => s.setMachineDiesHydrationStatus),
     useStore((s) => s.setMachineDiesFromServer),
+    authKey,
+  );
+  // Phase 51 (Group 2) — universal asset photo store.
+  useHydrationEffect(
+    hydrateAssetPhotos,
+    useStore((s) => s.setAssetPhotosHydrationStatus),
+    useStore((s) => s.setAssetPhotosFromServer),
+    authKey,
+  );
+  useHydrationEffect(
+    hydrateAssetUsageEvents,
+    useStore((s) => s.setAssetUsageEventsHydrationStatus),
+    useStore((s) => s.setAssetUsageEventsFromServer),
+    authKey,
+  );
+  // Phase 53 (Group 2) — Employee Rewards/Merit.
+  useHydrationEffect(
+    hydrateEmployeeRewards,
+    useStore((s) => s.setEmployeeRewardsHydrationStatus),
+    useStore((s) => s.setEmployeeRewardsFromServer),
+    authKey,
+  );
+  // Phase 55 (Group 2) — Company Document Library. Fails harmlessly
+  // (this domain's own hydration error, nothing else) until
+  // database/phase-55 is applied — same as every other domain whose
+  // migration hasn't landed yet.
+  useHydrationEffect(
+    hydrateCompanyDocuments,
+    useStore((s) => s.setCompanyDocumentsHydrationStatus),
+    useStore((s) => s.setCompanyDocumentsFromServer),
+    authKey,
+  );
+  // Phase 56 (Group 2) — Tender Management.
+  useHydrationEffect(
+    hydrateTenders,
+    useStore((s) => s.setTendersHydrationStatus),
+    useStore((s) => s.setTendersFromServer),
+    authKey,
+  );
+  useHydrationEffect(
+    hydrateTenderRequirements,
+    useStore((s) => s.setTenderRequirementsHydrationStatus),
+    useStore((s) => s.setTenderRequirementsFromServer),
     authKey,
   );
 

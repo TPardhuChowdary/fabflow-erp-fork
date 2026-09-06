@@ -26,7 +26,6 @@ import {
 } from "@/components/ui/table";
 import {
   Download,
-  Eye,
   Pencil,
   Plus,
   Printer,
@@ -42,6 +41,7 @@ import { createRoot } from "react-dom/client";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
 import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
+import { EwayBillIndicator } from "../components/EwayBillIndicator";
 import { InvoicePrintView } from "../components/InvoicePrintView";
 import { StatusBadge } from "../components/StatusBadge";
 import { RowActions } from "../components/ui/row-actions";
@@ -61,6 +61,7 @@ import {
   updateInvoiceStatusRemote,
 } from "../lib/invoicesApi";
 import {
+  generateDocumentFilename,
   getCustomerVisibleName,
   projectsNeedingNewLineItems,
 } from "../lib/utils";
@@ -183,7 +184,7 @@ export function Invoices() {
       );
     });
     try {
-      triggerDownload(docId, `Invoice_${inv.invNo ?? inv.id}.pdf`);
+      triggerDownload(docId, generateDocumentFilename(inv.invNo, inv.id));
     } catch (e) {
       console.error("DOWNLOAD FAILED", e);
     } finally {
@@ -646,12 +647,10 @@ export function Invoices() {
   const InvoiceRowActions = ({ inv, i }: { inv: Invoice; i: number }) => (
     <RowActions
       primary={[
-        {
-          label: "View",
-          icon: Eye,
-          onClick: () => setViewInvoice(inv),
-          "data-ocid": `invoices.view_button.${i + 1}`,
-        },
+        // Global record-navigation rule (§1/§4) — "View" removed: the row
+        // itself (desktop) and the INV No. button (both layouts) already
+        // open this exact same preview via setViewInvoice, so a duplicate
+        // explicit button here would be redundant.
         ...(pEdit
           ? [
               {
@@ -749,16 +748,29 @@ export function Invoices() {
         {filtered.map((inv, i) => {
           const cust = customers.find((c) => c.id === inv.customerId);
           return (
+            // Card onClick is a mouse/touch convenience only — the real
+            // keyboard-accessible control is the INV No. <button> nested
+            // below, which calls the same handler.
+            // biome-ignore lint/a11y/useKeyWithClickEvents: see comment above
             <div
               key={inv.id}
-              className="rounded-lg border bg-card p-4 shadow-sm"
+              className="rounded-lg border bg-card p-4 shadow-sm cursor-pointer active:bg-muted/40"
+              onClick={() => setViewInvoice(inv)}
               data-ocid={`invoices.list.item.${i + 1}`}
             >
               <div className="flex items-start justify-between mb-3">
                 <div>
-                  <div className="font-mono font-bold text-sm">
+                  <button
+                    type="button"
+                    className="font-mono font-bold text-sm hover:underline focus-visible:underline"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setViewInvoice(inv);
+                    }}
+                    data-ocid={`invoices.list.card_open_button.${i + 1}`}
+                  >
                     {inv.invNo ?? "—"}
-                  </div>
+                  </button>
                   <div className="text-base font-semibold mt-0.5">
                     {cust?.name ?? "—"}
                   </div>
@@ -806,7 +818,14 @@ export function Invoices() {
                 }
                 return null;
               })()}
-              <div className="flex items-center justify-between border-t pt-3">
+              {/* Mouse-only stopPropagation guard so the card's own onClick
+                  (View) doesn't fire when using the status Select/RowActions
+                  below — both already have their own keyboard handling. */}
+              {/* biome-ignore lint/a11y/useKeyWithClickEvents: see comment above */}
+              <div
+                className="flex items-center justify-between border-t pt-3"
+                onClick={(e) => e.stopPropagation()}
+              >
                 {inv.invoiceType !== "proforma" && (
                   <Select
                     value={inv.status}
@@ -889,9 +908,21 @@ export function Invoices() {
                   <TableRow
                     key={inv.id}
                     data-ocid={`invoices.list.row.${i + 1}`}
+                    onClick={() => setViewInvoice(inv)}
+                    className="cursor-pointer hover:bg-muted/50"
                   >
                     <TableCell className="text-xs font-mono font-semibold">
-                      {inv.invNo ?? "\u2014"}
+                      <button
+                        type="button"
+                        className="hover:underline focus-visible:underline"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setViewInvoice(inv);
+                        }}
+                        data-ocid={`invoices.list.open_button.${i + 1}`}
+                      >
+                        {inv.invNo ?? "\u2014"}
+                      </button>
                     </TableCell>
                     <TableCell className="text-sm">
                       {cust?.name ?? "\u2014"}
@@ -946,7 +977,7 @@ export function Invoices() {
                     <TableCell>
                       <StatusBadge status={inv.status} />
                     </TableCell>
-                    <TableCell>
+                    <TableCell onClick={(e) => e.stopPropagation()}>
                       {inv.invoiceType === "proforma" ? (
                         <span className="text-xs text-muted-foreground italic">
                           Document only
@@ -1006,7 +1037,15 @@ export function Invoices() {
 
       {/* Print View Dialog */}
       <InvoicePrintView
-        invoice={viewInvoice}
+        // Re-derived from the live store array (not the stale snapshot
+        // captured when "View" was clicked) so an in-dialog action like
+        // attaching the E-Way Bill document is reflected immediately,
+        // without needing its own callback plumbing back to this state.
+        invoice={
+          viewInvoice
+            ? (invoices.find((inv) => inv.id === viewInvoice.id) ?? viewInvoice)
+            : null
+        }
         customer={
           customers.find((c) => c.id === viewInvoice?.customerId) ?? null
         }
@@ -1700,28 +1739,14 @@ export function Invoices() {
                     </div>
                   )}
                   <div className="font-bold text-base">Total: {fmt(total)}</div>
-                  {total > 50000 && (
-                    <div className="mt-3 flex items-start gap-2 rounded-md border border-warning/30 bg-warning/15 px-3 py-2 text-xs text-warning">
-                      <span className="mt-0.5 text-base leading-none">
-                        &#9888;&#65039;
-                      </span>
-                      <div className="flex-1">
-                        <p className="font-semibold">E-Way Bill Required</p>
-                        <p className="mt-0.5 text-warning/90">
-                          Invoice amount exceeds ₹50,000. An E-Way Bill is
-                          mandatory for this shipment.
-                        </p>
-                      </div>
-                      <a
-                        href="https://ewaybillgst.gov.in"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="ml-2 shrink-0 rounded bg-warning px-2 py-1 text-xs font-semibold text-warning-foreground hover:bg-warning/90"
-                      >
-                        Generate E-Way Bill ↗
-                      </a>
-                    </div>
-                  )}
+                  <div className="flex justify-end mt-2">
+                    <EwayBillIndicator
+                      invoiceId={editingInvoice?.id}
+                      totalAmount={total}
+                      ewayBillDocument={editingInvoice?.ewayBillDocument}
+                      onAttached={(updated) => setEditingInvoice(updated)}
+                    />
+                  </div>
                 </div>
               </div>
             </div>
@@ -1742,7 +1767,11 @@ export function Invoices() {
                 disabled={isSaving}
                 data-ocid="invoices.form.submit_button"
               >
-                {isSaving ? "Saving..." : "Create Invoice"}
+                {isSaving
+                  ? "Saving..."
+                  : editingInvoice
+                    ? "Save Changes"
+                    : "Create Invoice"}
               </Button>
             </div>
           </form>

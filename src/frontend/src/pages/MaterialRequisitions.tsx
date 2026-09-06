@@ -1,5 +1,15 @@
+import { VendorSelect } from "@/components/VendorSelect";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Table,
   TableBody,
@@ -8,15 +18,25 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { CheckCircle2, ClipboardList, Clock, PackageCheck } from "lucide-react";
+import {
+  CheckCircle2,
+  ClipboardList,
+  Clock,
+  PackageCheck,
+  ShoppingCart,
+} from "lucide-react";
 import { ShieldOff } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
-import { updateBomRequisitionStatusRemote } from "../lib/bomItemsApi";
+import {
+  recordMaterialPurchaseRemote,
+  updateBomRequisitionStatusRemote,
+} from "../lib/bomItemsApi";
+import { hydrateBomRequisitions } from "../lib/hydration";
 import { canApprove, canCreate, canDelete, canView } from "../permissions";
 import { useStore } from "../store";
-import type { BomRequisitionStatus } from "../types";
+import type { BomRequisition, BomRequisitionStatus } from "../types";
 
 type FilterTab = "All" | BomRequisitionStatus;
 
@@ -52,8 +72,33 @@ export function MaterialRequisitions() {
   // .edit but not .approve would see this button succeed the client-side
   // check and then be silently denied by RLS with a generic error toast.
   const pApprove = canApprove(currentUser, "material_requisitions");
-  const { bomRequisitions, updateBomRequisition, projects } = useStore();
+  // record_material_purchase() itself checks inventory.create OR
+  // production.create OR projects.create (see the RPC's own definition) -
+  // mirrored here client-side only as a fast-fail UX check, never the
+  // real enforcement (RLS/the RPC's internal check is that).
+  const pPurchase =
+    canCreate(currentUser, "inventory") ||
+    canCreate(currentUser, "production") ||
+    canCreate(currentUser, "projects");
+  const {
+    bomRequisitions,
+    updateBomRequisition,
+    projects,
+    inventoryItems,
+    setBomRequisitionsFromServer,
+    setBomRequisitionsHydrationStatus,
+  } = useStore();
   const [activeTab, setActiveTab] = useState<FilterTab>("All");
+  const [purchaseTarget, setPurchaseTarget] = useState<BomRequisition | null>(
+    null,
+  );
+  const [purchaseForm, setPurchaseForm] = useState({
+    quantity: "",
+    supplierName: "",
+    vendorId: "",
+    purchaseDate: new Date().toISOString().split("T")[0],
+  });
+  const [isPurchasing, setIsPurchasing] = useState(false);
 
   const filtered =
     activeTab === "All"
@@ -101,6 +146,84 @@ export function MaterialRequisitions() {
   function getProjectLabel(projectId: string) {
     const project = projects.find((p) => p.id === projectId);
     return project?.projectNo ?? projectId;
+  }
+
+  // Phase 9 — the "Purchase" action for a Pending requisition. Reuses
+  // record_material_purchase(), a complete, already-existing, permission-
+  // checked RPC (find-or-create the inventory item by name, record the
+  // purchase through the exact same inventory_purchases + stock-increase
+  // trigger every other purchase path already uses, and flip this
+  // requisition to "Ready to Complete" once the new stock covers its
+  // shortage) that had zero callers anywhere in the frontend until now -
+  // not a second purchasing system, the missing wiring for the one that
+  // was already built for exactly this. Matched by materialName
+  // (case-insensitive, same as the RPC's own find-or-create), never by
+  // re-deriving a new item - this requisition's shortage already IS that
+  // existing item's shortage.
+  function openPurchase(req: BomRequisition) {
+    setPurchaseTarget(req);
+    setPurchaseForm({
+      quantity: String(req.shortageQty || req.requiredQty || ""),
+      supplierName: "",
+      vendorId: "",
+      purchaseDate: new Date().toISOString().split("T")[0],
+    });
+  }
+
+  function closePurchase() {
+    setPurchaseTarget(null);
+    setPurchaseForm({
+      quantity: "",
+      supplierName: "",
+      vendorId: "",
+      purchaseDate: new Date().toISOString().split("T")[0],
+    });
+  }
+
+  async function handleRecordPurchase() {
+    if (isPurchasing || !purchaseTarget) return;
+    const qty = Number(purchaseForm.quantity);
+    if (!qty || qty <= 0) {
+      toast.error("Quantity must be greater than 0");
+      return;
+    }
+    const item = inventoryItems.find(
+      (i) => i.id === purchaseTarget.inventoryItemId,
+    );
+    setIsPurchasing(true);
+    try {
+      const result = await recordMaterialPurchaseRemote({
+        projectId: purchaseTarget.projectId,
+        materialType: purchaseTarget.materialName,
+        quantity: qty,
+        unit: item?.unit || "units",
+        supplierName: purchaseForm.supplierName || undefined,
+        vendorId: purchaseForm.vendorId || undefined,
+        purchaseDate: purchaseForm.purchaseDate,
+      });
+      if (result.status === "unauthenticated") {
+        toast.error("Not signed in to the server - purchase was not recorded");
+        return;
+      }
+      if (result.status === "denied" || result.status === "error") {
+        toast.error(result.error ?? "Could not record purchase");
+        return;
+      }
+      // The RPC updates bom_requisitions server-side (status flip) and
+      // inventory_items (stock) - re-hydrate rather than guess the new
+      // state locally, same discipline ProjectDetail.tsx's own
+      // refreshBomRequisitions() already established.
+      const hydrated = await hydrateBomRequisitions();
+      if (hydrated.status === "success" && hydrated.data) {
+        setBomRequisitionsFromServer(hydrated.data);
+      } else {
+        setBomRequisitionsHydrationStatus(hydrated.status, hydrated.error);
+      }
+      toast.success("Purchase recorded");
+      closePurchase();
+    } finally {
+      setIsPurchasing(false);
+    }
   }
 
   // Suppress unused-variable warnings — reserved for future create/delete actions
@@ -270,7 +393,19 @@ export function MaterialRequisitions() {
                             Mark as Completed
                           </Button>
                         )}
-                        {req.status === "Pending" && (
+                        {req.status === "Pending" && pPurchase && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            data-ocid={`mr.purchase_button.${idx + 1}`}
+                            onClick={() => openPurchase(req)}
+                            className="h-7 text-xs"
+                          >
+                            <ShoppingCart className="h-3.5 w-3.5 mr-1" />
+                            Purchase
+                          </Button>
+                        )}
+                        {req.status === "Pending" && !pPurchase && (
                           <span className="text-xs text-muted-foreground italic">
                             Waiting for purchase
                           </span>
@@ -287,6 +422,94 @@ export function MaterialRequisitions() {
           </Table>
         </div>
       </div>
+
+      <Dialog
+        open={!!purchaseTarget}
+        onOpenChange={(o) => !o && closePurchase()}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Record Purchase</DialogTitle>
+          </DialogHeader>
+          {purchaseTarget && (
+            <div className="space-y-3">
+              <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm">
+                <p className="font-medium">{purchaseTarget.materialName}</p>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Project {getProjectLabel(purchaseTarget.projectId)} · Short by{" "}
+                  {purchaseTarget.shortageQty}
+                </p>
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs">Quantity *</Label>
+                <Input
+                  type="number"
+                  value={purchaseForm.quantity}
+                  onChange={(e) =>
+                    setPurchaseForm((p) => ({ ...p, quantity: e.target.value }))
+                  }
+                  data-ocid="mr.purchase.quantity"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs">Supplier Name</Label>
+                <Input
+                  value={purchaseForm.supplierName}
+                  onChange={(e) =>
+                    setPurchaseForm((p) => ({
+                      ...p,
+                      supplierName: e.target.value,
+                    }))
+                  }
+                  data-ocid="mr.purchase.supplier_name"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs">Vendor</Label>
+                <VendorSelect
+                  value={purchaseForm.vendorId}
+                  onChange={(vendorId, vendorName) =>
+                    setPurchaseForm((p) => ({
+                      ...p,
+                      vendorId,
+                      supplierName: p.supplierName || vendorName,
+                    }))
+                  }
+                  placeholder="Select vendor (optional)"
+                  className="w-full"
+                  data-ocid="mr.purchase.vendor"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label className="text-xs">Purchase Date</Label>
+                <Input
+                  type="date"
+                  value={purchaseForm.purchaseDate}
+                  onChange={(e) =>
+                    setPurchaseForm((p) => ({
+                      ...p,
+                      purchaseDate: e.target.value,
+                    }))
+                  }
+                  data-ocid="mr.purchase.date"
+                />
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={closePurchase}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleRecordPurchase}
+              disabled={isPurchasing}
+              data-ocid="mr.purchase.save"
+            >
+              {isPurchasing ? "Recording…" : "Record Purchase"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

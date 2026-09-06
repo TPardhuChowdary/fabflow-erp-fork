@@ -712,6 +712,7 @@ export function Payables() {
                   }
                   placeholder="0"
                   min="0"
+                  step="0.01"
                   data-ocid="payables.amount.input"
                 />
               </div>
@@ -825,6 +826,7 @@ export function Payables() {
                     }
                     placeholder="0"
                     min="0"
+                    step="0.01"
                     max={
                       paymentModal.payable.totalAmount -
                       paymentModal.payable.paidAmount

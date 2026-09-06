@@ -25,20 +25,16 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  FolderKanban,
-  FolderOpen,
-  Pencil,
-  Plus,
-  Search,
-  Trash2,
-} from "lucide-react";
+import { FolderKanban, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import { ShieldOff } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
 import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import { CustomerSelect } from "../components/CustomerSelect";
+import { DeadlineIndicator } from "../components/DeadlineIndicator";
+import { useUpdateProjectDeadline } from "../hooks/useUpdateProjectDeadline";
+import { compareByDeadlinePriority } from "../lib/deadlinePriority";
 import {
   createProjectRemote,
   deleteProjectRemote,
@@ -48,6 +44,28 @@ import { getCustomerVisibleName, getProjectSearchText } from "../lib/utils";
 import { canCreate, canDelete, canEdit, canView } from "../permissions";
 import { useStore } from "../store";
 import type { Project } from "../types";
+
+// Phase 57 (Group 2, Master Monster Prompt) — work type classification.
+// Quantity is only genuinely optional for the three "not necessarily a
+// fixed run yet" types; every other type keeps quantity required, same
+// as today's behavior.
+const WORK_TYPES: { value: NonNullable<Project["workType"]>; label: string }[] =
+  [
+    { value: "full_manufacturing", label: "Full Manufacturing" },
+    { value: "sample", label: "Sample" },
+    { value: "prototype", label: "Prototype" },
+    { value: "trial", label: "Trial / Development" },
+    { value: "production", label: "Production" },
+    { value: "service", label: "Service / Processing" },
+    { value: "partial_manufacturing", label: "Partial Manufacturing" },
+    { value: "subcontract", label: "Subcontract / External Work" },
+    { value: "other", label: "Other" },
+  ];
+const QUANTITY_OPTIONAL_WORK_TYPES = new Set<Project["workType"]>([
+  "sample",
+  "prototype",
+  "trial",
+]);
 
 interface Props {
   onViewProject: (id: string) => void;
@@ -68,14 +86,25 @@ export function Projects({ onViewProject }: Props) {
   const pEdit = canEdit(currentUser, "projects");
   const pDelete = canDelete(currentUser, "projects");
   const pView = canView(currentUser, "projects");
+  const { updateDeadline } = useUpdateProjectDeadline();
 
   const [search, setSearch] = useState("");
+  // §5/§6 — top-level project type/category filter + sort. Reuses the
+  // exact same workType field/values the New Project dialog already
+  // writes (WORK_TYPES above) rather than inventing a second concept.
+  const [workTypeFilter, setWorkTypeFilter] = useState<
+    NonNullable<Project["workType"]> | "all"
+  >("all");
+  const [sortBy, setSortBy] = useState<
+    "newest" | "oldest" | "name" | "code" | "customer" | "deadline"
+  >("newest");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [form, setForm] = useState({
     customerId: "",
     projectName: "",
     workDescription: "",
     totalQty: "",
+    workType: "full_manufacturing" as NonNullable<Project["workType"]>,
   });
 
   const [editDialogOpen, setEditDialogOpen] = useState(false);
@@ -93,12 +122,51 @@ export function Projects({ onViewProject }: Props) {
         );
 
   const filtered = visibleProjects.filter((p) => {
+    if (workTypeFilter !== "all" && p.workType !== workTypeFilter) return false;
     const customer = customers.find((c) => c.id === p.customerId);
     const q = search.toLowerCase();
     return (
       getProjectSearchText(p).includes(q) ||
       (customer?.name.toLowerCase().includes(q) ?? false)
     );
+  });
+
+  // §6 — sort applies on top of the search + type filter above, same
+  // Supabase-backed `projects` array both already read from; nothing new
+  // fetched, no new field invented.
+  const sorted = [...filtered].sort((a, b) => {
+    switch (sortBy) {
+      case "oldest":
+        return a.createdAt - b.createdAt;
+      case "name":
+        return getCustomerVisibleName(a).localeCompare(
+          getCustomerVisibleName(b),
+        );
+      case "code":
+        return a.projectNo.localeCompare(b.projectNo);
+      case "customer": {
+        const cA = customers.find((c) => c.id === a.customerId)?.name ?? "";
+        const cB = customers.find((c) => c.id === b.customerId)?.name ?? "";
+        return cA.localeCompare(cB);
+      }
+      case "deadline":
+        // The one reusable deadline-priority rule (lib/deadlinePriority.ts) —
+        // overdue (oldest first), then due today, then upcoming (nearest
+        // first), then no deadline. createdAt is the stable tiebreaker for
+        // same-day deadlines, same field every other sort here already uses.
+        return compareByDeadlinePriority(
+          {
+            deadline: a.customerCommittedDeliveryDate,
+            tiebreaker: a.createdAt,
+          },
+          {
+            deadline: b.customerCommittedDeliveryDate,
+            tiebreaker: b.createdAt,
+          },
+        );
+      default:
+        return b.createdAt - a.createdAt;
+    }
   });
 
   const handleSave = async () => {
@@ -113,12 +181,21 @@ export function Projects({ onViewProject }: Props) {
         toast.error("Customer and Project Name are required");
         return;
       }
+      const qtyOptional = QUANTITY_OPTIONAL_WORK_TYPES.has(form.workType);
       if (
-        !form.totalQty ||
-        Number.isNaN(Number(form.totalQty)) ||
-        Number(form.totalQty) <= 0
+        !qtyOptional &&
+        (!form.totalQty ||
+          Number.isNaN(Number(form.totalQty)) ||
+          Number(form.totalQty) <= 0)
       ) {
         toast.error("Total Quantity is required");
+        return;
+      }
+      if (
+        form.totalQty &&
+        (Number.isNaN(Number(form.totalQty)) || Number(form.totalQty) < 0)
+      ) {
+        toast.error("Total Quantity cannot be negative");
         return;
       }
       // Phase 22 — remote-first, with bounded retry-on-conflict for the
@@ -134,7 +211,8 @@ export function Projects({ onViewProject }: Props) {
         customerId: form.customerId,
         projectName: form.projectName.trim(),
         workDescription: form.workDescription.trim(),
-        totalQty: Number(form.totalQty),
+        totalQty: form.totalQty ? Number(form.totalQty) : undefined,
+        workType: form.workType,
         productionVersion: "v2",
       });
       if (result.status === "unauthenticated") {
@@ -161,6 +239,7 @@ export function Projects({ onViewProject }: Props) {
         projectName: "",
         workDescription: "",
         totalQty: "",
+        workType: "full_manufacturing",
       });
     } finally {
       setIsSaving(false);
@@ -180,14 +259,18 @@ export function Projects({ onViewProject }: Props) {
         toast.error("Customer and Project Name are required");
         return;
       }
-      if (!editForm.totalQty || Number(editForm.totalQty) <= 0) {
+      const editQtyOptional = QUANTITY_OPTIONAL_WORK_TYPES.has(
+        editForm.workType,
+      );
+      if (!editQtyOptional && (!editForm.totalQty || editForm.totalQty <= 0)) {
         toast.error("Total Quantity is required");
         return;
       }
-      const result = await updateProjectRemote({
-        ...editForm,
-        totalQty: Number(editForm.totalQty),
-      });
+      if (editForm.totalQty !== undefined && editForm.totalQty < 0) {
+        toast.error("Total Quantity cannot be negative");
+        return;
+      }
+      const result = await updateProjectRemote(editForm);
       if (result.status === "unauthenticated") {
         toast.error("Not signed in to the server - project was not updated");
         return;
@@ -308,28 +391,72 @@ export function Projects({ onViewProject }: Props) {
         )}
       </div>
 
-      {/* Search */}
-      <div className="relative max-w-sm">
-        <Search className="absolute left-2.5 top-2.5 w-4 h-4 text-muted-foreground" />
-        <Input
-          placeholder="Search by project or customer..."
-          className="pl-8"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          data-ocid="projects.search_input"
-        />
+      {/* Search + §5/§6 top-level project type filter and sort */}
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative max-w-sm flex-1 min-w-[180px]">
+          <Search className="absolute left-2.5 top-2.5 w-4 h-4 text-muted-foreground" />
+          <Input
+            placeholder="Search by project or customer..."
+            className="pl-8"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            data-ocid="projects.search_input"
+          />
+        </div>
+        <Select
+          value={workTypeFilter}
+          onValueChange={(v) => setWorkTypeFilter(v as typeof workTypeFilter)}
+        >
+          <SelectTrigger
+            className="w-[180px]"
+            data-ocid="projects.work_type_filter"
+          >
+            <SelectValue placeholder="Project Type" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All Types</SelectItem>
+            {WORK_TYPES.map((t) => (
+              <SelectItem key={t.value} value={t.value}>
+                {t.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select
+          value={sortBy}
+          onValueChange={(v) => setSortBy(v as typeof sortBy)}
+        >
+          <SelectTrigger className="w-[150px]" data-ocid="projects.sort_by">
+            <SelectValue placeholder="Sort" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="newest">Newest first</SelectItem>
+            <SelectItem value="oldest">Oldest first</SelectItem>
+            <SelectItem value="deadline">Deadline (earliest first)</SelectItem>
+            <SelectItem value="name">Project name</SelectItem>
+            <SelectItem value="code">Project code</SelectItem>
+            <SelectItem value="customer">Customer</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
 
       {/* Mobile card list (< sm) — responsive audit Fix 1. Same data,
           same actions/permissions/handlers as the table below; only the
           presentation differs. Desktop/tablet table is unchanged. */}
       <div className="sm:hidden space-y-2" data-ocid="projects.cards">
-        {filtered.map((p, i) => {
+        {sorted.map((p, i) => {
           const customer = customers.find((c) => c.id === p.customerId);
           return (
+            // Mouse/touch-only convenience on top of an already fully
+            // keyboard-accessible control — the project-code button a few
+            // lines down inside this same card. Making this wrapper itself
+            // a focusable role="button" would invalidly nest it around
+            // that button and the real Edit/Delete buttons further down.
+            // biome-ignore lint/a11y/useKeyWithClickEvents: see comment above
             <div
               key={p.id}
-              className="rounded-md border bg-card p-3 space-y-2"
+              className="rounded-md border bg-card p-3 space-y-2 cursor-pointer active:bg-muted/40"
+              onClick={() => onViewProject(p.id)}
               data-ocid={`projects.card.${i + 1}`}
             >
               <div className="flex items-start justify-between gap-2">
@@ -345,9 +472,24 @@ export function Projects({ onViewProject }: Props) {
                         </span>
                       )}
                   </div>
-                  <div className="text-xs font-mono font-semibold text-primary mt-0.5">
+                  {/* Real focusable control, same reasoning as the desktop
+                      table's primary cell above — keyboard/screen-reader
+                      users get a genuine interactive element rather than
+                      relying on the card's own onClick (a div is not
+                      keyboard-operable, and nesting role="button" here
+                      would invalidly nest it around the Edit/Delete
+                      buttons below). */}
+                  <button
+                    type="button"
+                    className="text-xs font-mono font-semibold text-primary mt-0.5 hover:underline focus-visible:underline"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onViewProject(p.id);
+                    }}
+                    data-ocid={`projects.card_open_button.${i + 1}`}
+                  >
                     {p.projectNo}
-                  </div>
+                  </button>
                 </div>
               </div>
               <div className="text-xs text-muted-foreground">
@@ -356,48 +498,59 @@ export function Projects({ onViewProject }: Props) {
               <div className="text-[11px] text-muted-foreground">
                 Created {new Date(p.createdAt).toLocaleDateString("en-IN")}
               </div>
-              <div className="flex items-center gap-1.5 pt-1">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-8 px-2.5 text-xs flex-1"
-                  onClick={() => onViewProject(p.id)}
-                  data-ocid={`projects.card_view_button.${i + 1}`}
-                >
-                  <FolderOpen className="w-3.5 h-3.5 mr-1" /> View
-                </Button>
-                {pEdit && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-8 px-2.5 text-xs"
-                    onClick={() => {
-                      setEditForm(p);
-                      setEditDialogOpen(true);
-                    }}
-                    data-ocid={`projects.card_edit_button.${i + 1}`}
-                    title="Edit project"
-                  >
-                    <Pencil className="w-3.5 h-3.5" />
-                  </Button>
-                )}
-                {pDelete && (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-8 px-2.5 text-destructive hover:text-destructive"
-                    onClick={() => handleDeleteProject(p)}
-                    data-ocid={`projects.card_delete_button.${i + 1}`}
-                    title="Delete project"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </Button>
-                )}
+              {/* Stops the card's own onClick (navigate to project) from
+                  firing when the user interacts with DeadlineIndicator's
+                  real, keyboard-accessible button/dialog controls below -
+                  same reasoning as the card wrapper's own ignore above. */}
+              {/* biome-ignore lint/a11y/useKeyWithClickEvents: see comment above */}
+              <div onClick={(e) => e.stopPropagation()}>
+                <DeadlineIndicator
+                  deadline={p.customerCommittedDeliveryDate}
+                  canEdit={pEdit}
+                  onUpdate={(newDate) => updateDeadline(p, newDate)}
+                  compact
+                  dataOcidPrefix={`projects.card.${i + 1}.deadline`}
+                />
               </div>
+              {(pEdit || pDelete) && (
+                <div className="flex items-center gap-1.5 pt-1">
+                  {pEdit && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-8 px-2.5 text-xs flex-1"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setEditForm(p);
+                        setEditDialogOpen(true);
+                      }}
+                      data-ocid={`projects.card_edit_button.${i + 1}`}
+                      title="Edit project"
+                    >
+                      <Pencil className="w-3.5 h-3.5 mr-1" /> Edit
+                    </Button>
+                  )}
+                  {pDelete && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 px-2.5 text-destructive hover:text-destructive"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteProject(p);
+                      }}
+                      data-ocid={`projects.card_delete_button.${i + 1}`}
+                      title="Delete project"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </Button>
+                  )}
+                </div>
+              )}
             </div>
           );
         })}
-        {filtered.length === 0 && (
+        {sorted.length === 0 && (
           <p
             className="text-center py-10 text-sm text-muted-foreground"
             data-ocid="projects.cards_empty_state"
@@ -427,18 +580,42 @@ export function Projects({ onViewProject }: Props) {
                   Description
                 </TableHead>
                 <TableHead className="text-xs font-semibold">Created</TableHead>
+                <TableHead className="text-xs font-semibold">
+                  Deadline
+                </TableHead>
                 <TableHead className="text-xs font-semibold w-24">
                   Actions
                 </TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filtered.map((p, i) => {
+              {sorted.map((p, i) => {
                 const customer = customers.find((c) => c.id === p.customerId);
                 return (
-                  <TableRow key={p.id} data-ocid={`projects.item.${i + 1}`}>
+                  <TableRow
+                    key={p.id}
+                    className="cursor-pointer hover:bg-muted/40"
+                    onClick={() => onViewProject(p.id)}
+                    data-ocid={`projects.item.${i + 1}`}
+                  >
                     <TableCell className="text-xs font-mono font-semibold text-primary">
-                      {p.projectNo}
+                      {/* Global record-navigation rule (§1) — the primary
+                          identity cell is a real focusable control, so
+                          keyboard/screen-reader users get the same
+                          navigation the row-level onClick gives mouse
+                          users; the row click above is the ergonomic
+                          bonus, this button is the accessible baseline. */}
+                      <button
+                        type="button"
+                        className="hover:underline focus-visible:underline"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onViewProject(p.id);
+                        }}
+                        data-ocid={`projects.open_button.${i + 1}`}
+                      >
+                        {p.projectNo}
+                      </button>
                     </TableCell>
                     <TableCell className="text-sm">
                       {customer?.name ?? "—"}
@@ -460,17 +637,17 @@ export function Projects({ onViewProject }: Props) {
                     <TableCell className="text-xs text-muted-foreground">
                       {new Date(p.createdAt).toLocaleDateString("en-IN")}
                     </TableCell>
+                    <TableCell onClick={(e) => e.stopPropagation()}>
+                      <DeadlineIndicator
+                        deadline={p.customerCommittedDeliveryDate}
+                        canEdit={pEdit}
+                        onUpdate={(newDate) => updateDeadline(p, newDate)}
+                        compact
+                        dataOcidPrefix={`projects.row.${i + 1}.deadline`}
+                      />
+                    </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-1">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 px-2 text-xs"
-                          onClick={() => onViewProject(p.id)}
-                          data-ocid={`projects.edit_button.${i + 1}`}
-                        >
-                          <FolderOpen className="w-3.5 h-3.5 mr-1" /> View
-                        </Button>
                         {pEdit && (
                           <Button
                             variant="outline"
@@ -507,10 +684,10 @@ export function Projects({ onViewProject }: Props) {
                   </TableRow>
                 );
               })}
-              {filtered.length === 0 && (
+              {sorted.length === 0 && (
                 <TableRow>
                   <TableCell
-                    colSpan={6}
+                    colSpan={7}
                     className="text-center py-10 text-sm text-muted-foreground"
                     data-ocid="projects.empty_state"
                   >
@@ -558,6 +735,32 @@ export function Projects({ onViewProject }: Props) {
                 />
               </div>
               <div className="space-y-1.5">
+                <Label htmlFor="proj-worktype">Work Type</Label>
+                <Select
+                  value={form.workType}
+                  onValueChange={(v) =>
+                    setForm((f) => ({
+                      ...f,
+                      workType: v as NonNullable<Project["workType"]>,
+                    }))
+                  }
+                >
+                  <SelectTrigger
+                    id="proj-worktype"
+                    data-ocid="projects.work_type.select"
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {WORK_TYPES.map((t) => (
+                      <SelectItem key={t.value} value={t.value}>
+                        {t.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
                 <Label htmlFor="proj-desc">Work Description</Label>
                 <Textarea
                   id="proj-desc"
@@ -571,12 +774,26 @@ export function Projects({ onViewProject }: Props) {
                 />
               </div>
               <div className="space-y-1.5">
-                <Label htmlFor="proj-totalqty">Total Quantity *</Label>
+                <Label htmlFor="proj-totalqty">
+                  Total Quantity
+                  {QUANTITY_OPTIONAL_WORK_TYPES.has(form.workType) ? (
+                    <span className="text-muted-foreground font-normal">
+                      {" "}
+                      (optional for {form.workType})
+                    </span>
+                  ) : (
+                    " *"
+                  )}
+                </Label>
                 <Input
                   id="proj-totalqty"
                   type="number"
-                  min={1}
-                  placeholder="e.g. 100"
+                  min={0}
+                  placeholder={
+                    QUANTITY_OPTIONAL_WORK_TYPES.has(form.workType)
+                      ? "Not decided yet — leave blank"
+                      : "e.g. 100"
+                  }
                   value={form.totalQty}
                   onChange={(e) =>
                     setForm((f) => ({ ...f, totalQty: e.target.value }))
@@ -649,6 +866,36 @@ export function Projects({ onViewProject }: Props) {
                   />
                 </div>
                 <div className="space-y-1.5">
+                  <Label htmlFor="edit-proj-worktype">Work Type</Label>
+                  <Select
+                    value={editForm.workType || "full_manufacturing"}
+                    onValueChange={(v) =>
+                      setEditForm((f) =>
+                        f
+                          ? {
+                              ...f,
+                              workType: v as NonNullable<Project["workType"]>,
+                            }
+                          : f,
+                      )
+                    }
+                  >
+                    <SelectTrigger
+                      id="edit-proj-worktype"
+                      data-ocid="projects.edit.work_type.select"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {WORK_TYPES.map((t) => (
+                        <SelectItem key={t.value} value={t.value}>
+                          {t.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1.5">
                   <Label htmlFor="edit-proj-desc">Work Description</Label>
                   <Textarea
                     id="edit-proj-desc"
@@ -663,16 +910,33 @@ export function Projects({ onViewProject }: Props) {
                   />
                 </div>
                 <div className="space-y-1.5">
-                  <Label htmlFor="edit-proj-totalqty">Total Quantity *</Label>
+                  <Label htmlFor="edit-proj-totalqty">
+                    Total Quantity
+                    {QUANTITY_OPTIONAL_WORK_TYPES.has(editForm.workType) ? (
+                      <span className="text-muted-foreground font-normal">
+                        {" "}
+                        (optional for {editForm.workType})
+                      </span>
+                    ) : (
+                      " *"
+                    )}
+                  </Label>
                   <Input
                     id="edit-proj-totalqty"
                     type="number"
-                    min={1}
+                    min={0}
                     placeholder="e.g. 100"
                     value={editForm.totalQty ?? ""}
                     onChange={(e) =>
                       setEditForm((f) =>
-                        f ? { ...f, totalQty: Number(e.target.value) } : f,
+                        f
+                          ? {
+                              ...f,
+                              totalQty: e.target.value
+                                ? Number(e.target.value)
+                                : undefined,
+                            }
+                          : f,
                       )
                     }
                   />

@@ -46,13 +46,19 @@
 // candidate succeeds.
 
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
-import type { InvLineItem, Invoice, InvoicePurchaseOrder } from "@/types";
+import type {
+  InvLineItem,
+  Invoice,
+  InvoicePurchaseOrder,
+  PurchaseAttachment,
+} from "@/types";
 import {
   INVOICE_COLUMNS,
   INVOICE_ITEM_COLUMNS,
   INVOICE_PO_COLUMNS,
   transformInvoiceRow,
 } from "./hydration";
+import { fetchAllRows } from "./hydration";
 import type { InvoiceRow } from "./hydration";
 
 export type WriteStatus = "success" | "denied" | "error" | "unauthenticated";
@@ -237,14 +243,16 @@ async function fetchFullInvoice(
   };
 }
 
+// Gap-closure fix — same silent-1,000-row-truncation risk as
+// jobCardsApi.ts's fetchExistingJobNos; see that file's comment.
 async function fetchExistingInvNumbers(
   client: ReturnType<typeof getSupabase>,
 ): Promise<string[] | null> {
-  const { data, error } = await client.from("invoices").select("inv_no");
-  if (error || !data) return null;
-  return (data as unknown as { inv_no: string | null }[]).map(
-    (r) => r.inv_no ?? "",
+  const { data, error } = await fetchAllRows<{ inv_no: string | null }>(
+    (from, to) => client.from("invoices").select("inv_no").range(from, to),
   );
+  if (error || !data) return null;
+  return data.map((r) => r.inv_no ?? "");
 }
 
 // Postgres unique_violation on uq_invoices_org_invno specifically - same
@@ -459,6 +467,38 @@ export async function updateInvoiceReminderRemote(
   const { data, error } = await gate.client
     .from("invoices")
     .update(dbFields)
+    .eq("id", id)
+    .select("id");
+
+  if (error) return { status: "error", error: error.message };
+  const rows = (data as { id: string }[]) ?? [];
+  if (rows.length === 0) {
+    return {
+      status: "denied",
+      error: "No row was updated (blocked by RLS, or the row does not exist)",
+    };
+  }
+
+  return fetchFullInvoice(gate.client, id);
+}
+
+// E-Way Bill attachment — scalar-only patch, same shape/reasoning as
+// updateInvoiceStatusRemote/updateInvoiceReminderRemote above (doesn't
+// touch invoice_items). `doc: null` clears the attachment (not currently
+// exposed in the UI, but kept symmetric). Presence of eway_bill_document
+// on the returned Invoice is the sole source of truth for "E-Way Bill
+// completed" - callers must never infer completion from having merely
+// called this function; only the persisted, re-fetched row counts.
+export async function updateInvoiceEwayBillRemote(
+  id: string,
+  doc: PurchaseAttachment | null,
+): Promise<WriteResult<Invoice>> {
+  const gate = await requireSession();
+  if (!gate.ok) return gate.result;
+
+  const { data, error } = await gate.client
+    .from("invoices")
+    .update({ eway_bill_document: doc })
     .eq("id", id)
     .select("id");
 

@@ -1,3 +1,8 @@
+import {
+  formatJobCardDuration,
+  formatJobCardTimestamp,
+  getJobCardActiveSeconds,
+} from "../hooks/useJobCardTimer";
 /**
  * Shared document content components.
  * Used as hidden off-screen containers in page files so html2canvas
@@ -8,6 +13,7 @@ import type {
   Customer,
   DeliveryChallan,
   Invoice,
+  JobCard,
   Project,
   Quotation,
 } from "../types";
@@ -1954,6 +1960,387 @@ export function ChallanDocContent({
         }}
       >
         This is a computer generated delivery challan.
+      </div>
+    </div>
+  );
+}
+
+// ── JOB CARD (printable, shop-floor physical-workflow copy) ─────────
+//
+// Reuses the exact same existing JobCard row this whole feature is built
+// on — no second Job Card record, no new ledger, no new persistence.
+// Start/End/Active Time are read straight from the same persisted
+// fields and the same formatJobCardTimestamp/getJobCardActiveSeconds
+// helpers the in-app View dialog uses (hooks/useJobCardTimer.ts) — never
+// re-derived or fabricated here. A NotStarted/InProgress/OnHold card
+// correctly shows "Not started yet"/"Not completed yet" rather than a
+// blank or invented date, matching the in-app dialog exactly.
+
+// Fixed, literal row/cell identifiers for the blank manual-record table
+// below — genuinely static (not derived from a map index), matching the
+// table's own fixed 6x5 shape.
+const BLANK_ROW_KEYS = ["row1", "row2", "row3", "row4", "row5", "row6"];
+const BLANK_CELL_KEYS = ["time", "completed", "rejected", "rework", "remarks"];
+
+const JOB_CARD_STATUS_LABEL: Record<JobCard["status"], string> = {
+  NotStarted: "Not Started",
+  InProgress: "In Progress",
+  OnHold: "On Hold",
+  Completed: "Completed",
+};
+
+interface JobCardDocProps {
+  id: string;
+  jobCard: JobCard;
+  /** Already resolved by the caller, e.g. "PROJ-2026-001 — Cut sheet
+   * order" — this component does no project lookup of its own. */
+  projectLabel: string;
+  /** null for an ad-hoc (unlinked) Job Card — rendered as "Ad-hoc (no
+   * stage)" rather than omitted, so the printed sheet is explicit about
+   * it rather than silently blank. */
+  stageLabel: string | null;
+  settings: Record<string, string>;
+}
+
+const JOB_CARD_LABEL_STYLE: React.CSSProperties = {
+  fontSize: "10px",
+  fontWeight: 700,
+  color: "#777",
+  textTransform: "uppercase",
+  letterSpacing: "0.8px",
+  marginBottom: "6px",
+};
+
+export function JobCardDocContent({
+  id,
+  jobCard,
+  projectLabel,
+  stageLabel,
+  settings,
+}: JobCardDocProps) {
+  const remainingQty = Math.max(
+    jobCard.expectedQuantity - jobCard.actualCompletedQty,
+    0,
+  );
+  const startDisplay = jobCard.startTime
+    ? formatJobCardTimestamp(jobCard.startTime)
+    : "Not started yet";
+  const endDisplay = jobCard.endTime
+    ? formatJobCardTimestamp(jobCard.endTime)
+    : "Not completed yet";
+  const activeTimeDisplay = formatJobCardDuration(
+    getJobCardActiveSeconds(jobCard),
+  );
+
+  return (
+    <div id={id} style={{ ...HIDDEN_STYLE, fontSize: "14px" }}>
+      {/* HEADER */}
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          borderBottom: "3px solid #1a1a1a",
+          paddingBottom: "14px",
+          marginBottom: "18px",
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "flex-start", gap: "16px" }}>
+          {settings.companyLogo && (
+            <img
+              src={settings.companyLogo}
+              alt="logo"
+              style={{
+                maxHeight: "64px",
+                maxWidth: "130px",
+                objectFit: "contain",
+              }}
+            />
+          )}
+          <div>
+            <div style={{ fontSize: "22px", fontWeight: 800, color: "#111" }}>
+              {settings.companyName || "FABFLOW"}
+            </div>
+            {settings.companyAddress && (
+              <div
+                style={{ fontSize: "12px", color: "#555", marginTop: "3px" }}
+              >
+                {settings.companyAddress}
+              </div>
+            )}
+            {settings.companyPhone && (
+              <div style={{ fontSize: "12px", color: "#555" }}>
+                Ph: {settings.companyPhone}
+              </div>
+            )}
+          </div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div
+            style={{
+              fontSize: "24px",
+              fontWeight: 800,
+              color: "#1a1a1a",
+              letterSpacing: "1.5px",
+              textTransform: "uppercase",
+            }}
+          >
+            Job Card
+          </div>
+          <div style={{ fontSize: "16px", fontWeight: 700, color: "#333" }}>
+            {jobCard.jobNo}
+          </div>
+        </div>
+      </div>
+
+      {/* CORE DETAILS */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          gap: "0",
+          border: "1px solid #999",
+          borderRadius: "4px",
+          overflow: "hidden",
+          marginBottom: "16px",
+          fontSize: "13px",
+        }}
+      >
+        {[
+          ["Project", projectLabel || "—"],
+          ["Assigned Employee", jobCard.employeeName || "—"],
+          ["Operation", jobCard.operationType],
+          ["Production Stage", stageLabel ?? "Ad-hoc (no stage)"],
+        ].map(([label, value], i) => (
+          <div
+            key={label}
+            style={{
+              padding: "10px 16px",
+              borderRight: i % 2 === 0 ? "1px solid #ddd" : undefined,
+              borderTop: i >= 2 ? "1px solid #ddd" : undefined,
+            }}
+          >
+            <div style={JOB_CARD_LABEL_STYLE}>{label}</div>
+            <div style={{ fontWeight: 700, fontSize: "15px", color: "#111" }}>
+              {value}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div
+        style={{
+          border: "1px solid #999",
+          borderRadius: "4px",
+          padding: "10px 16px",
+          marginBottom: "16px",
+        }}
+      >
+        <div style={JOB_CARD_LABEL_STYLE}>Job / Task</div>
+        <div style={{ fontSize: "14px", color: "#111" }}>
+          {jobCard.jobDescription}
+        </div>
+      </div>
+
+      {/* QUANTITY */}
+      <div style={{ marginBottom: "16px" }}>
+        <div style={{ ...JOB_CARD_LABEL_STYLE, marginBottom: "8px" }}>
+          Quantity
+        </div>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(5, 1fr)",
+            border: "1px solid #999",
+            borderRadius: "4px",
+            overflow: "hidden",
+          }}
+        >
+          {[
+            ["Expected", jobCard.expectedQuantity],
+            ["Completed", jobCard.actualCompletedQty],
+            ["Rejected", jobCard.rejectedQty],
+            ["Rework", jobCard.reworkQty],
+            ["Remaining", remainingQty],
+          ].map(([label, value], i) => (
+            <div
+              key={label}
+              style={{
+                padding: "10px 8px",
+                textAlign: "center",
+                borderLeft: i > 0 ? "1px solid #ddd" : undefined,
+              }}
+            >
+              <div style={{ fontSize: "10px", color: "#777" }}>{label}</div>
+              <div style={{ fontSize: "20px", fontWeight: 800, color: "#111" }}>
+                {value}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* TIME + STATUS */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr 1fr 1fr",
+          border: "1px solid #999",
+          borderRadius: "4px",
+          overflow: "hidden",
+          marginBottom: "20px",
+          fontSize: "12px",
+        }}
+      >
+        {[
+          ["Start Date & Time", startDisplay],
+          ["End Date & Time", endDisplay],
+          ["Active Time", activeTimeDisplay],
+          ["Status", JOB_CARD_STATUS_LABEL[jobCard.status]],
+        ].map(([label, value], i) => (
+          <div
+            key={label}
+            style={{
+              padding: "10px 12px",
+              borderLeft: i > 0 ? "1px solid #ddd" : undefined,
+            }}
+          >
+            <div style={{ fontSize: "10px", color: "#777" }}>{label}</div>
+            <div style={{ fontWeight: 700, color: "#111" }}>{value}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* MANUAL WORK RECORD — the physical/paper half of the workflow.
+          Deliberately plain boxes, not tied to any field — nothing
+          written here is read back into the system; it's evidence a
+          supervisor later transcribes into the digital Job Card. */}
+      <div
+        style={{
+          border: "2px solid #1a1a1a",
+          borderRadius: "4px",
+          padding: "14px 16px",
+          marginBottom: "20px",
+        }}
+      >
+        <div
+          style={{
+            fontSize: "13px",
+            fontWeight: 800,
+            textTransform: "uppercase",
+            letterSpacing: "0.5px",
+            marginBottom: "10px",
+          }}
+        >
+          Manual Work Record (to be filled by hand)
+        </div>
+        <table
+          style={{
+            width: "100%",
+            borderCollapse: "collapse",
+            fontSize: "12px",
+            marginBottom: "12px",
+          }}
+        >
+          <thead>
+            <tr style={{ background: "#eee" }}>
+              {["Time", "Qty Completed", "Rejected", "Rework", "Remarks"].map(
+                (h) => (
+                  <th
+                    key={h}
+                    style={{
+                      border: "1px solid #999",
+                      padding: "8px",
+                      textAlign: "left",
+                    }}
+                  >
+                    {h}
+                  </th>
+                ),
+              )}
+            </tr>
+          </thead>
+          <tbody>
+            {BLANK_ROW_KEYS.map((rowKey) => (
+              <tr key={rowKey}>
+                {BLANK_CELL_KEYS.map((cellKey) => (
+                  <td
+                    key={`${rowKey}-${cellKey}`}
+                    style={{
+                      border: "1px solid #999",
+                      height: "30px",
+                    }}
+                  />
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div style={{ display: "flex", gap: "24px", fontSize: "12px" }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ color: "#555", marginBottom: "4px" }}>
+              Start Time (actual)
+            </div>
+            <div style={{ borderBottom: "1px solid #555", height: "26px" }} />
+          </div>
+          <div style={{ flex: 1 }}>
+            <div style={{ color: "#555", marginBottom: "4px" }}>
+              Stop / End Time (actual)
+            </div>
+            <div style={{ borderBottom: "1px solid #555", height: "26px" }} />
+          </div>
+        </div>
+        <div style={{ marginTop: "12px" }}>
+          <div style={{ color: "#555", fontSize: "12px", marginBottom: "4px" }}>
+            Remarks / Notes
+          </div>
+          <div style={{ borderBottom: "1px solid #555", height: "26px" }} />
+          <div
+            style={{
+              borderBottom: "1px solid #555",
+              height: "26px",
+              marginTop: "8px",
+            }}
+          />
+        </div>
+      </div>
+
+      {/* SIGN-OFF */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr 1fr",
+          gap: "24px",
+          paddingTop: "10px",
+        }}
+      >
+        {["Employee Signature", "Supervisor Signature", "Date"].map((label) => (
+          <div key={label} style={{ textAlign: "center" }}>
+            <div
+              style={{
+                minHeight: "60px",
+                borderBottom: "1px solid #555",
+                marginBottom: "6px",
+              }}
+            />
+            <div style={{ fontSize: "11px", fontWeight: 600, color: "#333" }}>
+              {label}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div
+        style={{
+          marginTop: "18px",
+          fontSize: "10px",
+          color: "#aaa",
+          textAlign: "center",
+        }}
+      >
+        This is a physical copy of a FabFlow Job Card. The system record remains
+        authoritative — data recorded above must be entered back into FabFlow,
+        not treated as a separate record.
       </div>
     </div>
   );

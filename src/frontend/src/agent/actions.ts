@@ -68,6 +68,10 @@ import {
 } from "@/lib/quotationsApi";
 import { createScrapRecordRemote } from "@/lib/scrapApi";
 import { getSupabase } from "@/lib/supabaseClient";
+import {
+  createTenderRemote,
+  createTenderRequirementRemote,
+} from "@/lib/tendersApi";
 import { computeNextToolCode, createToolRemote } from "@/lib/toolsApi";
 import { createVendorRemote } from "@/lib/vendorsApi";
 import { hasPermission } from "@/permissions";
@@ -91,6 +95,7 @@ import type {
   ProjectStageStatus,
   ScrapStatus,
   StageTransaction,
+  TenderRequirementCategory,
   ToolStatus,
 } from "@/types";
 import type {
@@ -3420,7 +3425,11 @@ export const createDie: AgentAction = {
       purpose: (p.purpose as string) || undefined,
       compatibleMachineId: (p.compatibleMachineId as string) || undefined,
       location: (p.location as string) || undefined,
-      status: "Available" as DieStatus,
+      // Phase 61 — dies require a linked drawing before the database
+      // will allow Available/In Use; this action attaches drawingIds
+      // (if any) only after the insert, so a new die must start as
+      // Draft, matching the UI's own "Add Die" default.
+      status: "Draft" as DieStatus,
       notes: (p.notes as string) || undefined,
       isActive: true,
       createdAt: now,
@@ -4211,6 +4220,209 @@ export const createSalaryAdvance: AgentAction = {
   },
 };
 
+// ── Phase 56 (Group 2) / Phase 24 — Tender Management actions ─────────
+// Thin wrappers over lib/tendersApi.ts, the same real write path
+// TenderManagement.tsx/TenderDetail.tsx already use — no parallel action
+// system, no direct Supabase access. AI extraction (Phase 20) is
+// deliberately NOT exposed as an action yet — it depends on the
+// PDF-input Edge Function extension, which is still pending deployment
+// approval (see supabase/functions/agent-chat/openaiProvider.ts).
+
+export const findTender: AgentAction = {
+  name: "findTender",
+  description:
+    "Search existing tenders by tender number or title. Always call this before createTender to avoid registering a duplicate.",
+  permission: "tenders.view",
+  riskLevel: "low",
+  kind: "read",
+  destructive: false,
+  parameters: {
+    type: "object",
+    properties: {
+      query: {
+        type: "string",
+        description: "Tender number (partial or exact) or title to search for.",
+      },
+    },
+    required: ["query"],
+  },
+  validate: (p) => ({ query: required(p, "query") }),
+  execute: async ({ query }): Promise<AgentActionOutcome> => {
+    const q = String(query).trim().toUpperCase();
+    const matches = useStore
+      .getState()
+      .tenders.filter(
+        (t) =>
+          t.tenderNumber.toUpperCase().includes(q) ||
+          t.title.toUpperCase().includes(q),
+      );
+    if (matches.length === 0) {
+      return { ok: false, message: `No tender found matching "${query}".` };
+    }
+    return {
+      ok: true,
+      message: `Found ${matches.length} tender(s) matching "${query}".`,
+      data: {
+        matches: matches.map((t) => ({
+          id: t.id,
+          tenderNumber: t.tenderNumber,
+          title: t.title,
+          status: t.status,
+        })),
+      },
+    };
+  },
+};
+
+export const createTender: AgentAction = {
+  name: "createTender",
+  description:
+    "Register a new tender to track. Always call findTender first to check for a plausible existing match — never create a duplicate. tenderNumber must be the real number from the tender document, never invented.",
+  permission: "tenders.create",
+  riskLevel: "low",
+  kind: "write",
+  destructive: false,
+  parameters: {
+    type: "object",
+    properties: {
+      tenderNumber: {
+        type: "string",
+        description:
+          "The real tender/reference number from the tender document.",
+      },
+      title: { type: "string", description: "Tender title." },
+      authorityName: {
+        type: "string",
+        description:
+          "Issuing authority name, optional — only if not an existing customer (use customerId instead when it is).",
+      },
+      customerId: {
+        type: "string",
+        description:
+          "Existing customer id, optional — resolve via findCustomer first.",
+      },
+      portal: { type: "string", description: "Tender portal, optional." },
+      bidType: { type: "string", description: "Bid type, optional." },
+      submissionDeadline: {
+        type: "string",
+        description: "Submission deadline (ISO datetime), optional.",
+      },
+      emdAmount: {
+        type: "number",
+        description: "EMD amount in rupees, optional.",
+      },
+    },
+    required: ["tenderNumber", "title"],
+  },
+  validate: (p) => ({
+    tenderNumber: required(p, "tenderNumber"),
+    title: required(p, "title"),
+    authorityName: (p.authorityName as string) || "",
+    customerId: (p.customerId as string) || "",
+    portal: (p.portal as string) || "",
+    bidType: (p.bidType as string) || "",
+    submissionDeadline: (p.submissionDeadline as string) || "",
+    emdAmount: p.emdAmount ? Number(p.emdAmount) : undefined,
+  }),
+  execute: async (p): Promise<AgentActionOutcome> => {
+    const result = await createTenderRemote({
+      tenderNumber: p.tenderNumber as string,
+      title: p.title as string,
+      authorityName: (p.authorityName as string) || undefined,
+      customerId: (p.customerId as string) || undefined,
+      portal: (p.portal as string) || undefined,
+      bidType: (p.bidType as string) || undefined,
+      submissionDeadline: (p.submissionDeadline as string) || undefined,
+      emdAmount: p.emdAmount as number | undefined,
+      status: "Draft",
+    });
+    if (result.status !== "success" || !result.data) {
+      return {
+        ok: false,
+        message: `Could not create tender: ${result.error ?? result.status}`,
+      };
+    }
+    useStore.getState().addTenderLocal(result.data);
+    return {
+      ok: true,
+      message: `Registered tender ${result.data.tenderNumber} — "${result.data.title}".`,
+      data: { id: result.data.id, tenderNumber: result.data.tenderNumber },
+    };
+  },
+};
+
+export const addTenderRequirement: AgentAction = {
+  name: "addTenderRequirement",
+  description:
+    "Add one requirement to an existing tender's checklist. Call findTender first to resolve the tenderId. Preserve the tender's actual wording in requirementText — never paraphrase or invent a requirement.",
+  permission: "tenders.edit",
+  riskLevel: "low",
+  kind: "write",
+  destructive: false,
+  parameters: {
+    type: "object",
+    properties: {
+      tenderId: {
+        type: "string",
+        description: "The tender id (resolve via findTender first).",
+      },
+      requirementText: {
+        type: "string",
+        description: "The requirement, verbatim from the tender document.",
+      },
+      category: {
+        type: "string",
+        description:
+          "One of: Eligibility, Technical, Financial, Document, Certificate, Declaration, Schedule, EMD, Portal, Format, Other. Optional, defaults to Other.",
+      },
+      isMandatory: {
+        type: "boolean",
+        description: "Whether this requirement is mandatory. Defaults to true.",
+      },
+    },
+    required: ["tenderId", "requirementText"],
+  },
+  validate: (p) => ({
+    tenderId: required(p, "tenderId"),
+    requirementText: required(p, "requirementText"),
+    category: (p.category as string) || "Other",
+    isMandatory: p.isMandatory !== false,
+  }),
+  execute: async (p): Promise<AgentActionOutcome> => {
+    const s = useStore.getState();
+    const tender = s.tenders.find((t) => t.id === p.tenderId);
+    if (!tender) {
+      return {
+        ok: false,
+        message: "Tender not found — resolve it with findTender first.",
+      };
+    }
+    const existingCount = s.tenderRequirements.filter(
+      (r) => r.tenderId === tender.id,
+    ).length;
+    const result = await createTenderRequirementRemote({
+      tenderId: tender.id,
+      requirementText: p.requirementText as string,
+      category: p.category as TenderRequirementCategory,
+      isMandatory: p.isMandatory as boolean,
+      priority: p.isMandatory ? 2 : 4,
+      displayOrder: existingCount,
+    });
+    if (result.status !== "success" || !result.data) {
+      return {
+        ok: false,
+        message: `Could not add requirement: ${result.error ?? result.status}`,
+      };
+    }
+    s.addTenderRequirementLocal(result.data);
+    return {
+      ok: true,
+      message: `Added requirement to ${tender.tenderNumber}: "${(p.requirementText as string).slice(0, 80)}".`,
+      data: { id: result.data.id },
+    };
+  },
+};
+
 export const AGENT_ACTIONS: Record<string, AgentAction> = {
   findCustomer,
   createCustomer,
@@ -4248,6 +4460,9 @@ export const AGENT_ACTIONS: Record<string, AgentAction> = {
   createBillableService,
   recordMachineServiceUsage,
   createSalaryAdvance,
+  findTender,
+  createTender,
+  addTenderRequirement,
 };
 
 /** The single execution gate every action call goes through: re-checks

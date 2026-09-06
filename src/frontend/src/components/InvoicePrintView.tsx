@@ -10,6 +10,7 @@ import type React from "react";
 
 import { useStore } from "../store";
 import type { Customer, Invoice } from "../types";
+import { EwayBillIndicator } from "./EwayBillIndicator";
 
 interface Props {
   invoice: Invoice | null;
@@ -119,30 +120,17 @@ export function InvoicePrintView({ invoice, customer, open, onClose }: Props) {
         className="max-w-4xl max-h-[92vh] overflow-y-auto max-sm:!fixed max-sm:!inset-0 max-sm:!max-w-full max-sm:!rounded-none max-sm:!h-screen max-sm:!max-h-screen max-sm:![transform:none]"
         data-ocid="invoice-print.dialog"
       >
-        {/* E-Way Bill Alert Banner */}
-        {invoice && (invoice.totalAmount ?? 0) > 50000 && (
-          <div className="flex items-start gap-2 rounded-md border border-warning/30 bg-warning/15 px-3 py-2 text-xs text-warning no-print">
-            <span className="mt-0.5 text-base leading-none">\u26a0\ufe0f</span>
-            <div className="flex-1">
-              <p className="font-semibold">E-Way Bill Required</p>
-              <p className="mt-0.5 text-warning">
-                This invoice exceeds \u20b950,000. An E-Way Bill is mandatory
-                for this shipment.
-              </p>
-            </div>
-            <a
-              href="https://ewaybillgst.gov.in"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="ml-2 shrink-0 rounded bg-warning px-2 py-1 text-xs font-semibold text-warning-foreground hover:bg-warning/90 no-print"
-            >
-              Generate E-Way Bill \u2197
-            </a>
-          </div>
-        )}
-
         <DialogHeader className="no-print">
-          <DialogTitle>Invoice Preview</DialogTitle>
+          <DialogTitle className="flex items-center gap-2 flex-wrap">
+            Invoice Preview
+            {invoice && (
+              <EwayBillIndicator
+                invoiceId={invoice.id}
+                totalAmount={invoice.totalAmount ?? 0}
+                ewayBillDocument={invoice.ewayBillDocument}
+              />
+            )}
+          </DialogTitle>
         </DialogHeader>
 
         {/* Action buttons — hidden during PDF capture */}

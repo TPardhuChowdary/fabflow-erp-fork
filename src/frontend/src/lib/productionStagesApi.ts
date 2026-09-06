@@ -64,6 +64,8 @@ export interface ProjectProductionStageRow {
   sent_date_time: string | null;
   received_date_time: string | null;
   rework_qty: number | null;
+  target_qty: number | null;
+  stage_type: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -76,6 +78,7 @@ export interface ProductionStageTransactionRow {
   event_time: string;
   vendor_id: string | null;
   vendor_name: string | null;
+  source_stage_id: string | null;
   created_at: string;
 }
 
@@ -111,6 +114,9 @@ export function rowToProjectProductionStage(
     isRework: row.is_rework,
     referenceId: row.reference_stage_id ?? undefined,
     reworkStage: row.rework_stage_name ?? undefined,
+    targetQty: row.target_qty ?? undefined,
+    stageType:
+      (row.stage_type as ProjectProductionStage["stageType"]) ?? undefined,
   };
 }
 
@@ -124,6 +130,7 @@ export function rowToStageTransaction(
     dateTime: row.event_time,
     sentToVendorId: row.vendor_id ?? undefined,
     sentToVendorName: row.vendor_name ?? undefined,
+    sourceStageId: row.source_stage_id ?? undefined,
   };
 }
 
@@ -161,6 +168,14 @@ function toStageJsonField(stage: ProjectProductionStage, position: number) {
     sent_date_time: stage.sentDateTime || null,
     received_date_time: stage.receivedDateTime || null,
     rework_qty: stage.reworkQty ?? null,
+    // Both null/absent here is intentionally indistinguishable to the
+    // server (jsonb ->> collapses "missing key" and "explicit null" to
+    // the same SQL NULL) — upsert_project_production_stages() COALESCEs
+    // against the existing row for exactly these two fields, so an
+    // already-set value survives an unrelated stage save that doesn't
+    // touch it (database/20260906060000).
+    target_qty: stage.targetQty ?? null,
+    stage_type: stage.stageType ?? null,
   };
 }
 
@@ -262,9 +277,13 @@ export async function recordStageTransactionRemote(
       event_time: tx.dateTime,
       vendor_id: sanitizeVendorId(tx.sentToVendorId),
       vendor_name: tx.sentToVendorName || null,
+      // Set only for a stage-to-stage transfer (§H design record) — the
+      // DB CHECK constraint rejects this on a 'receive' row, and the
+      // validating trigger rejects a cross-project/cross-org source.
+      source_stage_id: tx.sourceStageId || null,
     })
     .select(
-      "id, stage_id, type, quantity, event_time, vendor_id, vendor_name, created_at",
+      "id, stage_id, type, quantity, event_time, vendor_id, vendor_name, source_stage_id, created_at",
     )
     .single();
 

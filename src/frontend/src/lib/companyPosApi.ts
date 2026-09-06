@@ -39,7 +39,11 @@
 
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
 import type { CompanyPO } from "@/types";
-import { COMPANY_PO_COLUMNS, transformCompanyPORow } from "./hydration";
+import {
+  COMPANY_PO_COLUMNS,
+  fetchAllRows,
+  transformCompanyPORow,
+} from "./hydration";
 import type { CompanyPORow } from "./hydration";
 
 export type WriteStatus = "success" | "denied" | "error" | "unauthenticated";
@@ -118,12 +122,17 @@ export function computeNextCpoNumber(existingNumbers: string[]): string {
   return `CPO-${String(next).padStart(3, "0")}`;
 }
 
+// Gap-closure fix — same silent-1,000-row-truncation risk as
+// jobCardsApi.ts's fetchExistingJobNos; see that file's comment.
 async function fetchExistingCpoNumbers(
   client: ReturnType<typeof getSupabase>,
 ): Promise<string[] | null> {
-  const { data, error } = await client.from("company_pos").select("cpo_number");
+  const { data, error } = await fetchAllRows<{ cpo_number: string }>(
+    (from, to) =>
+      client.from("company_pos").select("cpo_number").range(from, to),
+  );
   if (error || !data) return null;
-  return (data as unknown as { cpo_number: string }[]).map((r) => r.cpo_number);
+  return data.map((r) => r.cpo_number);
 }
 
 // Postgres unique_violation. Confirmed via investigation: the only

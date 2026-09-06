@@ -27,7 +27,6 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import {
   Download,
-  Eye,
   Pencil,
   Plus,
   Printer,
@@ -58,7 +57,7 @@ import {
   deleteDeliveryChallanRemote,
   updateDeliveryChallanRemote,
 } from "../lib/deliveryChallansApi";
-import { getCustomerVisibleName } from "../lib/utils";
+import { generateDocumentFilename, getCustomerVisibleName } from "../lib/utils";
 import {
   canCreate,
   canDelete,
@@ -329,7 +328,7 @@ export function DeliveryChallans() {
       );
     });
     try {
-      triggerDownload(docId, `DC_${dc.dcNo ?? dc.id}.pdf`);
+      triggerDownload(docId, generateDocumentFilename(dc.dcNo, dc.id));
     } catch (e) {
       console.error("DOWNLOAD FAILED", e);
     } finally {
@@ -867,11 +866,22 @@ export function DeliveryChallans() {
                 return (
                   <TableRow
                     key={dc.id}
-                    className="hover:bg-muted/30"
+                    className="hover:bg-muted/30 cursor-pointer"
+                    onClick={() => openPreview(dc)}
                     data-ocid={`delivery_challans.list.row.${i + 1}`}
                   >
                     <TableCell className="text-xs font-mono font-semibold">
-                      {dc.dcNo}
+                      <button
+                        type="button"
+                        className="hover:underline focus-visible:underline"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openPreview(dc);
+                        }}
+                        data-ocid={`delivery_challans.open_button.${i + 1}`}
+                      >
+                        {dc.dcNo}
+                      </button>
                     </TableCell>
                     <TableCell className="text-sm">
                       {cust?.name ?? "\u2014"}
@@ -901,12 +911,11 @@ export function DeliveryChallans() {
                             before; only the chrome changed. */}
                         <RowActions
                           primary={[
-                            {
-                              label: "View",
-                              icon: Eye,
-                              onClick: () => openPreview(dc),
-                              "data-ocid": `delivery_challans.view.button.${i + 1}`,
-                            },
+                            // Global record-navigation rule (§1/§4) —
+                            // "View" removed: the row and the DC No.
+                            // button already open this exact same preview
+                            // via openPreview, so a duplicate explicit
+                            // button here would be redundant.
                             ...(pEdit
                               ? [
                                   {
@@ -1279,17 +1288,47 @@ export function DeliveryChallans() {
                         </div>
                       </div>
                       {!editForm.useCustomerAddress && (
-                        <Textarea
-                          placeholder="Enter delivery address..."
-                          value={editForm.customDeliveryAddress}
-                          onChange={(e) =>
-                            setEditForm((p) => ({
-                              ...p,
-                              customDeliveryAddress: e.target.value,
-                            }))
-                          }
-                          className="text-sm min-h-[60px]"
-                        />
+                        <>
+                          {(
+                            safeCustomers.find(
+                              (c) => c.id === editingChallan.customerId,
+                            )?.deliveryAddresses || []
+                          ).length > 0 && (
+                            <div className="flex flex-wrap gap-1.5 mb-1.5">
+                              {(
+                                safeCustomers.find(
+                                  (c) => c.id === editingChallan.customerId,
+                                )?.deliveryAddresses || []
+                              ).map((a) => (
+                                <button
+                                  key={a.id}
+                                  type="button"
+                                  onClick={() =>
+                                    setEditForm((p) => ({
+                                      ...p,
+                                      customDeliveryAddress: a.address,
+                                    }))
+                                  }
+                                  className="text-xs px-2 py-1 rounded-full border bg-muted/40 hover:bg-muted"
+                                  data-ocid="delivery_challans.edit.saved_address_chip"
+                                >
+                                  {a.label || "Saved address"}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                          <Textarea
+                            placeholder="Enter delivery address..."
+                            value={editForm.customDeliveryAddress}
+                            onChange={(e) =>
+                              setEditForm((p) => ({
+                                ...p,
+                                customDeliveryAddress: e.target.value,
+                              }))
+                            }
+                            className="text-sm min-h-[60px]"
+                          />
+                        </>
                       )}
                     </div>
                   </div>
@@ -1505,18 +1544,49 @@ export function DeliveryChallans() {
                     </div>
                   </div>
                   {!form.useCustomerAddress && (
-                    <Textarea
-                      placeholder="Enter delivery address..."
-                      value={form.customDeliveryAddress}
-                      onChange={(e) =>
-                        setForm((prev) => ({
-                          ...prev,
-                          customDeliveryAddress: e.target.value,
-                        }))
-                      }
-                      className="text-sm min-h-[80px]"
-                      data-ocid="delivery_challans.form.custom_delivery_address.input"
-                    />
+                    <>
+                      {/* Phase 54 (Group 2, roadmap Phase 15) — quick-fill
+                          from the customer's saved delivery addresses,
+                          instead of retyping free text every time. Still
+                          just fills the same textarea below - no new state
+                          machine, the saved address is a starting point,
+                          not a locked selection. */}
+                      {(selectedCustomer?.deliveryAddresses || []).length >
+                        0 && (
+                        <div className="flex flex-wrap gap-1.5">
+                          {(selectedCustomer?.deliveryAddresses || []).map(
+                            (a) => (
+                              <button
+                                key={a.id}
+                                type="button"
+                                onClick={() =>
+                                  setForm((prev) => ({
+                                    ...prev,
+                                    customDeliveryAddress: a.address,
+                                  }))
+                                }
+                                className="text-xs px-2 py-1 rounded-full border bg-muted/40 hover:bg-muted"
+                                data-ocid="delivery_challans.form.saved_address_chip"
+                              >
+                                {a.label || "Saved address"}
+                              </button>
+                            ),
+                          )}
+                        </div>
+                      )}
+                      <Textarea
+                        placeholder="Enter delivery address..."
+                        value={form.customDeliveryAddress}
+                        onChange={(e) =>
+                          setForm((prev) => ({
+                            ...prev,
+                            customDeliveryAddress: e.target.value,
+                          }))
+                        }
+                        className="text-sm min-h-[80px]"
+                        data-ocid="delivery_challans.form.custom_delivery_address.input"
+                      />
+                    </>
                   )}
                   {form.useCustomerAddress && selectedCustomer?.address && (
                     <div className="text-xs text-muted-foreground bg-muted/40 rounded px-3 py-2 whitespace-pre-line">

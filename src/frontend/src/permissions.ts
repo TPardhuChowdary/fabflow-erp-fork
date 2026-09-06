@@ -51,7 +51,7 @@ export const MODULE_PERMISSIONS: Record<
   job_cards: {
     label: "Job Cards",
     category: "Production",
-    actions: ["view", "create", "edit", "delete"],
+    actions: ["view", "create", "edit", "delete", "approve"],
   },
   material_requisitions: {
     label: "Material Requisitions",
@@ -209,6 +209,14 @@ export const MODULE_PERMISSIONS: Record<
       "activate",
       "deactivate",
       "assign_roles",
+      // Administrator password-reset workflow — deliberately its own
+      // action, not folded into "edit", same reasoning as
+      // activate/deactivate above: resetting a user's login credential is
+      // materially more sensitive than editing their profile fields or
+      // permission overrides, so it gets its own explicit grant. No role
+      // is granted this by default (matches audit_log.view's own
+      // convention) — only is_admin roles have it until assigned.
+      "reset_password",
     ],
   },
   // security_audit_log's own RLS (phase1_auth_permissions_rls_v5_FINAL.sql)
@@ -223,6 +231,36 @@ export const MODULE_PERMISSIONS: Record<
     label: "Security Audit Log",
     category: "System",
     actions: ["view"],
+  },
+  // Universal Email Integration (see chat, database/phase-50) — connected
+  // mailboxes, synced messages, and attachments. Mirrors job_cards/payables'
+  // own precedent exactly: NOT seeded into public.permissions/
+  // role_permissions by the migration, so only Admin (which bypasses
+  // has_permission entirely) can use it until explicitly granted to
+  // another role via this same Settings > Users permission editor — no new
+  // grant mechanism. "sync" is its own action (not folded into "edit")
+  // because triggering a mailbox sync is a distinct, narrower capability
+  // than editing a message.
+  email: {
+    label: "Email Accounts",
+    category: "System",
+    actions: ["view", "create", "edit", "delete", "sync"],
+  },
+  // Phase 55 (Group 2, roadmap Phase 17) — Company Document Library.
+  // Same not-seeded-by-default pattern as email above: only Admin can use
+  // it until explicitly granted via Settings > Users, since these are
+  // compliance-sensitive documents (GST/PAN/ISO/etc.).
+  company_documents: {
+    label: "Company Document Library",
+    category: "System",
+    actions: ["view", "create", "edit", "delete"],
+  },
+  // Phase 56 (Group 2, roadmap Phases 19-24) — Tender Management. Same
+  // not-seeded-by-default pattern as email/company_documents above.
+  tenders: {
+    label: "Tenders",
+    category: "System",
+    actions: ["view", "create", "edit", "delete"],
   },
 };
 

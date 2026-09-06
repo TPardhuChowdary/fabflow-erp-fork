@@ -27,6 +27,7 @@ import {
   DELIVERY_CHALLAN_COLUMNS,
   transformDeliveryChallanRow,
 } from "./hydration";
+import { fetchAllRows } from "./hydration";
 import type { DeliveryChallanRow } from "./hydration";
 
 // Same DC-YYYY-NNN format as DeliveryChallans.tsx's own previewDcNo() —
@@ -106,16 +107,17 @@ async function requireSession() {
   return { ok: true as const, client };
 }
 
+// Gap-closure fix — same silent-1,000-row-truncation risk as
+// jobCardsApi.ts's fetchExistingJobNos; see that file's comment.
 async function fetchExistingDcNumbers(
   client: ReturnType<typeof getSupabase>,
 ): Promise<string[] | null> {
-  const { data, error } = await client
-    .from("delivery_challans")
-    .select("dc_no");
-  if (error || !data) return null;
-  return (data as unknown as { dc_no: string | null }[]).map(
-    (r) => r.dc_no ?? "",
+  const { data, error } = await fetchAllRows<{ dc_no: string | null }>(
+    (from, to) =>
+      client.from("delivery_challans").select("dc_no").range(from, to),
   );
+  if (error || !data) return null;
+  return data.map((r) => r.dc_no ?? "");
 }
 
 // Postgres unique_violation on uq_delivery_challans_org_dcno specifically -

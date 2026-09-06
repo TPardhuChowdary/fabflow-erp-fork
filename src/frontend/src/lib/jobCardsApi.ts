@@ -10,7 +10,11 @@
 
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
 import type { JobCard } from "@/types";
-import { JOB_CARD_COLUMNS, transformJobCardRow } from "./hydration";
+import {
+  JOB_CARD_COLUMNS,
+  fetchAllRows,
+  transformJobCardRow,
+} from "./hydration";
 import type { JobCardRow } from "./hydration";
 
 export type WriteStatus = "success" | "denied" | "error" | "unauthenticated";
@@ -26,6 +30,8 @@ export type JobCardWritable = Omit<
   | "id"
   | "expectedQuantity"
   | "actualTimeSpentMinutes"
+  | "activeSeconds"
+  | "currentRunStartedAt"
   | "createdAt"
   | "updatedAt"
 >;
@@ -43,6 +49,14 @@ function toJobCardFields(v: JobCardWritable) {
     actual_completed_qty: v.actualCompletedQty,
     rejected_qty: v.rejectedQty,
     rework_qty: v.reworkQty,
+    reject_root_cause: v.rejectRootCause || null,
+    // Nullable — a job card need not belong to a production stage
+    // (ad-hoc work stays supported). Validated server-side against the
+    // job card's own project_id/organization_id by
+    // trg_validate_job_card_stage_reference; changing it on an already-
+    // Completed, stage-linked card additionally requires job_cards.approve
+    // (database/20260906060000).
+    stage_id: v.stageId || null,
     start_time: v.startTime || null,
     end_time: v.endTime || null,
     status: v.status,
@@ -94,12 +108,20 @@ function isJobNoConflict(error: { code?: string; message?: string }) {
   );
 }
 
+// Gap-closure fix — was a single unbounded .select(), which silently
+// truncates past 1,000 rows and could miss the true max job_no, defeating
+// the auto-renumber-on-conflict retry below at scale. The real safety net
+// is still the DB's own uq_job_cards_org_jobno constraint (a truncated list
+// just risks a spurious extra retry, never a duplicate), but this makes the
+// retry actually succeed instead of exhausting MAX_JOB_NO_ATTEMPTS.
 async function fetchExistingJobNos(
   client: ReturnType<typeof getSupabase>,
 ): Promise<string[] | null> {
-  const { data, error } = await client.from("job_cards").select("job_no");
+  const { data, error } = await fetchAllRows<{ job_no: string }>((from, to) =>
+    client.from("job_cards").select("job_no").range(from, to),
+  );
   if (error || !data) return null;
-  return (data as unknown as { job_no: string }[]).map((r) => r.job_no ?? "");
+  return data.map((r) => r.job_no ?? "");
 }
 
 const MAX_JOB_NO_ATTEMPTS = 3;
@@ -177,6 +199,58 @@ export async function updateJobCardRemote(
     };
   }
   return { status: "success", data: transformJobCardRow(rows[0]) };
+}
+
+// Job Card live timer (Start/Pause/Resume) — database/20260906050000.
+// Deliberately a minimal {status}-only update, not a full-row
+// updateJobCardRemote() call: sending only the field that's actually
+// changing means every other column (including the new
+// active_seconds/current_run_started_at, which the client never touches
+// directly) arrives unchanged, letting the trg_enforce_job_card_timer_
+// transition trigger compute and stamp them server-side with no risk of
+// the client racing or clobbering its own math. The trigger is what
+// validates the transition and enforces job_cards.approve for pause —
+// this function does not duplicate either check; an invalid transition
+// or a missing permission comes back as a normal Postgres error via the
+// existing `error` branch below, exactly like any other write.
+async function updateJobCardStatusRemote(
+  id: string,
+  status: "InProgress" | "OnHold",
+): Promise<WriteResult<JobCard>> {
+  const gate = await requireSession();
+  if (!gate.ok) return gate.result;
+
+  const { data, error } = await gate.client
+    .from("job_cards")
+    .update({ status })
+    .eq("id", id)
+    .select(JOB_CARD_COLUMNS);
+
+  if (error) return { status: "error", error: error.message };
+  const rows = (data as unknown as JobCardRow[]) ?? [];
+  if (rows.length === 0) {
+    return {
+      status: "denied",
+      error: "No row was updated (blocked by RLS, or the row does not exist)",
+    };
+  }
+  return { status: "success", data: transformJobCardRow(rows[0]) };
+}
+
+/** NotStarted -> InProgress. Server stamps start_time/current_run_started_at. */
+export function startJobCardRemote(id: string): Promise<WriteResult<JobCard>> {
+  return updateJobCardStatusRemote(id, "InProgress");
+}
+
+/** InProgress -> OnHold ("Paused"). Requires job_cards.approve server-side. */
+export function pauseJobCardRemote(id: string): Promise<WriteResult<JobCard>> {
+  return updateJobCardStatusRemote(id, "OnHold");
+}
+
+/** OnHold -> InProgress. Server stamps a fresh current_run_started_at;
+ * active_seconds accumulated so far is untouched, never reset. */
+export function resumeJobCardRemote(id: string): Promise<WriteResult<JobCard>> {
+  return updateJobCardStatusRemote(id, "InProgress");
 }
 
 export async function deleteJobCardRemote(

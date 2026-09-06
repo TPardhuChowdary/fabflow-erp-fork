@@ -104,7 +104,16 @@ export interface DrawingLink {
   // matching Postgres check constraint). No new table, no duplicate
   // drawing storage — the Drawing Repository stays the sole source of
   // truth for every drawing's actual content.
-  linkedType: "project" | "machine" | "vendor" | "customer" | "die";
+  // Phase 6 (Group 2) - tool/inventory_item added, matching the widened
+  // drawing_links_linked_type_check CHECK constraint (database/phase-51).
+  linkedType:
+    | "project"
+    | "machine"
+    | "vendor"
+    | "customer"
+    | "die"
+    | "tool"
+    | "inventory_item";
   linkedId: string;
   createdAt: number;
 }

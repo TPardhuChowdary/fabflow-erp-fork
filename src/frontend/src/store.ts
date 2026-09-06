@@ -47,6 +47,8 @@ import { useQmsStore } from "./qms/store/useQmsStore";
 import type {
   AdvanceRecord,
   AppSettings,
+  AssetPhoto,
+  AssetUsageEvent,
   AttendanceRecord,
   AuditLogEntry,
   AuthUser,
@@ -54,6 +56,7 @@ import type {
   BomItem,
   BomRequisition,
   BomRequisitionStatus,
+  CompanyDocument,
   CompanyPO,
   Customer,
   DeliveryChallan,
@@ -61,6 +64,7 @@ import type {
   Die,
   Employee,
   EmployeeDocument,
+  EmployeeReward,
   ExpenseFloat,
   ExpenseFloatStatus,
   ExportJob,
@@ -69,6 +73,7 @@ import type {
   InventoryPurchase,
   Invoice,
   JobCard,
+  JobCardException,
   Machine,
   MachineCondition,
   MachineDie,
@@ -108,6 +113,8 @@ import type {
   ServiceRecord,
   StageTransaction,
   StockReservation,
+  Tender,
+  TenderRequirement,
   Tool,
   ToolAssignmentHistory,
   Vendor,
@@ -795,6 +802,20 @@ interface Store {
   ) => void;
   setJobCardsFromServer: (jobCards: JobCard[]) => void;
 
+  // Employee Job Card Mobile Workflow — same shape, for job_card_exceptions.
+  jobCardExceptions: JobCardException[];
+  jobCardExceptionsHydration: {
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated";
+    error?: string;
+  };
+  setJobCardExceptionsHydrationStatus: (
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated",
+    error?: string,
+  ) => void;
+  setJobCardExceptionsFromServer: (exceptions: JobCardException[]) => void;
+  addJobCardExceptionLocal: (e: JobCardException) => void;
+  updateJobCardExceptionLocal: (e: JobCardException) => void;
+
   // Phase 21B — same shape, for the company POs domain.
   companyPOsHydration: {
     status: "idle" | "loading" | "success" | "error" | "unauthenticated";
@@ -1348,6 +1369,86 @@ interface Store {
   addMachineDieLocal: (machineId: string, dieId: string) => void;
   removeMachineDieLocal: (machineId: string, dieId: string) => void;
 
+  // Phase 51 (Group 2) — universal asset photo store (see AssetPhoto in
+  // types.ts). Same hydration/local-mutation shape as every other
+  // Supabase-backed domain in this store.
+  assetPhotos: AssetPhoto[];
+  assetPhotosHydration: { status: HydrationStatusValue; error?: string };
+  setAssetPhotosHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setAssetPhotosFromServer: (rows: AssetPhoto[]) => void;
+  addAssetPhotoLocal: (photo: AssetPhoto) => void;
+  removeAssetPhotoLocal: (photoId: string) => void;
+  updateAssetPhotoLocal: (photo: AssetPhoto) => void;
+
+  // Phase 51 (Group 2) — universal asset usage-event log. Insert-only at
+  // the RLS level (see database/phase-51) - no update/remove local action
+  // exists to match, same shape as toolAssignmentHistory's own actions.
+  assetUsageEvents: AssetUsageEvent[];
+  assetUsageEventsHydration: { status: HydrationStatusValue; error?: string };
+  setAssetUsageEventsHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setAssetUsageEventsFromServer: (rows: AssetUsageEvent[]) => void;
+  addAssetUsageEventLocal: (event: AssetUsageEvent) => void;
+
+  // Phase 53 (Group 2) — Employee Rewards/Merit. Unlike assetUsageEvents,
+  // RLS also allows delete (a mis-entered reward can be removed), so a
+  // local remove action exists to match.
+  employeeRewards: EmployeeReward[];
+  employeeRewardsHydration: { status: HydrationStatusValue; error?: string };
+  setEmployeeRewardsHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setEmployeeRewardsFromServer: (rows: EmployeeReward[]) => void;
+  addEmployeeRewardLocal: (reward: EmployeeReward) => void;
+  removeEmployeeRewardLocal: (rewardId: string) => void;
+
+  // Phase 55 (Group 2) — Company Document Library.
+  companyDocuments: CompanyDocument[];
+  companyDocumentsHydration: {
+    status: HydrationStatusValue;
+    error?: string;
+  };
+  setCompanyDocumentsHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setCompanyDocumentsFromServer: (rows: CompanyDocument[]) => void;
+  addCompanyDocumentLocal: (doc: CompanyDocument) => void;
+  updateCompanyDocumentLocal: (doc: CompanyDocument) => void;
+  removeCompanyDocumentLocal: (docId: string) => void;
+
+  // Phase 56 (Group 2) — Tender Management.
+  tenders: Tender[];
+  tendersHydration: { status: HydrationStatusValue; error?: string };
+  setTendersHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setTendersFromServer: (rows: Tender[]) => void;
+  addTenderLocal: (tender: Tender) => void;
+  updateTenderLocal: (tender: Tender) => void;
+  removeTenderLocal: (tenderId: string) => void;
+
+  tenderRequirements: TenderRequirement[];
+  tenderRequirementsHydration: {
+    status: HydrationStatusValue;
+    error?: string;
+  };
+  setTenderRequirementsHydrationStatus: (
+    status: HydrationStatusValue,
+    error?: string,
+  ) => void;
+  setTenderRequirementsFromServer: (rows: TenderRequirement[]) => void;
+  addTenderRequirementLocal: (req: TenderRequirement) => void;
+  updateTenderRequirementLocal: (req: TenderRequirement) => void;
+  removeTenderRequirementLocal: (reqId: string) => void;
+
   // Machine/Service Revenue (Phase 40) — billableServices mirrors
   // dies/tools' wholesale-replace shape. machineServiceRates is
   // insert-only (no update/delete action exists - see
@@ -1679,6 +1780,81 @@ export function resolveFloatLink(
   return candidateFloatId;
 }
 
+// Gap-closure fix (D4) — every one of these fields is fully re-fetched from
+// Supabase on every load (see hooks/useSupabaseHydration.ts: each is the
+// target of a useHydrationEffect() that runs right after auth resolves and
+// unconditionally overwrites it on success). Persisting them to localStorage
+// on top of that just mirrors live business data - customer PII, quotation
+// financials, payroll, etc. - into the browser as a second, staler copy
+// that's never read back for anything hydration doesn't already provide.
+// `authUsers` is included even though it isn't Supabase-hydrated: it's a
+// pre-Supabase-Auth local user list (can carry a SHA-256 `passwordHash`,
+// see AuthUser's own comment in types.ts) with zero live readers/writers
+// left anywhere in the app (real auth is Supabase Auth via AuthContext.tsx
+// now) - dead, and the one field here worth stripping on security grounds
+// alone. Excluding a key here just means this browser stops WRITING it;
+// `migrate()` below (bumped `version`) handles already-written stale blobs.
+const PERSIST_EXCLUDED_KEYS = [
+  "employees",
+  "customers",
+  "inventoryItems",
+  "vendors",
+  "jobCards",
+  "jobCardExceptions",
+  "companyPOs",
+  "payables",
+  "payablePayments",
+  "projects",
+  "outsourcedWorks",
+  "machines",
+  "projectProductions",
+  "tools",
+  "toolAssignmentHistory",
+  "dies",
+  "machineSpareParts",
+  "machineDies",
+  "assetPhotos",
+  "assetUsageEvents",
+  "employeeRewards",
+  "companyDocuments",
+  "tenders",
+  "tenderRequirements",
+  "advanceRecords",
+  "attendanceRecords",
+  "employeeDocuments",
+  "salaryPayments",
+  "inventoryPurchases",
+  "materialPurchases",
+  "materialUsages",
+  "bomItems",
+  "bomRequisitions",
+  "scrapRecords",
+  "projectItems",
+  "internalCostings",
+  "billableServices",
+  "machineServiceRates",
+  "machineServiceUsage",
+  "quotations",
+  "quotationRevisions",
+  "masterPOs",
+  "quotationPurchaseOrders",
+  "expenseFloats",
+  "pettyExpenses",
+  "deliveryChallans",
+  "invoices",
+  "payments",
+  "authUsers",
+] as const satisfies readonly (keyof Store)[];
+
+function stripPersistExcludedKeys(obj: Record<string, unknown>) {
+  const excluded: ReadonlySet<string> = new Set(PERSIST_EXCLUDED_KEYS);
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(obj)) {
+    if (!excluded.has(k)) out[k] = obj[k];
+  }
+  return out;
+}
+
 export const useStore = create<Store>()(
   persist(
     (set, get) => ({
@@ -1727,6 +1903,8 @@ export const useStore = create<Store>()(
       vendorsHydration: { status: "idle" },
       jobCards: [],
       jobCardsHydration: { status: "idle" },
+      jobCardExceptions: [],
+      jobCardExceptionsHydration: { status: "idle" },
       companyPOsHydration: { status: "idle" },
       payablesHydration: { status: "idle" },
       payablePaymentsHydration: { status: "idle" },
@@ -1832,6 +2010,18 @@ export const useStore = create<Store>()(
       machineSparePartsHydration: { status: "idle" },
       machineDies: [],
       machineDiesHydration: { status: "idle" },
+      assetPhotos: [],
+      assetPhotosHydration: { status: "idle" },
+      assetUsageEvents: [],
+      assetUsageEventsHydration: { status: "idle" },
+      employeeRewards: [],
+      employeeRewardsHydration: { status: "idle" },
+      companyDocuments: [],
+      companyDocumentsHydration: { status: "idle" },
+      tenders: [],
+      tendersHydration: { status: "idle" },
+      tenderRequirements: [],
+      tenderRequirementsHydration: { status: "idle" },
 
       // Machine/Service Revenue initial state (Phase 40) — net-new, starts empty.
       billableServices: [],
@@ -2350,6 +2540,21 @@ export const useStore = create<Store>()(
         set({ jobCardsHydration: { status, error } }),
       setJobCardsFromServer: (jobCards) =>
         set({ jobCards, jobCardsHydration: { status: "success" } }),
+      setJobCardExceptionsHydrationStatus: (status, error) =>
+        set({ jobCardExceptionsHydration: { status, error } }),
+      setJobCardExceptionsFromServer: (jobCardExceptions) =>
+        set({
+          jobCardExceptions,
+          jobCardExceptionsHydration: { status: "success" },
+        }),
+      addJobCardExceptionLocal: (e) =>
+        set((s) => ({ jobCardExceptions: [e, ...s.jobCardExceptions] })),
+      updateJobCardExceptionLocal: (e) =>
+        set((s) => ({
+          jobCardExceptions: s.jobCardExceptions.map((x) =>
+            x.id === e.id ? e : x,
+          ),
+        })),
       setCompanyPOsHydrationStatus: (status, error) =>
         set({ companyPOsHydration: { status, error } }),
       setCompanyPOsFromServer: (companyPOs) =>
@@ -3657,6 +3862,118 @@ export const useStore = create<Store>()(
           ),
         })),
 
+      setAssetPhotosHydrationStatus: (status, error) =>
+        set({ assetPhotosHydration: { status, error } }),
+      setAssetPhotosFromServer: (rows) =>
+        set({ assetPhotos: rows, assetPhotosHydration: { status: "success" } }),
+      addAssetPhotoLocal: (photo) =>
+        set((s) => ({ assetPhotos: [...(s.assetPhotos || []), photo] })),
+      removeAssetPhotoLocal: (photoId) =>
+        set((s) => ({
+          assetPhotos: (s.assetPhotos || []).filter((p) => p.id !== photoId),
+        })),
+      updateAssetPhotoLocal: (photo) =>
+        set((s) => ({
+          assetPhotos: (s.assetPhotos || []).map((p) =>
+            p.id === photo.id ? photo : p,
+          ),
+        })),
+
+      setAssetUsageEventsHydrationStatus: (status, error) =>
+        set({ assetUsageEventsHydration: { status, error } }),
+      setAssetUsageEventsFromServer: (rows) =>
+        set({
+          assetUsageEvents: rows,
+          assetUsageEventsHydration: { status: "success" },
+        }),
+      addAssetUsageEventLocal: (event) =>
+        set((s) => ({
+          assetUsageEvents: [event, ...(s.assetUsageEvents || [])],
+        })),
+
+      setEmployeeRewardsHydrationStatus: (status, error) =>
+        set({ employeeRewardsHydration: { status, error } }),
+      setEmployeeRewardsFromServer: (rows) =>
+        set({
+          employeeRewards: rows,
+          employeeRewardsHydration: { status: "success" },
+        }),
+      addEmployeeRewardLocal: (reward) =>
+        set((s) => ({
+          employeeRewards: [reward, ...(s.employeeRewards || [])],
+        })),
+      removeEmployeeRewardLocal: (rewardId) =>
+        set((s) => ({
+          employeeRewards: (s.employeeRewards || []).filter(
+            (r) => r.id !== rewardId,
+          ),
+        })),
+
+      setCompanyDocumentsHydrationStatus: (status, error) =>
+        set({ companyDocumentsHydration: { status, error } }),
+      setCompanyDocumentsFromServer: (rows) =>
+        set({
+          companyDocuments: rows,
+          companyDocumentsHydration: { status: "success" },
+        }),
+      addCompanyDocumentLocal: (doc) =>
+        set((s) => ({
+          companyDocuments: [doc, ...(s.companyDocuments || [])],
+        })),
+      updateCompanyDocumentLocal: (doc) =>
+        set((s) => ({
+          companyDocuments: (s.companyDocuments || []).map((d) =>
+            d.id === doc.id ? doc : d,
+          ),
+        })),
+      removeCompanyDocumentLocal: (docId) =>
+        set((s) => ({
+          companyDocuments: (s.companyDocuments || []).filter(
+            (d) => d.id !== docId,
+          ),
+        })),
+
+      setTendersHydrationStatus: (status, error) =>
+        set({ tendersHydration: { status, error } }),
+      setTendersFromServer: (rows) =>
+        set({ tenders: rows, tendersHydration: { status: "success" } }),
+      addTenderLocal: (tender) =>
+        set((s) => ({ tenders: [tender, ...(s.tenders || [])] })),
+      updateTenderLocal: (tender) =>
+        set((s) => ({
+          tenders: (s.tenders || []).map((t) =>
+            t.id === tender.id ? tender : t,
+          ),
+        })),
+      removeTenderLocal: (tenderId) =>
+        set((s) => ({
+          tenders: (s.tenders || []).filter((t) => t.id !== tenderId),
+        })),
+
+      setTenderRequirementsHydrationStatus: (status, error) =>
+        set({ tenderRequirementsHydration: { status, error } }),
+      setTenderRequirementsFromServer: (rows) =>
+        set({
+          tenderRequirements: rows,
+          tenderRequirementsHydration: { status: "success" },
+        }),
+      addTenderRequirementLocal: (req) =>
+        set((s) => ({
+          tenderRequirements: [req, ...(s.tenderRequirements || [])],
+        })),
+      updateTenderRequirementLocal: (req) =>
+        set((s) => ({
+          tenderRequirements: (s.tenderRequirements || []).map((r) =>
+            r.id === req.id ? req : r,
+          ),
+        })),
+      removeTenderRequirementLocal: (reqId) =>
+        set((s) => ({
+          tenderRequirements: (s.tenderRequirements || []).filter(
+            (r) => r.id !== reqId,
+          ),
+        })),
+
       // ── Machine/Service Revenue actions (Phase 40) ─────────────
       setBillableServicesHydrationStatus: (status, error) =>
         set({ billableServicesHydration: { status, error } }),
@@ -4173,6 +4490,23 @@ export const useStore = create<Store>()(
     }),
     {
       name: "fabflow-erp-store",
+      // Gap-closure fix (D4) — v0 (no version key) is every blob written by
+      // this app before this fix shipped, and it still has the excluded
+      // business-data keys above in it. Bumping to 1 routes every such blob
+      // through migrate() once, which strips those keys before merge() ever
+      // sees them - so a browser with a stale, months-old customers/quotas
+      // array never re-applies it to live state on this or any later boot,
+      // even before Supabase hydration finishes. Going forward, partialize
+      // never writes those keys back, so there's nothing left to migrate.
+      version: 1,
+      migrate: (persistedState, version) => {
+        if (version >= 1 || !persistedState) return persistedState;
+        return stripPersistExcludedKeys(
+          persistedState as Record<string, unknown>,
+        );
+      },
+      partialize: (state) =>
+        stripPersistExcludedKeys(state as unknown as Record<string, unknown>),
       merge: (persistedState: unknown, currentState) => {
         const ps = (persistedState as Partial<typeof currentState>) || {};
         const mergedQuotations = ps.quotations || currentState.quotations || [];

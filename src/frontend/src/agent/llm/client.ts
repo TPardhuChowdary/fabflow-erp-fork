@@ -40,6 +40,20 @@ export type LlmContentBlock =
       fileName: string;
       mimeType: string;
       sizeBytes: number;
+    }
+  | {
+      // Phase 20 (Group 2, roadmap Phase 20) — a PDF the model should
+      // genuinely read (e.g. a tender document), distinct from "image"
+      // above. Same signed-URL-only contract — never raw bytes, never a
+      // permanent link. Requires the corresponding openaiProvider.ts
+      // extension to be deployed (input_file support) — until then the
+      // Edge Function still emits the same honest "not read" text stub
+      // any unsupported attachment gets.
+      type: "document";
+      url: string;
+      fileName: string;
+      mimeType: string;
+      sizeBytes: number;
     };
 
 export interface LlmMessage {

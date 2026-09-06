@@ -21,8 +21,14 @@
 // only emits actual input_image content for genuine image mimeTypes —
 // see that file's own comment for why non-image files are never claimed
 // to be visually read.
+//
+// "document" (Phase 20, Group 2): a PDF the model should genuinely read
+// (tender documents, etc.) — same signed-URL-only contract as "image".
+// Distinct from "image" so intent is explicit rather than continuing to
+// overload "image" for a non-image file, per Phase 20's own PDF-input
+// extension in openaiProvider.ts.
 export interface ChatContentBlock {
-  type: "text" | "tool_use" | "tool_result" | "image";
+  type: "text" | "tool_use" | "tool_result" | "image" | "document";
   [key: string]: unknown;
 }
 

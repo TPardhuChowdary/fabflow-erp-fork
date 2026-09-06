@@ -12,10 +12,13 @@ import {
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ClipboardList,
   Clock,
+  Cog,
   Building2 as CustomerIcon,
   Factory,
   FolderKanban,
+  Hammer,
   LogOut,
   Menu,
   Search,
@@ -48,6 +51,9 @@ const WORKSPACE_ICON: Record<WorkspaceRecordType, typeof FolderKanban> = {
   vendor: Store,
   employee: UserCircle2,
   machine: Wrench,
+  die: Cog,
+  tool: Hammer,
+  tender: ClipboardList,
 };
 
 // Role identity badges — deliberately NOT the success/warning/destructive

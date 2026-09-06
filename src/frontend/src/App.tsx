@@ -1,5 +1,6 @@
 import { Toaster } from "@/components/ui/sonner";
 import { useEffect, useState } from "react";
+import { toast } from "sonner";
 import { AuthProvider, useAuth } from "./AuthContext";
 import {
   type WorkspaceRecordType,
@@ -13,14 +14,18 @@ import { Layout } from "./components/Layout";
 import { QuotationPrintView } from "./components/QuotationPrintView";
 import { DrawingEditorPage } from "./drawingEditor/pages/DrawingEditorPage";
 import { useSupabaseHydration } from "./hooks/useSupabaseHydration";
+import { getTenderDocumentSignedUrl } from "./lib/tendersApi";
 import { AgentPage } from "./pages/AgentPage";
 import type { AiChatEntry } from "./pages/AgentPage";
+import { CompanyDocuments } from "./pages/CompanyDocuments";
 import CompanyPOs from "./pages/CompanyPOs";
 import { CustomerHistory } from "./pages/CustomerHistory";
 import { Customers } from "./pages/Customers";
 import { Dashboard } from "./pages/Dashboard";
 import { DeliveryChallans } from "./pages/DeliveryChallans";
+import { DieDetail } from "./pages/DieDetail";
 import { Dies } from "./pages/Dies";
+import { EmailCenter } from "./pages/EmailCenter";
 import { EmployeeDetail } from "./pages/EmployeeDetail";
 import { Employees } from "./pages/Employees";
 import { ExportEngine } from "./pages/ExportEngine";
@@ -33,6 +38,7 @@ import { MachineDetail } from "./pages/MachineDetail";
 import { MachineRevenue } from "./pages/MachineRevenue";
 import { Machinery } from "./pages/Machinery";
 import { MaterialRequisitions } from "./pages/MaterialRequisitions";
+import { MyJobs } from "./pages/MyJobs";
 import { Payables } from "./pages/Payables";
 import { Payments } from "./pages/Payments";
 import PettyExpenses from "./pages/PettyExpenses";
@@ -44,6 +50,9 @@ import { Quality } from "./pages/Quality";
 import { Quotations } from "./pages/Quotations";
 import { ScrapManagement } from "./pages/ScrapManagement";
 import { Settings } from "./pages/Settings";
+import { TenderDetail } from "./pages/TenderDetail";
+import { TenderManagement } from "./pages/TenderManagement";
+import { ToolDetail } from "./pages/ToolDetail";
 import { Tools } from "./pages/Tools";
 import { Vendors } from "./pages/Vendors";
 import { DesignShowcase } from "./pages/design-lab/DesignShowcase";
@@ -78,6 +87,9 @@ function AppInner() {
     null,
   );
   const [selectedMachineId, setSelectedMachineId] = useState<string>("");
+  const [selectedDieId, setSelectedDieId] = useState<string>("");
+  const [selectedToolId, setSelectedToolId] = useState<string>("");
+  const [selectedTenderId, setSelectedTenderId] = useState<string>("");
   const [exportContext, setExportContext] = useState<{
     type: "project" | "customer";
     id: string;
@@ -85,9 +97,16 @@ function AppInner() {
   } | null>(null);
   const [selectedDrawingEditorContext, setSelectedDrawingEditorContext] =
     useState<{
+      // Only "project"/"machine" are ever passed as initialOwnerType below
+      // - a die can never actually own a drawing (drawings.owner_type has
+      // no "die" value; dies only ever appear on the drawing_links side -
+      // see DieDetail.tsx). backTo exists purely so the editor's own
+      // "back" button can return to the die detail page it was opened
+      // from, without pretending the die owns anything.
       ownerType?: "project" | "machine";
       ownerId?: string;
       drawingId?: string;
+      backTo?: { type: "die" | "tool"; id: string };
     } | null>(null);
   /** Carries a one-shot "land on this tab, highlight this row" instruction
    * for a cross-module navigation (e.g. Petty Expense History's "View
@@ -129,6 +148,24 @@ function AppInner() {
     }
   }, [page, selectedDrawingEditorContext]);
 
+  // QA acceptance testing found: the AI Agent conversation above is lifted
+  // to this component specifically so it survives navigating away and back
+  // (see the comment at its declaration) — but AppInner itself is never
+  // remounted on sign-out/sign-in (by design, so sign-out renders instantly
+  // instead of a full reload), so a second user signing into the SAME
+  // browser tab right after another user's session inherited that first
+  // user's chat transcript verbatim. Reset it whenever the signed-in
+  // identity changes (covers sign-out -> null and switching accounts).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: deliberately keyed only on identity — the setters are stable and don't need to be listed
+  useEffect(() => {
+    setAiChat([]);
+    setAiMessages([]);
+    setAiPending(null);
+    setAiBusy(false);
+    setAiInstruction("");
+    setPendingFiles([]);
+  }, [currentUser?.id]);
+
   // Same rationale as above, for moduleNavContext: only relevant on the
   // three pages it can target, otherwise clear it so a later plain visit
   // to that page doesn't inherit a stale highlight/tab.
@@ -142,70 +179,7 @@ function AppInner() {
       setModuleNavContext(null);
     }
   }, [page, moduleNavContext]);
-  const { customers } = useStore();
-
-  const sendEmailReminder = async (inv: Invoice) => {
-    try {
-      await fetch("https://your-backend-url.onrender.com/send-reminder", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          to: (inv as any).email,
-          subject: "Payment Reminder",
-          message: `Invoice ${inv.invNo} is pending`,
-        }),
-      });
-    } catch (e) {
-      console.error("Reminder failed", e);
-    }
-  };
-
-  const runReminderCheck = () => {
-    const raw = localStorage.getItem("invoices");
-    const invoiceList: Invoice[] = raw ? JSON.parse(raw) : [];
-
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    let changed = false;
-
-    for (const inv of invoiceList) {
-      if (!inv.reminderEnabled) continue;
-      if (inv.status === "Paid") continue;
-      if (!inv.nextReminderAt) continue;
-
-      const next = new Date(inv.nextReminderAt);
-      next.setHours(0, 0, 0, 0);
-
-      if (next <= today) {
-        if (inv.lastReminderSentAt) {
-          const last = new Date(inv.lastReminderSentAt);
-          if (last.toDateString() === today.toDateString()) continue;
-        }
-
-        sendEmailReminder(inv);
-
-        inv.lastReminderSentAt = today.toISOString();
-        inv.reminderCount = (inv.reminderCount || 0) + 1;
-
-        const nextDate = new Date(today);
-        nextDate.setDate(nextDate.getDate() + (inv.reminderIntervalDays || 5));
-        inv.nextReminderAt = nextDate.toISOString();
-        changed = true;
-      }
-    }
-
-    if (changed) {
-      localStorage.setItem("invoices", JSON.stringify(invoiceList));
-    }
-  };
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: scheduler only needs to run once on mount
-  useEffect(() => {
-    runReminderCheck();
-    const interval = setInterval(runReminderCheck, 6 * 60 * 60 * 1000);
-    return () => clearInterval(interval);
-  }, []);
+  const { customers, tenders } = useStore();
 
   if (isInitializing) {
     return (
@@ -258,8 +232,67 @@ function AppInner() {
         setModuleNavContext({ highlightId: id });
         setPage("vendors");
         break;
+      case "die":
+        setSelectedDieId(id);
+        setPage("die-detail");
+        break;
+      case "tool":
+        setSelectedToolId(id);
+        setPage("tool-detail");
+        break;
+      case "tender":
+        setSelectedTenderId(id);
+        setPage("tender-detail");
+        break;
     }
     pushRecent(type, id);
+  };
+
+  // Phase 20 (Group 2) — "Extract Requirements with AI" from
+  // TenderDetail.tsx's Overview tab. Reuses the exact chat-attachment
+  // pipeline already proven for reading PDFs (see AgentPage.tsx's
+  // pendingFiles -> uploadAgentDocument -> "document" content block ->
+  // openaiProvider.ts's input_file handling) — the only difference from a
+  // user manually attaching a file is that this fetches the tender's
+  // ALREADY-uploaded document and pre-fills the prompt, instead of making
+  // the user re-pick a file they already uploaded once. No new backend
+  // path, no parallel extraction system.
+  const handleExtractTenderWithAI = async (tenderId: string) => {
+    const tender = tenders.find((t) => t.id === tenderId);
+    if (!tender?.sourceDocumentStoragePath) {
+      toast.error("This tender has no source document uploaded yet.");
+      return;
+    }
+    const url = await getTenderDocumentSignedUrl(
+      tender.sourceDocumentStoragePath,
+    );
+    if (!url) {
+      toast.error("Could not access the tender's source document.");
+      return;
+    }
+    let file: File;
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`fetch failed (${res.status})`);
+      const blob = await res.blob();
+      file = new File(
+        [blob],
+        tender.sourceDocumentFilename || "tender-document.pdf",
+        { type: blob.type || "application/pdf" },
+      );
+    } catch (err) {
+      toast.error(
+        err instanceof Error
+          ? `Could not load the document: ${err.message}`
+          : "Could not load the document.",
+      );
+      return;
+    }
+    setPendingFiles((prev) => [...prev, { id: crypto.randomUUID(), file }]);
+    setAiInstruction(
+      `I've attached the source document for tender ${tender.tenderNumber} ("${tender.title}"). Please read the entire document (all pages, including any tables/annexures) and add every distinct requirement you find using addTenderRequirement, preserving the tender's exact wording — never paraphrase. Use findTender first to confirm the tender id.`,
+    );
+    setPage("agent");
   };
 
   const accessDenied = (
@@ -346,6 +379,7 @@ function AppInner() {
               moduleNavContext?.tab as "stock" | "purchases" | undefined
             }
             highlightPurchaseId={moduleNavContext?.highlightId}
+            onNavigateToRecord={navigateToRecord}
           />
         );
       case "settings":
@@ -365,6 +399,9 @@ function AppInner() {
       case "job-cards":
         if (!canView(currentUser, "job_cards")) return accessDenied;
         return <JobCards />;
+      case "my-jobs":
+        if (!canView(currentUser, "job_cards")) return accessDenied;
+        return <MyJobs />;
       case "material-requisitions":
         if (!canView(currentUser, "material_requisitions")) return accessDenied;
         return <MaterialRequisitions />;
@@ -435,14 +472,47 @@ function AppInner() {
               });
               setPage("drawing-editor");
             }}
+            onViewVendor={(id) => navigateToRecord("vendor", id)}
           />
         );
       case "tools":
         if (!canView(currentUser, "tools")) return accessDenied;
-        return <Tools />;
+        return <Tools onViewTool={(id) => navigateToRecord("tool", id)} />;
+      case "tool-detail":
+        if (!canView(currentUser, "tools")) return accessDenied;
+        return (
+          <ToolDetail
+            toolId={selectedToolId}
+            onBack={() => setPage("tools")}
+            onOpenDrawing={(drawingId) => {
+              setSelectedDrawingEditorContext({
+                drawingId,
+                backTo: { type: "tool", id: selectedToolId },
+              });
+              setPage("drawing-editor");
+            }}
+            onViewVendor={(id) => navigateToRecord("vendor", id)}
+          />
+        );
       case "dies":
         if (!canView(currentUser, "tooling_dies")) return accessDenied;
-        return <Dies />;
+        return <Dies onViewDie={(id) => navigateToRecord("die", id)} />;
+      case "die-detail":
+        if (!canView(currentUser, "tooling_dies")) return accessDenied;
+        return (
+          <DieDetail
+            dieId={selectedDieId}
+            onBack={() => setPage("dies")}
+            onOpenDrawing={(drawingId) => {
+              setSelectedDrawingEditorContext({
+                drawingId,
+                backTo: { type: "die", id: selectedDieId },
+              });
+              setPage("drawing-editor");
+            }}
+            onViewVendor={(id) => navigateToRecord("vendor", id)}
+          />
+        );
       case "machine-revenue":
         if (!canView(currentUser, "machine_revenue")) return accessDenied;
         return <MachineRevenue />;
@@ -470,6 +540,36 @@ function AppInner() {
               pendingFiles,
               setPendingFiles,
             }}
+          />
+        );
+      case "email-center":
+        // Universal Email Integration (see chat) — gated on the real
+        // "email" permission module (unlike AI Agent above), since this
+        // page reads real connected-mailbox content, not just proposes
+        // ERP actions someone else must confirm. ERP-reference linking
+        // (clicking a matched vendor/PO in a message) is a later phase,
+        // once AI classification/entity matching exists — this page has
+        // no navigateToRecord prop yet because it has nothing real to
+        // navigate to from an email today.
+        if (!canView(currentUser, "email")) return accessDenied;
+        return <EmailCenter />;
+      case "company-documents":
+        if (!canView(currentUser, "company_documents")) return accessDenied;
+        return <CompanyDocuments />;
+      case "tenders":
+        if (!canView(currentUser, "tenders")) return accessDenied;
+        return (
+          <TenderManagement
+            onViewTender={(id) => navigateToRecord("tender", id)}
+          />
+        );
+      case "tender-detail":
+        if (!canView(currentUser, "tenders")) return accessDenied;
+        return (
+          <TenderDetail
+            tenderId={selectedTenderId}
+            onBack={() => setPage("tenders")}
+            onExtractWithAI={handleExtractTenderWithAI}
           />
         );
       case "design-lab":
@@ -589,7 +689,11 @@ function AppInner() {
                 ? () => setPage("machine-detail")
                 : selectedDrawingEditorContext?.ownerType === "project"
                   ? () => setPage("project-detail")
-                  : undefined
+                  : selectedDrawingEditorContext?.backTo?.type === "die"
+                    ? () => setPage("die-detail")
+                    : selectedDrawingEditorContext?.backTo?.type === "tool"
+                      ? () => setPage("tool-detail")
+                      : undefined
             }
           />
         );
@@ -615,7 +719,9 @@ function AppInner() {
             ? `machine-${selectedMachineId}`
             : page === "vendors" && moduleNavContext?.highlightId
               ? `vendor-${moduleNavContext.highlightId}`
-              : undefined;
+              : page === "tender-detail" && selectedTenderId
+                ? `tender-${selectedTenderId}`
+                : undefined;
 
   return (
     <>

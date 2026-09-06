@@ -38,7 +38,7 @@
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
 import { normalizeBusinessName } from "@/lib/utils";
 import type { Project } from "@/types";
-import { transformProjectRow } from "./hydration";
+import { fetchAllRows, transformProjectRow } from "./hydration";
 import type { ProjectRow } from "./hydration";
 
 export type WriteStatus = "success" | "denied" | "error" | "unauthenticated";
@@ -63,6 +63,9 @@ export type ProjectWritable = Omit<
   | "poDate"
   | "poFiles"
   | "projectId"
+  // Generated column (always max(produced-ordered,0) in Postgres) -
+  // never sent on write, same reason job_cards.expectedQuantity isn't.
+  | "overproductionQuantity"
 >;
 
 function toProjectFields(v: ProjectWritable) {
@@ -82,6 +85,28 @@ function toProjectFields(v: ProjectWritable) {
     repeat_order_seq: v.repeatOrderSeq ?? null,
     original_project_name: v.originalProjectName || null,
     activity_log: v.activityLog ?? null,
+    planned_start_date: v.plannedStartDate || null,
+    actual_production_start_date: v.actualProductionStartDate || null,
+    target_completion_date: v.targetCompletionDate || null,
+    customer_committed_delivery_date: v.customerCommittedDeliveryDate || null,
+    actual_completion_date: v.actualCompletionDate || null,
+    // work_type/material_ownership are NOT NULL at the DB level (with
+    // defaults 'full_manufacturing'/'company') - falling back to those
+    // same defaults here rather than null keeps every caller safe even
+    // if a form never touches these fields, instead of relying on every
+    // UI to always populate them.
+    work_type: v.workType || "full_manufacturing",
+    lifecycle_stage: v.lifecycleStage || null,
+    material_ownership: v.materialOwnership || "company",
+    ordered_quantity: v.orderedQuantity ?? null,
+    planned_quantity: v.plannedQuantity ?? null,
+    received_quantity: v.receivedQuantity ?? null,
+    produced_quantity: v.producedQuantity ?? null,
+    accepted_quantity: v.acceptedQuantity ?? null,
+    rejected_quantity: v.rejectedQuantity ?? null,
+    rework_quantity: v.reworkQuantity ?? null,
+    returned_quantity: v.returnedQuantity ?? null,
+    remaining_quantity: v.remainingQuantity ?? null,
   };
 }
 
@@ -98,7 +123,12 @@ const SELECT_COLUMNS =
   "work_description, production_version, customer_visible_name, " +
   "internal_order_code, project_type, parent_project_id, " +
   "source_project_id, repeat_order_seq, original_project_name, " +
-  "activity_log";
+  "activity_log, planned_start_date, actual_production_start_date, " +
+  "target_completion_date, customer_committed_delivery_date, " +
+  "actual_completion_date, work_type, lifecycle_stage, material_ownership, " +
+  "ordered_quantity, planned_quantity, received_quantity, produced_quantity, " +
+  "accepted_quantity, rejected_quantity, rework_quantity, returned_quantity, " +
+  "remaining_quantity, overproduction_quantity";
 
 async function requireSession() {
   if (!isSupabaseConfigured) {
@@ -140,16 +170,17 @@ export function computeNextProjectNumber(existingNumbers: string[]): string {
   return `PROJ-${year}-${String(next).padStart(3, "0")}`;
 }
 
+// Gap-closure fix — same silent-1,000-row-truncation risk as
+// jobCardsApi.ts's fetchExistingJobNos; see that file's comment.
 async function fetchExistingProjectNumbers(
   client: ReturnType<typeof getSupabase>,
 ): Promise<string[] | null> {
-  const { data, error } = await client
-    .from("projects")
-    .select("project_number");
-  if (error || !data) return null;
-  return (data as unknown as { project_number: string }[]).map(
-    (r) => r.project_number,
+  const { data, error } = await fetchAllRows<{ project_number: string }>(
+    (from, to) =>
+      client.from("projects").select("project_number").range(from, to),
   );
+  if (error || !data) return null;
+  return data.map((r) => r.project_number);
 }
 
 // Postgres unique_violation. Confirmed via investigation: the only UNIQUE

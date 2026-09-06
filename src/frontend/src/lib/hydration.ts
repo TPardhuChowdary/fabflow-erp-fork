@@ -58,11 +58,14 @@ import type {
 } from "@/qms/types";
 import type {
   AdvanceRecord,
+  AssetPhoto,
+  AssetUsageEvent,
   AttendanceRecord,
   BillableService,
   BomItem,
   BomRequisition,
   BomRequisitionStatus,
+  CompanyDocument,
   CompanyPO,
   CompanyPOItem,
   CompanyPOStatus,
@@ -78,6 +81,7 @@ import type {
   Employee,
   EmployeeDocument,
   EmployeeDocumentType,
+  EmployeeReward,
   EmployeeType,
   EmploymentType,
   ExpenseFloat,
@@ -90,6 +94,7 @@ import type {
   InvoicePurchaseOrder,
   InvoiceStatus,
   JobCard,
+  JobCardException,
   JobCardStatus,
   LineItem,
   Machine,
@@ -127,6 +132,8 @@ import type {
   ScrapRecord,
   ScrapStatus,
   ServiceType,
+  Tender,
+  TenderRequirement,
   Tool,
   ToolAssignmentHistory,
   UserRole,
@@ -145,6 +152,41 @@ export interface HydrationResult<T> {
   status: HydrationStatus;
   data?: T;
   error?: string;
+}
+
+// Gap-closure fix — every hydrate*() below used to run a single unbounded
+// .select(), which silently truncates at Supabase/PostgREST's default
+// max-rows (confirmed live: a 2,506-row table returned only 1,000 rows,
+// no error, no indication anything was missing). Wrapping the query in
+// this instead pages through with .range() until a page comes back
+// shorter than PAGE_SIZE, so hydration always returns the organization's
+// complete table regardless of size. Every hydrate*() function's own
+// contract (read-only, RLS-gated, {status, data, error} shape) is
+// unchanged - this only replaces "one request" with "as many ranged
+// requests as needed", transparently to every caller.
+const PAGE_SIZE = 1000;
+// Exported so the write-layer `*Api.ts` files' own "fetch every existing
+// document number to compute the next one" collection reads (jobCardsApi.ts,
+// invoicesApi.ts, quotationsApi.ts, etc. - found in the same final audit
+// that added this export) can reuse it instead of each hand-rolling the
+// same loop.
+export async function fetchAllRows<T>(
+  buildPage: (
+    from: number,
+    to: number,
+  ) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
+): Promise<{ data: T[] | null; error: { message: string } | null }> {
+  const all: T[] = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await buildPage(from, from + PAGE_SIZE - 1);
+    if (error) return { data: null, error };
+    if (!data || data.length === 0) break;
+    all.push(...data);
+    if (data.length < PAGE_SIZE) break;
+    from += PAGE_SIZE;
+  }
+  return { data: all, error: null };
 }
 
 // Exact column list this phase's mapping confirmed - see the Phase 18
@@ -232,10 +274,13 @@ export async function hydrateEmployees(): Promise<HydrationResult<Employee[]>> {
     return { status: "unauthenticated" };
   }
 
-  const { data, error } = await client
-    .from("employees")
-    .select(EMPLOYEE_COLUMNS)
-    .order("name");
+  const { data, error } = await fetchAllRows((from, to) =>
+    client
+      .from("employees")
+      .select(EMPLOYEE_COLUMNS)
+      .order("name")
+      .range(from, to),
+  );
 
   if (error) {
     return { status: "error", error: error.message };
@@ -276,10 +321,13 @@ export async function hydrateMachines(): Promise<HydrationResult<Machine[]>> {
     return { status: "unauthenticated" };
   }
 
-  const { data, error } = await client
-    .from("machines")
-    .select(MACHINE_COLUMNS)
-    .order("machine_code");
+  const { data, error } = await fetchAllRows((from, to) =>
+    client
+      .from("machines")
+      .select(MACHINE_COLUMNS)
+      .order("machine_code")
+      .range(from, to),
+  );
 
   if (error) {
     return { status: "error", error: error.message };
@@ -317,10 +365,13 @@ export async function hydrateTools(): Promise<HydrationResult<Tool[]>> {
     return { status: "unauthenticated" };
   }
 
-  const { data, error } = await client
-    .from("tools")
-    .select(TOOL_COLUMNS)
-    .order("tool_code");
+  const { data, error } = await fetchAllRows((from, to) =>
+    client
+      .from("tools")
+      .select(TOOL_COLUMNS)
+      .order("tool_code")
+      .range(from, to),
+  );
 
   if (error) {
     return { status: "error", error: error.message };
@@ -354,10 +405,13 @@ export async function hydrateToolAssignmentHistory(): Promise<
     return { status: "unauthenticated" };
   }
 
-  const { data, error } = await client
-    .from("tool_assignment_history")
-    .select(TOOL_ASSIGNMENT_HISTORY_COLUMNS)
-    .order("recorded_at", { ascending: false });
+  const { data, error } = await fetchAllRows((from, to) =>
+    client
+      .from("tool_assignment_history")
+      .select(TOOL_ASSIGNMENT_HISTORY_COLUMNS)
+      .order("recorded_at", { ascending: false })
+      .range(from, to),
+  );
 
   if (error) {
     return { status: "error", error: error.message };
@@ -395,10 +449,9 @@ export async function hydrateDies(): Promise<HydrationResult<Die[]>> {
     return { status: "unauthenticated" };
   }
 
-  const { data, error } = await client
-    .from("dies")
-    .select(DIE_COLUMNS)
-    .order("die_code");
+  const { data, error } = await fetchAllRows((from, to) =>
+    client.from("dies").select(DIE_COLUMNS).order("die_code").range(from, to),
+  );
 
   if (error) {
     return { status: "error", error: error.message };
@@ -427,9 +480,12 @@ export async function hydrateMachineSpareParts(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("machine_spare_parts")
-    .select("machine_id, inventory_item_id, created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("machine_spare_parts")
+      .select("machine_id, inventory_item_id, created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -452,9 +508,12 @@ export async function hydrateMachineDies(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("machine_dies")
-    .select("machine_id, die_id, created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("machine_dies")
+      .select("machine_id, die_id, created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -466,12 +525,408 @@ export async function hydrateMachineDies(): Promise<
   };
 }
 
+// Phase 51 (Group 2) — universal asset photo store (see AssetPhoto in
+// types.ts for why one shared table covers machine/die/tool/
+// inventory_item rather than four). Wholesale-replaced on hydration,
+// same as every other org-wide domain list here.
+const ASSET_PHOTO_COLUMNS =
+  "id, owner_type, owner_id, storage_path, original_filename, mime_type, " +
+  "size_bytes, display_order, caption, is_primary, uploaded_by, " +
+  "created_at, updated_at";
+
+interface AssetPhotoRow {
+  id: string;
+  owner_type: string;
+  owner_id: string;
+  storage_path: string;
+  original_filename: string | null;
+  mime_type: string | null;
+  size_bytes: number | null;
+  display_order: number;
+  caption: string | null;
+  is_primary: boolean;
+  uploaded_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function rowToAssetPhoto(row: AssetPhotoRow): AssetPhoto {
+  return {
+    id: row.id,
+    ownerType: row.owner_type as AssetPhoto["ownerType"],
+    ownerId: row.owner_id,
+    storagePath: row.storage_path,
+    originalFilename: row.original_filename ?? undefined,
+    mimeType: row.mime_type ?? undefined,
+    sizeBytes: row.size_bytes ?? undefined,
+    displayOrder: row.display_order,
+    caption: row.caption ?? undefined,
+    isPrimary: row.is_primary,
+    uploadedBy: row.uploaded_by ?? undefined,
+    createdAt: new Date(row.created_at).getTime(),
+    updatedAt: new Date(row.updated_at).getTime(),
+  };
+}
+
+export async function hydrateAssetPhotos(): Promise<
+  HydrationResult<AssetPhoto[]>
+> {
+  const gate = await requireSessionForHydration();
+  if (!gate.ok) return gate.result;
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("asset_photos")
+      .select(ASSET_PHOTO_COLUMNS)
+      .order("display_order")
+      .range(from, to),
+  );
+  if (error) return { status: "error", error: error.message };
+  return {
+    status: "success",
+    data: (data as unknown as AssetPhotoRow[]).map(rowToAssetPhoto),
+  };
+}
+
+// Phase 51 (Group 2) — universal asset usage-event log (see
+// AssetUsageEvent in types.ts). Insert-only at the RLS level (no update/
+// delete policy exists), same wholesale-hydrate-then-filter-client-side
+// shape as hydrateToolAssignmentHistory above.
+const ASSET_USAGE_EVENT_COLUMNS =
+  "id, asset_type, asset_id, employee_id, employee_name, project_id, " +
+  "job_card_id, event_type, quantity, condition_before, condition_after, " +
+  "notes, recorded_by, event_at, created_at";
+
+interface AssetUsageEventRow {
+  id: string;
+  asset_type: string;
+  asset_id: string;
+  employee_id: string | null;
+  employee_name: string | null;
+  project_id: string | null;
+  job_card_id: string | null;
+  event_type: string;
+  quantity: number | null;
+  condition_before: string | null;
+  condition_after: string | null;
+  notes: string | null;
+  recorded_by: string | null;
+  event_at: string;
+  created_at: string;
+}
+
+function rowToAssetUsageEvent(row: AssetUsageEventRow): AssetUsageEvent {
+  return {
+    id: row.id,
+    assetType: row.asset_type as AssetUsageEvent["assetType"],
+    assetId: row.asset_id,
+    employeeId: row.employee_id ?? undefined,
+    employeeName: row.employee_name ?? undefined,
+    projectId: row.project_id ?? undefined,
+    jobCardId: row.job_card_id ?? undefined,
+    eventType: row.event_type as AssetUsageEvent["eventType"],
+    quantity: row.quantity ?? undefined,
+    conditionBefore: row.condition_before ?? undefined,
+    conditionAfter: row.condition_after ?? undefined,
+    notes: row.notes ?? undefined,
+    recordedBy: row.recorded_by ?? undefined,
+    eventAt: new Date(row.event_at).getTime(),
+    createdAt: new Date(row.created_at).getTime(),
+  };
+}
+
+export async function hydrateAssetUsageEvents(): Promise<
+  HydrationResult<AssetUsageEvent[]>
+> {
+  const gate = await requireSessionForHydration();
+  if (!gate.ok) return gate.result;
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("asset_usage_events")
+      .select(ASSET_USAGE_EVENT_COLUMNS)
+      .order("event_at", { ascending: false })
+      .range(from, to),
+  );
+  if (error) return { status: "error", error: error.message };
+  return {
+    status: "success",
+    data: (data as unknown as AssetUsageEventRow[]).map(rowToAssetUsageEvent),
+  };
+}
+
+// Phase 53 (Group 2) — employee_rewards (see EmployeeReward in types.ts).
+// Standard insert/select-through-RLS shape, delete also allowed by RLS
+// (unlike asset_usage_events) so a mis-entered reward can be removed.
+const EMPLOYEE_REWARD_COLUMNS =
+  "id, employee_id, reward_type, title, amount, related_job_card_id, " +
+  "notes, awarded_by, awarded_at, created_at";
+
+interface EmployeeRewardRow {
+  id: string;
+  employee_id: string;
+  reward_type: string;
+  title: string;
+  amount: number | null;
+  related_job_card_id: string | null;
+  notes: string | null;
+  awarded_by: string | null;
+  awarded_at: string;
+  created_at: string;
+}
+
+function rowToEmployeeReward(row: EmployeeRewardRow): EmployeeReward {
+  return {
+    id: row.id,
+    employeeId: row.employee_id,
+    rewardType: row.reward_type as EmployeeReward["rewardType"],
+    title: row.title,
+    amount: row.amount ?? undefined,
+    relatedJobCardId: row.related_job_card_id ?? undefined,
+    notes: row.notes ?? undefined,
+    awardedBy: row.awarded_by ?? undefined,
+    awardedAt: row.awarded_at,
+    createdAt: new Date(row.created_at).getTime(),
+  };
+}
+
+export async function hydrateEmployeeRewards(): Promise<
+  HydrationResult<EmployeeReward[]>
+> {
+  const gate = await requireSessionForHydration();
+  if (!gate.ok) return gate.result;
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("employee_rewards")
+      .select(EMPLOYEE_REWARD_COLUMNS)
+      .order("awarded_at", { ascending: false })
+      .range(from, to),
+  );
+  if (error) return { status: "error", error: error.message };
+  return {
+    status: "success",
+    data: (data as unknown as EmployeeRewardRow[]).map(rowToEmployeeReward),
+  };
+}
+
+// Phase 55 (Group 2) — Company Document Library (see database/phase-55).
+const COMPANY_DOCUMENT_COLUMNS =
+  "id, category, document_type, title, issue_date, expiry_date, version, " +
+  "status, is_tender_eligible, storage_path, original_filename, " +
+  "mime_type, size_bytes, notes, uploaded_by, created_at, updated_at";
+
+interface CompanyDocumentRow {
+  id: string;
+  category: string;
+  document_type: string;
+  title: string;
+  issue_date: string | null;
+  expiry_date: string | null;
+  version: string | null;
+  status: string;
+  is_tender_eligible: boolean;
+  storage_path: string;
+  original_filename: string | null;
+  mime_type: string | null;
+  size_bytes: number | null;
+  notes: string | null;
+  uploaded_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function rowToCompanyDocument(row: CompanyDocumentRow): CompanyDocument {
+  return {
+    id: row.id,
+    category: row.category,
+    documentType: row.document_type,
+    title: row.title,
+    issueDate: row.issue_date ?? undefined,
+    expiryDate: row.expiry_date ?? undefined,
+    version: row.version ?? undefined,
+    status: row.status as CompanyDocument["status"],
+    isTenderEligible: row.is_tender_eligible,
+    storagePath: row.storage_path,
+    originalFilename: row.original_filename ?? undefined,
+    mimeType: row.mime_type ?? undefined,
+    sizeBytes: row.size_bytes ?? undefined,
+    notes: row.notes ?? undefined,
+    uploadedBy: row.uploaded_by ?? undefined,
+    createdAt: new Date(row.created_at).getTime(),
+    updatedAt: new Date(row.updated_at).getTime(),
+  };
+}
+
+export async function hydrateCompanyDocuments(): Promise<
+  HydrationResult<CompanyDocument[]>
+> {
+  const gate = await requireSessionForHydration();
+  if (!gate.ok) return gate.result;
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("company_documents")
+      .select(COMPANY_DOCUMENT_COLUMNS)
+      .order("expiry_date", { ascending: true, nullsFirst: false })
+      .range(from, to),
+  );
+  if (error) return { status: "error", error: error.message };
+  return {
+    status: "success",
+    data: (data as unknown as CompanyDocumentRow[]).map(rowToCompanyDocument),
+  };
+}
+
+// Phase 56 (Group 2) — Tender Management (see database/phase-56).
+const TENDER_COLUMNS =
+  "id, tender_number, title, customer_id, authority_name, portal, " +
+  "bid_type, submission_deadline, opening_date, " +
+  "technical_requirements_summary, financial_requirements_summary, " +
+  "emd_amount, emd_details, status, source_document_storage_path, " +
+  "source_document_filename, final_pack_storage_path, " +
+  "final_pack_generated_at, activity_log, created_by, created_at, " +
+  "updated_at";
+
+interface TenderRow {
+  id: string;
+  tender_number: string;
+  title: string;
+  customer_id: string | null;
+  authority_name: string | null;
+  portal: string | null;
+  bid_type: string | null;
+  submission_deadline: string | null;
+  opening_date: string | null;
+  technical_requirements_summary: string | null;
+  financial_requirements_summary: string | null;
+  emd_amount: number | null;
+  emd_details: string | null;
+  status: string;
+  source_document_storage_path: string | null;
+  source_document_filename: string | null;
+  final_pack_storage_path: string | null;
+  final_pack_generated_at: string | null;
+  activity_log: ProjectActivity[] | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+function rowToTender(row: TenderRow): Tender {
+  return {
+    id: row.id,
+    tenderNumber: row.tender_number,
+    title: row.title,
+    customerId: row.customer_id ?? undefined,
+    authorityName: row.authority_name ?? undefined,
+    portal: row.portal ?? undefined,
+    bidType: row.bid_type ?? undefined,
+    submissionDeadline: row.submission_deadline ?? undefined,
+    openingDate: row.opening_date ?? undefined,
+    technicalRequirementsSummary:
+      row.technical_requirements_summary ?? undefined,
+    financialRequirementsSummary:
+      row.financial_requirements_summary ?? undefined,
+    emdAmount: row.emd_amount ?? undefined,
+    emdDetails: row.emd_details ?? undefined,
+    status: row.status as Tender["status"],
+    sourceDocumentStoragePath: row.source_document_storage_path ?? undefined,
+    sourceDocumentFilename: row.source_document_filename ?? undefined,
+    finalPackStoragePath: row.final_pack_storage_path ?? undefined,
+    finalPackGeneratedAt: row.final_pack_generated_at
+      ? new Date(row.final_pack_generated_at).getTime()
+      : undefined,
+    activityLog: row.activity_log ?? undefined,
+    createdBy: row.created_by ?? undefined,
+    createdAt: new Date(row.created_at).getTime(),
+    updatedAt: new Date(row.updated_at).getTime(),
+  };
+}
+
+export async function hydrateTenders(): Promise<HydrationResult<Tender[]>> {
+  const gate = await requireSessionForHydration();
+  if (!gate.ok) return gate.result;
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("tenders")
+      .select(TENDER_COLUMNS)
+      .order("submission_deadline", { ascending: true, nullsFirst: false })
+      .range(from, to),
+  );
+  if (error) return { status: "error", error: error.message };
+  return {
+    status: "success",
+    data: (data as unknown as TenderRow[]).map(rowToTender),
+  };
+}
+
+const TENDER_REQUIREMENT_COLUMNS =
+  "id, tender_id, requirement_text, category, is_mandatory, priority, " +
+  "status, matched_company_document_id, matched_document_title, " +
+  "matched_document_expiry, action_needed, display_order, created_at, " +
+  "updated_at";
+
+interface TenderRequirementRow {
+  id: string;
+  tender_id: string;
+  requirement_text: string;
+  category: string;
+  is_mandatory: boolean;
+  priority: number;
+  status: string;
+  matched_company_document_id: string | null;
+  matched_document_title: string | null;
+  matched_document_expiry: string | null;
+  action_needed: string | null;
+  display_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
+function rowToTenderRequirement(row: TenderRequirementRow): TenderRequirement {
+  return {
+    id: row.id,
+    tenderId: row.tender_id,
+    requirementText: row.requirement_text,
+    category: row.category as TenderRequirement["category"],
+    isMandatory: row.is_mandatory,
+    priority: row.priority,
+    status: row.status as TenderRequirement["status"],
+    matchedCompanyDocumentId: row.matched_company_document_id ?? undefined,
+    matchedDocumentTitle: row.matched_document_title ?? undefined,
+    matchedDocumentExpiry: row.matched_document_expiry ?? undefined,
+    actionNeeded: row.action_needed ?? undefined,
+    displayOrder: row.display_order,
+    createdAt: new Date(row.created_at).getTime(),
+    updatedAt: new Date(row.updated_at).getTime(),
+  };
+}
+
+export async function hydrateTenderRequirements(): Promise<
+  HydrationResult<TenderRequirement[]>
+> {
+  const gate = await requireSessionForHydration();
+  if (!gate.ok) return gate.result;
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("tender_requirements")
+      .select(TENDER_REQUIREMENT_COLUMNS)
+      .order("display_order", { ascending: true })
+      .range(from, to),
+  );
+  if (error) return { status: "error", error: error.message };
+  return {
+    status: "success",
+    data: (data as unknown as TenderRequirementRow[]).map(
+      rowToTenderRequirement,
+    ),
+  };
+}
+
 // Phase 19 — Customers. Exact column list per the Phase 19 report's
 // field-by-field mapping. organization_id/updated_at are DB-only,
 // deliberately not requested (no frontend counterpart).
 const CUSTOMER_COLUMNS =
   "id, name, contact_person, phone, email, address, gstin, state_name, " +
-  "state_code, additional_details, emails, primary_email, created_at";
+  "state_code, additional_details, emails, primary_email, " +
+  "delivery_addresses, created_at";
 
 interface CustomerRow {
   id: string;
@@ -486,6 +941,11 @@ interface CustomerRow {
   additional_details: Array<{ key: string; value: string }> | null;
   emails: Array<{ email: string; type: string }> | null;
   primary_email: string | null;
+  delivery_addresses: Array<{
+    id: string;
+    label: string;
+    address: string;
+  }> | null;
   created_at: string;
 }
 
@@ -503,6 +963,7 @@ function transformCustomerRow(row: CustomerRow): Customer {
     additionalDetails: row.additional_details ?? undefined,
     emails: row.emails ?? undefined,
     primaryEmail: row.primary_email ?? undefined,
+    deliveryAddresses: row.delivery_addresses ?? undefined,
     // DB stores a real timestamptz; the frontend type uses epoch ms
     // (Date.now() at local-creation time, pre-Supabase). Converted here,
     // not guessed - this is a mechanical unit conversion, not a mapping
@@ -526,10 +987,13 @@ export async function hydrateCustomers(): Promise<HydrationResult<Customer[]>> {
     return { status: "unauthenticated" };
   }
 
-  const { data, error } = await client
-    .from("customers")
-    .select(CUSTOMER_COLUMNS)
-    .order("name");
+  const { data, error } = await fetchAllRows((from, to) =>
+    client
+      .from("customers")
+      .select(CUSTOMER_COLUMNS)
+      .order("name")
+      .range(from, to),
+  );
 
   if (error) {
     return { status: "error", error: error.message };
@@ -616,10 +1080,13 @@ export async function hydrateInventoryItems(): Promise<
     return { status: "unauthenticated" };
   }
 
-  const { data, error } = await client
-    .from("inventory_items")
-    .select(INVENTORY_ITEM_COLUMNS)
-    .order("name");
+  const { data, error } = await fetchAllRows((from, to) =>
+    client
+      .from("inventory_items")
+      .select(INVENTORY_ITEM_COLUMNS)
+      .order("name")
+      .range(from, to),
+  );
 
   if (error) {
     return { status: "error", error: error.message };
@@ -674,10 +1141,9 @@ export async function hydrateVendors(): Promise<HydrationResult<Vendor[]>> {
     return { status: "unauthenticated" };
   }
 
-  const { data, error } = await client
-    .from("vendors")
-    .select(VENDOR_COLUMNS)
-    .order("name");
+  const { data, error } = await fetchAllRows((from, to) =>
+    client.from("vendors").select(VENDOR_COLUMNS).order("name").range(from, to),
+  );
 
   if (error) {
     return { status: "error", error: error.message };
@@ -766,10 +1232,13 @@ export async function hydrateCompanyPOs(): Promise<
     return { status: "unauthenticated" };
   }
 
-  const { data, error } = await client
-    .from("company_pos")
-    .select(COMPANY_PO_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    client
+      .from("company_pos")
+      .select(COMPANY_PO_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
 
   if (error) {
     return { status: "error", error: error.message };
@@ -832,10 +1301,13 @@ export async function hydratePayables(): Promise<HydrationResult<Payable[]>> {
     return { status: "unauthenticated" };
   }
 
-  const { data, error } = await client
-    .from("payables")
-    .select(PAYABLE_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    client
+      .from("payables")
+      .select(PAYABLE_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
 
   if (error) {
     return { status: "error", error: error.message };
@@ -901,10 +1373,13 @@ export async function hydratePayablePayments(): Promise<
     return { status: "unauthenticated" };
   }
 
-  const { data, error } = await client
-    .from("payable_payments")
-    .select(PAYABLE_PAYMENT_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    client
+      .from("payable_payments")
+      .select(PAYABLE_PAYMENT_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
 
   if (error) {
     return { status: "error", error: error.message };
@@ -942,7 +1417,12 @@ const PROJECT_COLUMNS =
   "work_description, production_version, customer_visible_name, " +
   "internal_order_code, project_type, parent_project_id, " +
   "source_project_id, repeat_order_seq, original_project_name, " +
-  "activity_log";
+  "activity_log, planned_start_date, actual_production_start_date, " +
+  "target_completion_date, customer_committed_delivery_date, " +
+  "actual_completion_date, work_type, lifecycle_stage, material_ownership, " +
+  "ordered_quantity, planned_quantity, received_quantity, produced_quantity, " +
+  "accepted_quantity, rejected_quantity, rework_quantity, returned_quantity, " +
+  "remaining_quantity, overproduction_quantity";
 
 export interface ProjectRow {
   id: string;
@@ -961,6 +1441,25 @@ export interface ProjectRow {
   repeat_order_seq: number | null;
   original_project_name: string | null;
   activity_log: ProjectActivity[] | null;
+  planned_start_date: string | null;
+  actual_production_start_date: string | null;
+  target_completion_date: string | null;
+  customer_committed_delivery_date: string | null;
+  actual_completion_date: string | null;
+  // Phase 57 (Group 2, Master Monster Prompt)
+  work_type: string | null;
+  lifecycle_stage: string | null;
+  material_ownership: string | null;
+  ordered_quantity: number | null;
+  planned_quantity: number | null;
+  received_quantity: number | null;
+  produced_quantity: number | null;
+  accepted_quantity: number | null;
+  rejected_quantity: number | null;
+  rework_quantity: number | null;
+  returned_quantity: number | null;
+  remaining_quantity: number | null;
+  overproduction_quantity: number | null;
 }
 
 // Deliberately returns Omit<Project, ...> for the local-only fields -
@@ -990,6 +1489,27 @@ export function transformProjectRow(
     internalOrderCode: row.internal_order_code ?? undefined,
     projectType: (row.project_type as Project["projectType"]) ?? undefined,
     parentProjectId: row.parent_project_id ?? undefined,
+    plannedStartDate: row.planned_start_date ?? undefined,
+    actualProductionStartDate: row.actual_production_start_date ?? undefined,
+    targetCompletionDate: row.target_completion_date ?? undefined,
+    customerCommittedDeliveryDate:
+      row.customer_committed_delivery_date ?? undefined,
+    actualCompletionDate: row.actual_completion_date ?? undefined,
+    workType: (row.work_type as Project["workType"]) ?? undefined,
+    lifecycleStage:
+      (row.lifecycle_stage as Project["lifecycleStage"]) ?? undefined,
+    materialOwnership:
+      (row.material_ownership as Project["materialOwnership"]) ?? undefined,
+    orderedQuantity: row.ordered_quantity ?? undefined,
+    plannedQuantity: row.planned_quantity ?? undefined,
+    receivedQuantity: row.received_quantity ?? undefined,
+    producedQuantity: row.produced_quantity ?? undefined,
+    acceptedQuantity: row.accepted_quantity ?? undefined,
+    rejectedQuantity: row.rejected_quantity ?? undefined,
+    reworkQuantity: row.rework_quantity ?? undefined,
+    returnedQuantity: row.returned_quantity ?? undefined,
+    remainingQuantity: row.remaining_quantity ?? undefined,
+    overproductionQuantity: row.overproduction_quantity ?? undefined,
   };
 }
 
@@ -1008,10 +1528,13 @@ export async function hydrateProjects(): Promise<HydrationResult<Project[]>> {
     return { status: "unauthenticated" };
   }
 
-  const { data, error } = await client
-    .from("projects")
-    .select(PROJECT_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    client
+      .from("projects")
+      .select(PROJECT_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
 
   if (error) {
     return { status: "error", error: error.message };
@@ -1084,10 +1607,13 @@ export async function hydrateOutsourcedWorks(): Promise<
     return { status: "unauthenticated" };
   }
 
-  const { data, error } = await client
-    .from("outsourced_works")
-    .select(OUTSOURCED_WORK_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    client
+      .from("outsourced_works")
+      .select(OUTSOURCED_WORK_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
 
   if (error) {
     return { status: "error", error: error.message };
@@ -1164,10 +1690,13 @@ export async function hydrateAdvanceRecords(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("advance_records")
-    .select(ADVANCE_RECORD_COLUMNS)
-    .order("date");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("advance_records")
+      .select(ADVANCE_RECORD_COLUMNS)
+      .order("date")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -1203,10 +1732,13 @@ export async function hydrateAttendanceRecords(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("attendance_records")
-    .select(ATTENDANCE_RECORD_COLUMNS)
-    .order("date");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("attendance_records")
+      .select(ATTENDANCE_RECORD_COLUMNS)
+      .order("date")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -1273,10 +1805,13 @@ export async function hydrateEmployeeDocuments(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("employee_documents")
-    .select(EMPLOYEE_DOCUMENT_COLUMNS)
-    .order("uploaded_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("employee_documents")
+      .select(EMPLOYEE_DOCUMENT_COLUMNS)
+      .order("uploaded_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -1326,10 +1861,13 @@ export async function hydrateSalaryPayments(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("salary_payments")
-    .select(SALARY_PAYMENT_COLUMNS)
-    .order("payment_date");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("salary_payments")
+      .select(SALARY_PAYMENT_COLUMNS)
+      .order("payment_date")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -1394,10 +1932,13 @@ export async function hydrateInventoryPurchases(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("inventory_purchases")
-    .select(INVENTORY_PURCHASE_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("inventory_purchases")
+      .select(INVENTORY_PURCHASE_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -1464,11 +2005,14 @@ export async function hydrateMaterialPurchases(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("inventory_purchases")
-    .select(MATERIAL_PURCHASE_COLUMNS)
-    .not("project_id", "is", null)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("inventory_purchases")
+      .select(MATERIAL_PURCHASE_COLUMNS)
+      .not("project_id", "is", null)
+      .order("created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -1514,10 +2058,13 @@ export async function hydrateInventoryUsages(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("inventory_usages")
-    .select(INVENTORY_USAGE_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("inventory_usages")
+      .select(INVENTORY_USAGE_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -1557,10 +2104,13 @@ export function transformBomItemRow(row: BomItemRow): BomItem {
 export async function hydrateBomItems(): Promise<HydrationResult<BomItem[]>> {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("project_bom_items")
-    .select(BOM_ITEM_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("project_bom_items")
+      .select(BOM_ITEM_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -1617,10 +2167,13 @@ export async function hydrateBomRequisitions(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("bom_requisitions")
-    .select(BOM_REQUISITION_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("bom_requisitions")
+      .select(BOM_REQUISITION_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -1679,10 +2232,13 @@ export async function hydrateScrapRecords(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("scrap_records")
-    .select(SCRAP_RECORD_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("scrap_records")
+      .select(SCRAP_RECORD_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -1723,10 +2279,13 @@ export async function hydrateProjectItems(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("project_items")
-    .select(PROJECT_ITEM_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("project_items")
+      .select(PROJECT_ITEM_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -1791,9 +2350,12 @@ export async function hydrateInternalCostings(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("internal_costings")
-    .select(INTERNAL_COSTING_COLUMNS);
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("internal_costings")
+      .select(INTERNAL_COSTING_COLUMNS)
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -1824,9 +2386,12 @@ export async function hydrateProjectEmployees(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("project_employees")
-    .select("project_id, employee_id");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("project_employees")
+      .select("project_id, employee_id")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -1855,9 +2420,12 @@ export async function hydrateProjectMachinery(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("project_machinery")
-    .select("project_id, machine_id");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("project_machinery")
+      .select("project_id, machine_id")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -1883,9 +2451,12 @@ export async function hydrateProjectDies(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("project_dies")
-    .select("project_id, die_id");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("project_dies")
+      .select("project_id, die_id")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -1909,10 +2480,13 @@ export async function hydrateBillableServices(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("billable_services")
-    .select(BILLABLE_SERVICE_COLUMNS)
-    .order("name");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("billable_services")
+      .select(BILLABLE_SERVICE_COLUMNS)
+      .order("name")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -1928,10 +2502,13 @@ export async function hydrateMachineServiceRates(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("machine_service_rate_history")
-    .select(RATE_HISTORY_COLUMNS)
-    .order("effective_from");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("machine_service_rate_history")
+      .select(RATE_HISTORY_COLUMNS)
+      .order("effective_from")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -1948,10 +2525,13 @@ export async function hydrateMachineServiceUsage(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("machine_service_usage")
-    .select(USAGE_COLUMNS)
-    .order("usage_date", { ascending: false });
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("machine_service_usage")
+      .select(USAGE_COLUMNS)
+      .order("usage_date", { ascending: false })
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -2059,10 +2639,13 @@ export async function hydrateQuotations(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("quotations")
-    .select(QUOTATION_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("quotations")
+      .select(QUOTATION_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -2135,10 +2718,13 @@ export async function hydrateQuotationRevisions(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("quotation_revisions")
-    .select(QUOTATION_REVISION_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("quotation_revisions")
+      .select(QUOTATION_REVISION_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -2181,10 +2767,13 @@ export function transformMasterPORow(row: MasterPORow): MasterPO {
 export async function hydrateMasterPOs(): Promise<HydrationResult<MasterPO[]>> {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("master_pos")
-    .select(MASTER_PO_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("master_pos")
+      .select(MASTER_PO_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -2233,10 +2822,13 @@ export async function hydrateQuotationPurchaseOrders(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("quotation_purchase_orders")
-    .select(QUOTATION_PURCHASE_ORDER_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("quotation_purchase_orders")
+      .select(QUOTATION_PURCHASE_ORDER_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -2296,10 +2888,13 @@ export async function hydrateProjectPurchaseOrders(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("project_purchase_orders")
-    .select(PROJECT_PURCHASE_ORDER_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("project_purchase_orders")
+      .select(PROJECT_PURCHASE_ORDER_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -2375,10 +2970,13 @@ export async function hydrateExpenseFloats(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("expense_floats")
-    .select(EXPENSE_FLOAT_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("expense_floats")
+      .select(EXPENSE_FLOAT_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -2460,10 +3058,13 @@ export async function hydratePettyExpenses(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("petty_expenses")
-    .select(PETTY_EXPENSE_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("petty_expenses")
+      .select(PETTY_EXPENSE_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -2552,10 +3153,13 @@ export async function hydrateDeliveryChallans(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("delivery_challans")
-    .select(DELIVERY_CHALLAN_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("delivery_challans")
+      .select(DELIVERY_CHALLAN_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -2602,7 +3206,8 @@ export const INVOICE_COLUMNS =
   "buyer_gstin, buyer_address, buyer_state_name, buyer_state_code, " +
   "invoice_type, reminder_enabled, reminder_interval_days, " +
   "reminder_frequency_days, next_reminder_at, last_reminder_sent_at, " +
-  "reminder_count, next_reminder_custom_date, selected_email, created_at";
+  "reminder_count, next_reminder_custom_date, selected_email, " +
+  "eway_bill_document, created_at";
 
 export const INVOICE_ITEM_COLUMNS =
   "id, invoice_id, description, hsn, quantity, price, project_id, created_at";
@@ -2678,6 +3283,7 @@ export interface InvoiceRow {
   reminder_count: number | null;
   next_reminder_custom_date: string | null;
   selected_email: string | null;
+  eway_bill_document: PurchaseAttachment | null;
   created_at: string;
   invoice_items?: InvoiceItemRow[];
   invoice_purchase_orders?: InvoicePurchaseOrderRow[];
@@ -2748,18 +3354,22 @@ export function transformInvoiceRow(row: InvoiceRow): Invoice {
     // invoiceNumber is a form-staging duplicate of invNo, never persisted -
     // hydrate it from invNo so the edit form's field starts populated.
     invoiceNumber: row.inv_no ?? "",
+    ewayBillDocument: row.eway_bill_document ?? undefined,
   };
 }
 
 export async function hydrateInvoices(): Promise<HydrationResult<Invoice[]>> {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("invoices")
-    .select(
-      `${INVOICE_COLUMNS}, invoice_items(${INVOICE_ITEM_COLUMNS}), invoice_purchase_orders(${INVOICE_PO_COLUMNS})`,
-    )
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("invoices")
+      .select(
+        `${INVOICE_COLUMNS}, invoice_items(${INVOICE_ITEM_COLUMNS}), invoice_purchase_orders(${INVOICE_PO_COLUMNS})`,
+      )
+      .order("created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -2800,10 +3410,13 @@ export function transformPaymentRow(row: PaymentRow): Payment {
 export async function hydratePayments(): Promise<HydrationResult<Payment[]>> {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("payments")
-    .select(PAYMENT_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("payments")
+      .select(PAYMENT_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -2819,7 +3432,9 @@ export const JOB_CARD_COLUMNS =
   "id, job_no, project_id, employee_id, employee_name, job_description, " +
   "operation_type, standard_time_per_unit_minutes, allocated_time_minutes, " +
   "expected_quantity, actual_completed_qty, rejected_qty, rework_qty, " +
-  "start_time, end_time, actual_time_spent_minutes, status, notes, " +
+  "reject_root_cause, stage_id, " +
+  "start_time, end_time, actual_time_spent_minutes, active_seconds, " +
+  "current_run_started_at, status, notes, " +
   "created_at, updated_at";
 
 export interface JobCardRow {
@@ -2836,9 +3451,13 @@ export interface JobCardRow {
   actual_completed_qty: number;
   rejected_qty: number;
   rework_qty: number;
+  reject_root_cause: string | null;
+  stage_id: string | null;
   start_time: string | null;
   end_time: string | null;
   actual_time_spent_minutes: number | null;
+  active_seconds: number;
+  current_run_started_at: string | null;
   status: string;
   notes: string | null;
   created_at: string;
@@ -2860,9 +3479,14 @@ export function transformJobCardRow(row: JobCardRow): JobCard {
     actualCompletedQty: row.actual_completed_qty,
     rejectedQty: row.rejected_qty,
     reworkQty: row.rework_qty,
+    rejectRootCause:
+      (row.reject_root_cause as JobCard["rejectRootCause"]) ?? undefined,
+    stageId: row.stage_id ?? undefined,
     startTime: row.start_time ?? undefined,
     endTime: row.end_time ?? undefined,
     actualTimeSpentMinutes: row.actual_time_spent_minutes ?? undefined,
+    activeSeconds: row.active_seconds ?? 0,
+    currentRunStartedAt: row.current_run_started_at ?? undefined,
     status: (row.status as JobCardStatus | null) ?? "NotStarted",
     notes: row.notes ?? undefined,
     createdAt: new Date(row.created_at).getTime(),
@@ -2870,13 +3494,77 @@ export function transformJobCardRow(row: JobCardRow): JobCard {
   };
 }
 
+// ── Job Card Exceptions (database/phase-58) ─────────────────────────────
+
+export const JOB_CARD_EXCEPTION_COLUMNS =
+  "id, job_card_id, reason_type, description, status, reported_by, " +
+  "reported_at, approved_by, approved_at, approval_notes, created_at";
+
+export interface JobCardExceptionRow {
+  id: string;
+  job_card_id: string;
+  reason_type: string;
+  description: string | null;
+  status: string;
+  reported_by: string | null;
+  reported_at: string;
+  approved_by: string | null;
+  approved_at: string | null;
+  approval_notes: string | null;
+  created_at: string;
+}
+
+export function transformJobCardExceptionRow(
+  row: JobCardExceptionRow,
+): JobCardException {
+  return {
+    id: row.id,
+    jobCardId: row.job_card_id,
+    reasonType: row.reason_type as JobCardException["reasonType"],
+    description: row.description ?? undefined,
+    status: row.status as JobCardException["status"],
+    reportedBy: row.reported_by ?? undefined,
+    reportedAt: new Date(row.reported_at).getTime(),
+    approvedBy: row.approved_by ?? undefined,
+    approvedAt: row.approved_at
+      ? new Date(row.approved_at).getTime()
+      : undefined,
+    approvalNotes: row.approval_notes ?? undefined,
+    createdAt: new Date(row.created_at).getTime(),
+  };
+}
+
+export async function hydrateJobCardExceptions(): Promise<
+  HydrationResult<JobCardException[]>
+> {
+  const gate = await requireSessionForHydration();
+  if (!gate.ok) return gate.result;
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("job_card_exceptions")
+      .select(JOB_CARD_EXCEPTION_COLUMNS)
+      .order("reported_at", { ascending: false })
+      .range(from, to),
+  );
+  if (error) return { status: "error", error: error.message };
+  return {
+    status: "success",
+    data: (data as unknown as JobCardExceptionRow[]).map(
+      transformJobCardExceptionRow,
+    ),
+  };
+}
+
 export async function hydrateJobCards(): Promise<HydrationResult<JobCard[]>> {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("job_cards")
-    .select(JOB_CARD_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("job_cards")
+      .select(JOB_CARD_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -2934,10 +3622,13 @@ export async function hydrateProjectQmsInspections(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("project_qms_inspections")
-    .select(PROJECT_QMS_INSPECTION_COLUMNS)
-    .order("created_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("project_qms_inspections")
+      .select(PROJECT_QMS_INSPECTION_COLUMNS)
+      .order("created_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -2980,10 +3671,13 @@ export async function hydrateProjectQmsInspectionCharacteristics(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("project_qms_inspection_characteristics")
-    .select(PROJECT_QMS_INSPECTION_CHARACTERISTIC_COLUMNS)
-    .order("sequence");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("project_qms_inspection_characteristics")
+      .select(PROJECT_QMS_INSPECTION_CHARACTERISTIC_COLUMNS)
+      .order("sequence")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -3044,10 +3738,13 @@ export async function hydrateProjectQmsInspectionAttempts(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("project_qms_inspection_attempts")
-    .select(PROJECT_QMS_INSPECTION_ATTEMPT_COLUMNS)
-    .order("round_number");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("project_qms_inspection_attempts")
+      .select(PROJECT_QMS_INSPECTION_ATTEMPT_COLUMNS)
+      .order("round_number")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -3101,11 +3798,14 @@ export async function hydrateProjectQmsInspectionAttemptPhotosForAttempts(
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
   if (attemptIds.length === 0) return { status: "success", data: [] };
-  const { data, error } = await gate.client
-    .from("project_qms_inspection_attempt_photos")
-    .select(PROJECT_QMS_INSPECTION_ATTEMPT_PHOTO_COLUMNS)
-    .in("attempt_id", attemptIds)
-    .order("uploaded_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("project_qms_inspection_attempt_photos")
+      .select(PROJECT_QMS_INSPECTION_ATTEMPT_PHOTO_COLUMNS)
+      .in("attempt_id", attemptIds)
+      .order("uploaded_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -3150,10 +3850,13 @@ export async function hydrateProjectQmsInspectionOverrides(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("project_qms_inspection_overrides")
-    .select(PROJECT_QMS_INSPECTION_OVERRIDE_COLUMNS)
-    .order("overridden_at");
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("project_qms_inspection_overrides")
+      .select(PROJECT_QMS_INSPECTION_OVERRIDE_COLUMNS)
+      .order("overridden_at")
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -3203,10 +3906,13 @@ export async function hydrateInspectionSheets(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("inspection_sheets")
-    .select(INSPECTION_SHEET_HYDRATION_COLUMNS)
-    .order("generated_at", { ascending: false });
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("inspection_sheets")
+      .select(INSPECTION_SHEET_HYDRATION_COLUMNS)
+      .order("generated_at", { ascending: false })
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -3226,9 +3932,12 @@ export async function hydrateQmsStageCompletions(): Promise<
 > {
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
-  const { data, error } = await gate.client
-    .from("qms_stage_completions")
-    .select(QMS_STAGE_COMPLETION_HYDRATION_COLUMNS);
+  const { data, error } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("qms_stage_completions")
+      .select(QMS_STAGE_COMPLETION_HYDRATION_COLUMNS)
+      .range(from, to),
+  );
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
@@ -3253,10 +3962,11 @@ const PROJECT_PRODUCTION_STAGE_COLUMNS =
   "requires_material_tracking, sent_qty, received_qty, ok_qty, rejected_qty, " +
   "is_rework, reference_stage_id, rework_stage_name, sent_to_vendor_id, " +
   "sent_to_vendor_name, sent_date_time, received_date_time, rework_qty, " +
+  "target_qty, stage_type, " +
   "created_at, updated_at";
 
 const PRODUCTION_STAGE_TRANSACTION_COLUMNS =
-  "id, stage_id, type, quantity, event_time, vendor_id, vendor_name, created_at";
+  "id, stage_id, type, quantity, event_time, vendor_id, vendor_name, source_stage_id, created_at";
 
 export async function hydrateProjectProductionStages(): Promise<
   HydrationResult<ProjectProduction[]>
@@ -3264,17 +3974,24 @@ export async function hydrateProjectProductionStages(): Promise<
   const gate = await requireSessionForHydration();
   if (!gate.ok) return gate.result;
 
-  const { data: stageRows, error: stageError } = await gate.client
-    .from("project_production_stages")
-    .select(PROJECT_PRODUCTION_STAGE_COLUMNS)
-    .order("project_id")
-    .order("position");
+  const { data: stageRows, error: stageError } = await fetchAllRows(
+    (from, to) =>
+      gate.client
+        .from("project_production_stages")
+        .select(PROJECT_PRODUCTION_STAGE_COLUMNS)
+        .order("project_id")
+        .order("position")
+        .range(from, to),
+  );
   if (stageError) return { status: "error", error: stageError.message };
 
-  const { data: txRows, error: txError } = await gate.client
-    .from("production_stage_transactions")
-    .select(PRODUCTION_STAGE_TRANSACTION_COLUMNS)
-    .order("event_time");
+  const { data: txRows, error: txError } = await fetchAllRows((from, to) =>
+    gate.client
+      .from("production_stage_transactions")
+      .select(PRODUCTION_STAGE_TRANSACTION_COLUMNS)
+      .order("event_time")
+      .range(from, to),
+  );
   if (txError) return { status: "error", error: txError.message };
 
   const txByStage = new Map<string, ProductionStageTransactionRow[]>();

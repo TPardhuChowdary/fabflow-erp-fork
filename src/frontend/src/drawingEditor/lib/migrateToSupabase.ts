@@ -29,6 +29,7 @@
 // - Every item's outcome (migrated / already migrated / failed + why) is
 //   reported individually — nothing is silently dropped.
 
+import { fetchAllRows } from "@/lib/hydration";
 import { getSupabase } from "@/lib/supabaseClient";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
@@ -125,16 +126,21 @@ export async function migrateDrawingRepositoryToSupabase(
 
   // ── Drawings (+ Storage blobs) ──────────────────────────────────────
   const localDrawings = await drawingRepo.getAll();
-  const { data: existingDrawingRows, error: existingDrawingsErr } = await client
-    .from("drawings")
-    .select("id");
+  // Gap-closure fix — was a single unbounded .select(), which silently
+  // truncates past 1,000 rows; drawings is exactly the kind of table that
+  // can realistically get there, and this idempotency check is what stands
+  // between a re-run and a real duplicate migration attempt.
+  const { data: existingDrawingRows, error: existingDrawingsErr } =
+    await fetchAllRows<{ id: string }>((from, to) =>
+      client.from("drawings").select("id").range(from, to),
+    );
   if (existingDrawingsErr) {
     throw new Error(
       `Failed to check already-migrated drawings: ${existingDrawingsErr.message}`,
     );
   }
   const existingDrawingIds = new Set(
-    ((existingDrawingRows as { id: string }[]) ?? []).map((r) => r.id),
+    (existingDrawingRows ?? []).map((r) => r.id),
   );
 
   for (const d of localDrawings) {
@@ -234,17 +240,18 @@ export async function migrateDrawingRepositoryToSupabase(
 
   // ── Views ────────────────────────────────────────────────────────────
   const localViews = await drawingViewRepo.getAll();
-  const { data: existingViewRows, error: existingViewsErr } = await client
-    .from("drawing_views")
-    .select("id");
+  // Gap-closure fix — same silent-1,000-row-truncation risk as the drawings
+  // check above.
+  const { data: existingViewRows, error: existingViewsErr } =
+    await fetchAllRows<{ id: string }>((from, to) =>
+      client.from("drawing_views").select("id").range(from, to),
+    );
   if (existingViewsErr) {
     throw new Error(
       `Failed to check already-migrated views: ${existingViewsErr.message}`,
     );
   }
-  const existingViewIds = new Set(
-    ((existingViewRows as { id: string }[]) ?? []).map((r) => r.id),
-  );
+  const existingViewIds = new Set((existingViewRows ?? []).map((r) => r.id));
 
   for (const v of localViews) {
     const label = `Page ${v.pageNumber} (drawing ${v.drawingId})`;
@@ -302,17 +309,18 @@ export async function migrateDrawingRepositoryToSupabase(
 
   // ── Links ────────────────────────────────────────────────────────────
   const localLinks = await drawingLinkRepo.getAll();
-  const { data: existingLinkRows, error: existingLinksErr } = await client
-    .from("drawing_links")
-    .select("id");
+  // Gap-closure fix — same silent-1,000-row-truncation risk as the drawings
+  // check above.
+  const { data: existingLinkRows, error: existingLinksErr } =
+    await fetchAllRows<{ id: string }>((from, to) =>
+      client.from("drawing_links").select("id").range(from, to),
+    );
   if (existingLinksErr) {
     throw new Error(
       `Failed to check already-migrated links: ${existingLinksErr.message}`,
     );
   }
-  const existingLinkIds = new Set(
-    ((existingLinkRows as { id: string }[]) ?? []).map((r) => r.id),
-  );
+  const existingLinkIds = new Set((existingLinkRows ?? []).map((r) => r.id));
 
   for (const l of localLinks) {
     const label = `${l.linkedType}:${l.linkedId} (drawing ${l.drawingId})`;

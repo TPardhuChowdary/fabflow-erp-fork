@@ -515,15 +515,33 @@ function describePendingCall(call: PendingToolCall): {
       if (p.notes) parts.push(String(p.notes));
       break;
     }
+    // QA finding: model / serial number / purchase cost were NOT shown here,
+    // even though they are the fields most likely to be wrong when the
+    // Agent read them off a photographed data plate — measured live, a
+    // heavily blurred plate produced a confident but incorrect serial. The
+    // confirmation disclosure is the only place a user sees what is about
+    // to be written, so an unshown field can become trusted asset-register
+    // data without anyone ever laying eyes on it. Identifiers and money are
+    // now surfaced; everything else about this flow is unchanged.
     case "createMachine": {
       if (p.name) parts.push(String(p.name));
       if (p.type) parts.push(String(p.type));
       if (p.brand) parts.push(String(p.brand));
+      if (p.model) parts.push(`model ${p.model}`);
+      if (p.serialNumber) parts.push(`serial ${p.serialNumber}`);
+      if (p.purchaseCost !== undefined && p.purchaseCost !== null) {
+        parts.push(`₹${Number(p.purchaseCost).toLocaleString("en-IN")}`);
+      }
       break;
     }
     case "createTool": {
       if (p.name) parts.push(String(p.name));
       if (p.quantity !== undefined) parts.push(`qty ${p.quantity}`);
+      // Same reasoning as createMachine above — a financial value must be
+      // visible on the control the user actually confirms.
+      if (p.replacementValue !== undefined && p.replacementValue !== null) {
+        parts.push(`₹${Number(p.replacementValue).toLocaleString("en-IN")}`);
+      }
       break;
     }
     case "createDie": {
@@ -805,8 +823,12 @@ export function AgentPage({
       for (const pf of filesToSend) {
         const uploaded = await uploadAgentDocument(pf.file);
         if (uploaded.ok) {
+          // Phase 20 (Group 2) — a PDF gets the "document" block (real
+          // input_file reading, see openaiProvider.ts); everything else
+          // keeps going through "image" exactly as before.
           attachedFiles.push({
-            type: "image",
+            type:
+              uploaded.mimeType === "application/pdf" ? "document" : "image",
             url: uploaded.signedUrl,
             fileName: uploaded.fileName,
             mimeType: uploaded.mimeType,

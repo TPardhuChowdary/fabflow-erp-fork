@@ -1,0 +1,22 @@
+{
+  "name": "@caffeine/email-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Phase 1 Option B experimental IMAP worker — runs the generic IMAP/SMTP adapter's socket work (ImapFlow + mailparser) in a real Node.js runtime instead of Supabase Edge/Deno, to test whether that eliminates the reproducible 'Already logged out' ImapFlow lifecycle crash observed under Deno. See src/imapCore.ts's header comment for the full context.",
+  "scripts": {
+    "dev": "node --watch src/server.ts",
+    "start": "node dist/server.js",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "imapflow": "^1.7.8",
+    "mailparser": "^3.7.4"
+  },
+  "devDependencies": {
+    "@types/mailparser": "^3.4.6",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}

@@ -38,7 +38,10 @@ export type WorkspaceRecordType =
   | "customer"
   | "employee"
   | "machine"
-  | "vendor";
+  | "vendor"
+  | "die"
+  | "tool"
+  | "tender";
 
 export interface RecentWorkspaceEntry {
   key: string;
@@ -114,6 +117,21 @@ function resolveDisplay(
       const v = s.vendors.find((x) => x.id === id);
       if (!v) return null;
       return { label: v.name, secondary: "Vendor" };
+    }
+    case "die": {
+      const d = s.dies.find((x) => x.id === id);
+      if (!d) return null;
+      return { label: d.name, secondary: d.dieCode || "Die" };
+    }
+    case "tool": {
+      const t = s.tools.find((x) => x.id === id);
+      if (!t) return null;
+      return { label: t.name, secondary: t.toolCode || "Tool" };
+    }
+    case "tender": {
+      const t = s.tenders.find((x) => x.id === id);
+      if (!t) return null;
+      return { label: t.tenderNumber, secondary: t.title || "Tender" };
     }
   }
 }

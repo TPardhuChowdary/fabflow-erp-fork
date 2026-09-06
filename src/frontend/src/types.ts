@@ -28,6 +28,10 @@ export interface Customer {
   additionalDetails?: Array<{ key: string; value: string }>;
   emails?: Array<{ email: string; type: string }>;
   primaryEmail?: string;
+  // Phase 54 (Group 2, roadmap Phase 15) — reusable saved delivery
+  // addresses, same jsonb-array convention as additionalDetails/emails
+  // above. See database/phase-54.
+  deliveryAddresses?: Array<{ id: string; label: string; address: string }>;
   createdAt: number;
 }
 
@@ -209,6 +213,55 @@ export type JobCardStatus =
   | "Completed"
   | "OnHold";
 
+// Employee Job Card Mobile Workflow — matches job_cards.reject_root_cause's
+// CHECK constraint exactly (database/phase-58). Recorded at the point a
+// rejection/rework is entered so a later performance-calculation phase can
+// exclude non-employee-caused failures - this phase only records the
+// cause, it does not score anyone against it.
+export type RejectRootCause =
+  | "employee_workmanship"
+  | "material"
+  | "machine_equipment"
+  | "design_specification"
+  | "previous_process"
+  | "supervisor_instruction"
+  | "customer_change"
+  | "other";
+
+// Matches job_card_exceptions.reason_type's CHECK constraint exactly
+// (database/phase-58).
+export type JobCardExceptionReason =
+  | "machine_breakdown"
+  | "material_unavailable"
+  | "incorrect_material"
+  | "design_specification_change"
+  | "supervisor_delay"
+  | "customer_change"
+  | "technical_difficulty"
+  | "safety_delay"
+  | "other";
+
+export type JobCardExceptionStatus = "pending" | "approved" | "rejected";
+
+// An exception is evidence explaining why assigned work wasn't completed
+// - never itself a performance penalty. Reporting (insert) and approving
+// (update) are deliberately different RLS actions (job_cards.edit vs.
+// job_cards.approve, see database/phase-58) so a worker can't silently
+// self-approve their own exception.
+export interface JobCardException {
+  id: string;
+  jobCardId: string;
+  reasonType: JobCardExceptionReason;
+  description?: string;
+  status: JobCardExceptionStatus;
+  reportedBy?: string;
+  reportedAt: number;
+  approvedBy?: string;
+  approvedAt?: number;
+  approvalNotes?: string;
+  createdAt: number;
+}
+
 export interface JobCard {
   id: string;
   jobNo: string;
@@ -220,6 +273,17 @@ export interface JobCard {
   employeeName: string;
   jobDescription: string;
   operationType: string;
+  /** Real FK to ProjectProductionStage. Optional — a Job Card is not
+   * required to belong to a stage (ad-hoc work stays fully supported).
+   * ON DELETE SET NULL: deleting a stage never deletes its Job Cards'
+   * historical records (database/20260906060000). Enforced server-side
+   * to belong to the same project and organization as this Job Card —
+   * never trust a client-supplied value alone. Editing this field (or
+   * actualCompletedQty/rejectedQty/reworkQty) on an already-Completed,
+   * stage-linked card requires job_cards.approve and is audited via the
+   * existing projects.activity_log mechanism — see enforce_job_card_
+   * completed_quantity_approval in that same migration. */
+  stageId?: string;
   standardTimePerUnitMinutes: number;
   allocatedTimeMinutes: number;
   /** Server-computed (Postgres GENERATED column): floor(allocatedTimeMinutes
@@ -230,10 +294,25 @@ export interface JobCard {
   actualCompletedQty: number;
   rejectedQty: number;
   reworkQty: number;
+  /** Set when rejectedQty and/or reworkQty > 0 - see RejectRootCause. */
+  rejectRootCause?: RejectRootCause;
   startTime?: string;
   endTime?: string;
-  /** Server-computed (Postgres GENERATED column) from startTime/endTime. */
+  /** Server-computed (Postgres GENERATED column) from startTime/endTime -
+   * includes paused time, unchanged by the pause/resume timer feature.
+   * Still the field EmployeeDetail.tsx's performance metrics use. */
   actualTimeSpentMinutes?: number;
+  /** Pause-aware accumulated working time, in seconds, from all CLOSED
+   * run segments (excludes the currently-open one). Only ever written by
+   * the enforce_job_card_timer_transition trigger (database/
+   * 20260906050000) - never sent by the client. Live "current active
+   * duration" = activeSeconds + (now() - currentRunStartedAt) while
+   * status is InProgress, computed client-side, never persisted per-tick. */
+  activeSeconds: number;
+  /** When the currently-open run segment began. Set on Start/Resume,
+   * cleared on Pause/Complete. Undefined/absent whenever there is no
+   * open run (NotStarted, OnHold, or Completed). */
+  currentRunStartedAt?: string;
   status: JobCardStatus;
   notes?: string;
   createdAt: number;
@@ -397,6 +476,13 @@ export interface Invoice {
   nextReminderCustomDate?: string | null;
   selectedEmail?: string;
   invoiceNumber?: string;
+  /** The invoice's E-Way Bill, when one has been produced and attached.
+   * Same shape/tradeoff as CompanyPO.file (PurchaseAttachment: a single
+   * optional attachment, `ref` a base64 data URI) — reused as-is rather
+   * than inventing new attachment plumbing. Presence of this field (not a
+   * separate boolean/status) is the sole source of truth for "E-Way Bill
+   * completed": undefined = not attached, set = attached. */
+  ewayBillDocument?: PurchaseAttachment;
 }
 
 export interface Payment {
@@ -473,6 +559,7 @@ export type Page =
   | "purchase-orders"
   | "production"
   | "job-cards"
+  | "my-jobs"
   | "material-requisitions"
   | "quality"
   | "delivery-challans"
@@ -492,7 +579,9 @@ export type Page =
   | "machinery"
   | "machine-detail"
   | "tools"
+  | "tool-detail"
   | "dies"
+  | "die-detail"
   | "export-engine"
   | "scrap"
   | "qms-dashboard"
@@ -503,6 +592,10 @@ export type Page =
   | "ledger"
   | "machine-revenue"
   | "agent"
+  | "email-center"
+  | "company-documents"
+  | "tenders"
+  | "tender-detail"
   | "design-lab"
   | "design-lab-v2"
   | "style-lab"
@@ -512,6 +605,77 @@ export type Page =
   | "ux-decision-lab"
   | "ux-visual-lab"
   | "ux-implementation-lab";
+
+// ── Email Integration Types (see chat, database/phase-50) ──────────────
+// Mirrors the live email_accounts/email_messages/email_attachments schema.
+// `encrypted_credentials` never appears here — emailAccountsApi.ts's own
+// explicit column list never selects it, so it can never even accidentally
+// flow into one of these objects.
+
+export type EmailProvider = "google" | "microsoft" | "imap_smtp";
+export type EmailConnectionMethod = "oauth" | "imap_smtp";
+export type EmailAccountStatus =
+  | "connected"
+  | "auth_required"
+  | "sync_failed"
+  | "disconnected";
+export type EmailEncryption = "ssl" | "starttls" | "none";
+
+export interface EmailAccount {
+  id: string;
+  emailAddress: string;
+  displayName?: string;
+  provider: EmailProvider;
+  connectionMethod: EmailConnectionMethod;
+  imapHost?: string;
+  imapPort?: number;
+  imapEncryption?: EmailEncryption;
+  smtpHost?: string;
+  smtpPort?: number;
+  smtpEncryption?: EmailEncryption;
+  status: EmailAccountStatus;
+  statusDetail?: string;
+  lastSyncAt?: number;
+  syncWindowDays: number;
+  isDefaultSender: boolean;
+  createdAt: number;
+}
+
+export interface EmailMessage {
+  id: string;
+  emailAccountId: string;
+  providerMessageId: string;
+  providerThreadId?: string;
+  fromAddress: string;
+  fromName?: string;
+  toAddresses: string[];
+  ccAddresses: string[];
+  subject?: string;
+  bodyText?: string;
+  bodyHtml?: string;
+  snippet?: string;
+  sentAt?: number;
+  isRead: boolean;
+  folder: string;
+  hasAttachments: boolean;
+}
+
+export type EmailAttachmentProcessingStatus =
+  | "pending"
+  | "stored"
+  | "failed"
+  | "skipped_too_large"
+  | "skipped_unsupported_type";
+
+export interface EmailAttachment {
+  id: string;
+  emailMessageId: string;
+  filename: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  storagePath: string;
+  processingStatus: EmailAttachmentProcessingStatus;
+}
 
 // ── Project Tracking Types ──────────────────────────────────────
 
@@ -544,6 +708,7 @@ export type ProjectActivityType =
   | "payment_received"
   | "machine_breakdown"
   | "report_exported"
+  | "deadline_updated"
   | "note";
 
 export interface ProjectActivity {
@@ -582,6 +747,58 @@ export interface Project {
   internalOrderCode?: string; // e.g. "ORD-005" — never shown to customer
   projectType?: "STANDARD" | "REPEAT_ORDER";
   parentProjectId?: string; // points to original project
+  // Phase 52 (Group 2, roadmap Phase 10) — lifecycle dates. Each is a real
+  // business event, set only by an explicit user action, never derived
+  // automatically. createdAt (above) already covers "Created Date" - not
+  // duplicated here. All YYYY-MM-DD strings, like every other date field
+  // in this codebase (poDate, purchaseDate, etc.).
+  plannedStartDate?: string;
+  // Separate from plannedStartDate/quotation/design work - only set when
+  // production genuinely begins.
+  actualProductionStartDate?: string;
+  targetCompletionDate?: string;
+  // What was promised to the customer - distinct from targetCompletionDate,
+  // which is the internal working target.
+  customerCommittedDeliveryDate?: string;
+  actualCompletionDate?: string;
+  // Phase 57 (Group 2, Master Monster Prompt) — what kind of engagement
+  // this project actually is, independent of lifecycleStage below. Not
+  // the same field as projectType above (that's the existing repeat-
+  // order feature) - a separate, new concept.
+  workType?:
+    | "full_manufacturing"
+    | "sample"
+    | "prototype"
+    | "trial"
+    | "production"
+    | "service"
+    | "partial_manufacturing"
+    | "subcontract"
+    | "other";
+  // Only meaningful for sample/prototype-style work moving toward
+  // production - left unset for ordinary production projects. Moving a
+  // project through these is an update to this same field, never a new
+  // project record.
+  lifecycleStage?: "sample" | "production_ready" | "production" | "completed";
+  materialOwnership?: "company" | "customer" | "mixed";
+  // Quantity breakdown, alongside the existing totalQty (which remains
+  // the headline/ordered quantity every existing screen already reads).
+  orderedQuantity?: number;
+  plannedQuantity?: number;
+  // Customer-supplied goods/material entering FabFlow for processing -
+  // e.g. 100 customer-owned chairs sent in for powder coating, or 10kg
+  // of customer-owned powder. Deliberately separate from inventoryItems/
+  // inventoryUsages, which stay scoped to company-owned stock.
+  receivedQuantity?: number;
+  producedQuantity?: number;
+  acceptedQuantity?: number;
+  rejectedQuantity?: number;
+  reworkQuantity?: number;
+  returnedQuantity?: number;
+  remainingQuantity?: number;
+  // Always max(producedQuantity - orderedQuantity, 0), computed by
+  // Postgres (a GENERATED column) - read-only here, never sent on write.
+  overproductionQuantity?: number;
 }
 
 export interface DesignFile {
@@ -593,11 +810,36 @@ export interface DesignFile {
   uploadedAt: number;
 }
 
+// Phase 11 (Group 2) — quantity/rate costing basis. "fixed" is the
+// original behavior (amount entered directly); every other basis derives
+// amount = quantity * rate, computed client-side and still persisted in
+// `amount` for backward compatibility with every existing summing site.
+export type CostBasis =
+  | "fixed"
+  | "per_piece"
+  | "per_kg"
+  | "per_hour"
+  | "per_meter"
+  | "per_unit";
+
 export interface CustomCostEntry {
   id: string;
   name: string;
   amount: number;
-  category: "Material" | "Process" | "Misc";
+  category: "Material" | "Process" | "Machine" | "Labour" | "Misc";
+  // Undefined basis (or "fixed") == legacy behavior, amount entered
+  // directly. Any other basis means amount was derived from quantity*rate
+  // — quantity/rate are kept alongside amount so the line can be edited
+  // later without losing how it was built.
+  basis?: CostBasis;
+  quantity?: number;
+  rate?: number;
+  // Set only when category is "Machine" and the rate was sourced from
+  // that machine's own hourlyRate (Machinery.tsx) — lets the UI show
+  // which machine a line came from without a new lookup table.
+  machineId?: string;
+  // Set only when category is "Labour" — same purpose for Employees.
+  employeeId?: string;
 }
 
 export interface ManualAdjustment {
@@ -672,6 +914,16 @@ export interface StageTransaction {
   dateTime: string;
   sentToVendorId?: string;
   sentToVendorName?: string;
+  /** Set only for a stage-to-stage material transfer (database/
+   * 20260906060000): the upstream ProjectProductionStage this quantity
+   * came from, instead of a vendor. Undefined for every ordinary
+   * external/vendor send or receive — those keep meaning exactly what
+   * they mean today. A "send" transaction on the downstream stage with
+   * this set does NOT count toward that stage's own Sent/Received/
+   * Pending figures (which stay scoped to sourceStageId === undefined,
+   * preserving external Send/Receive math unchanged) — it is read
+   * separately as "Downstream Consumed". */
+  sourceStageId?: string;
 }
 
 export interface ProjectProductionStage {
@@ -704,7 +956,27 @@ export interface ProjectProductionStage {
   reworkStage?: string;
   assignedTo?: string;
   vendor?: string;
-  // WIP quantity tracking (Feature 2)
+  // Production <-> Job Card <-> Quantity integration (database/
+  // 20260906060000) — both nullable/undefined, no backfill for existing
+  // stages (see that migration's own header for the live counts verified
+  // before it was written).
+  /** "This stage needs N output pieces." No existing quantity field
+   * (totalQty, orderedQuantity, BOM quantities, sentQty) legitimately
+   * means this — see the chat design record. Normally seeded from the
+   * project's orderedQuantity when a stage is created, but always
+   * editable — never silently re-synced from the project afterward. */
+  targetQty?: number;
+  /** Authoritative discriminator for which workflow this stage exposes:
+   * 'inhouse' -> Job Cards drive Accepted/Rejected/Rework/Processed;
+   * 'external' -> the existing Send/Receive transactions drive Sent/
+   * Received/Pending, Job Cards play no role. Undefined for every
+   * existing stage (never inferred from sentToVendorId's "inhouse"
+   * sentinel, which keeps its own, separate, existing meaning
+   * unchanged) — the UI requires an explicit choice for new stages only. */
+  stageType?: "inhouse" | "external";
+  // WIP quantity tracking (Feature 2) — dead, zero read usage anywhere,
+  // never persisted (confirmed by grep before the Production ↔ Job Card
+  // design work) — left exactly as found, not resurrected by this change.
   orderedQty?: number;
   wipInProgressQty?: number;
   wipCompletedQty?: number;
@@ -816,6 +1088,26 @@ export interface AttendanceRecord {
   status: "Present" | "Absent" | "Half Day";
 }
 
+// Phase 53 (Group 2, roadmap Phase 13) — Employee Rewards / Merit.
+// Deliberately not a duplicate of Job Card metrics (Phase 12's Performance
+// tab already derives quality/efficiency straight from job_cards) - this
+// is only the human decision to reward someone, optionally traceable back
+// to the job card that justified it.
+export type EmployeeRewardType = "Bonus" | "Recognition" | "Warning";
+
+export interface EmployeeReward {
+  id: string;
+  employeeId: string;
+  rewardType: EmployeeRewardType;
+  title: string;
+  amount?: number;
+  relatedJobCardId?: string;
+  notes?: string;
+  awardedBy?: string;
+  awardedAt: string; // YYYY-MM-DD
+  createdAt: number;
+}
+
 export interface SalaryPayment {
   id: string;
   employeeId: string;
@@ -877,6 +1169,107 @@ export interface EmployeeDocument {
   notes?: string;
   uploadedBy: string;
   uploadedAt: number;
+}
+
+// Phase 55 (Group 2, roadmap Phase 17) — Company Document Library. A
+// reusable, company-wide document (GST/PAN/ISO/etc.), distinct from every
+// per-project/per-employee/per-asset document store already in this
+// schema. See database/phase-55.
+export type CompanyDocumentStatus = "Active" | "Superseded" | "Draft";
+
+export interface CompanyDocument {
+  id: string;
+  category: string;
+  documentType: string;
+  title: string;
+  issueDate?: string;
+  expiryDate?: string;
+  version?: string;
+  status: CompanyDocumentStatus;
+  isTenderEligible: boolean;
+  storagePath: string;
+  originalFilename?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  notes?: string;
+  uploadedBy?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+// Phase 56 (Group 2, roadmap Phases 19-24) — Tender Management + AI
+// Document Intelligence. See database/phase-56.
+export type TenderStatus =
+  | "Draft"
+  | "In Progress"
+  | "Submitted"
+  | "Won"
+  | "Lost"
+  | "Withdrawn";
+
+export interface Tender {
+  id: string;
+  tenderNumber: string;
+  title: string;
+  customerId?: string;
+  authorityName?: string;
+  portal?: string;
+  bidType?: string;
+  submissionDeadline?: string; // ISO datetime
+  openingDate?: string;
+  technicalRequirementsSummary?: string;
+  financialRequirementsSummary?: string;
+  emdAmount?: number;
+  emdDetails?: string;
+  status: TenderStatus;
+  sourceDocumentStoragePath?: string;
+  sourceDocumentFilename?: string;
+  finalPackStoragePath?: string;
+  finalPackGeneratedAt?: number;
+  activityLog?: ProjectActivity[];
+  createdBy?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export type TenderRequirementCategory =
+  | "Eligibility"
+  | "Technical"
+  | "Financial"
+  | "Document"
+  | "Certificate"
+  | "Declaration"
+  | "Schedule"
+  | "EMD"
+  | "Portal"
+  | "Format"
+  | "Other";
+
+// Verbatim vocabulary from the roadmap's Phase 21 spec.
+export type TenderRequirementStatus =
+  | "AVAILABLE"
+  | "MISSING"
+  | "EXPIRED"
+  | "EXPIRING_SOON"
+  | "NEEDS_REVIEW";
+
+export interface TenderRequirement {
+  id: string;
+  tenderId: string;
+  requirementText: string;
+  category: TenderRequirementCategory;
+  isMandatory: boolean;
+  priority: number;
+  status: TenderRequirementStatus;
+  // Snapshotted at match time (Phase 21's explicit requirement) — never
+  // silently re-read from the live company_documents row.
+  matchedCompanyDocumentId?: string;
+  matchedDocumentTitle?: string;
+  matchedDocumentExpiry?: string;
+  actionNeeded?: string;
+  displayOrder: number;
+  createdAt: number;
+  updatedAt: number;
 }
 
 // ── Inventory Types ──────────────────────────────────────────────
@@ -983,6 +1376,15 @@ export interface CompanyPO {
 }
 
 export interface PurchaseAttachment {
+  // Phase 1 attachment-bug fix: stable identity, independent of file
+  // content. Optional so pre-existing rows saved before this field
+  // existed still parse — callers that read attachments back (Inventory,
+  // MaterialDetailDrawer) backfill a real id for any legacy entry
+  // missing one. Never key a list or match a removal by `ref` — two
+  // attachments can share byte-identical content (a duplicate scan) and
+  // therefore an identical `ref`, which silently collided list keys and
+  // deleted the wrong entry before this field existed.
+  id?: string;
   ref: string;
   type: "image" | "pdf";
   name: string;
@@ -1202,6 +1604,7 @@ export interface ToolAssignmentHistory {
 // originally made for.
 
 export type DieStatus =
+  | "Draft"
   | "Available"
   | "In Use"
   | "Under Maintenance"
@@ -1250,6 +1653,77 @@ export interface MachineDie {
   machineId: string;
   dieId: string;
   createdAt: number;
+}
+
+// Phase 51 (Group 2) — universal asset photo store, one reusable table
+// for Machines/Dies/Tools/Inventory Items rather than a per-domain photo
+// system. Storage-backed (private "asset-photos" bucket), never base64 —
+// see machines.primaryImageData/dies.photoData/tools.photoData for the
+// legacy single-photo-per-asset fields this deliberately does NOT
+// replace or migrate; those stay as a read-only fallback where no
+// AssetPhoto rows exist yet for that asset.
+// "job_card" added for the Employee Job Card Mobile Workflow's evidence
+// photos - reuses AssetPhotoGallery/assetPhotosApi.ts unmodified (see
+// database/phase-62, which widens asset_photos_owner_type_check and
+// has_asset_permission() to match).
+export type AssetOwnerType =
+  | "machine"
+  | "die"
+  | "tool"
+  | "inventory_item"
+  | "job_card";
+
+// Phase 51 (Group 2) — universal usage-event log for Machine/Die/Tool,
+// one reusable table (asset_usage_events) rather than three. Mirrors
+// ToolAssignmentHistory's own shape (one row per event, insert-only —
+// see database/phase-51's RLS: select+insert only, no update/delete)
+// deliberately kept generic enough to grow into Phase 12's Job Card
+// integration later without another migration. tool_assignment_history
+// itself is untouched and keeps recording Tools' issue/return
+// independently — Option A (coexist), not replaced here.
+export type AssetUsageEventType =
+  | "issued"
+  | "returned"
+  | "used"
+  | "maintenance"
+  | "inspection"
+  | "other";
+
+export interface AssetUsageEvent {
+  id: string;
+  // Matches asset_usage_events.asset_type's CHECK constraint exactly -
+  // deliberately narrower than AssetOwnerType (no "inventory_item";
+  // usage-event tracking is a Machine/Die/Tool concept, not Inventory's).
+  assetType: "machine" | "die" | "tool";
+  assetId: string;
+  employeeId?: string;
+  employeeName?: string;
+  projectId?: string;
+  jobCardId?: string;
+  eventType: AssetUsageEventType;
+  quantity?: number;
+  conditionBefore?: string;
+  conditionAfter?: string;
+  notes?: string;
+  recordedBy?: string;
+  eventAt: number;
+  createdAt: number;
+}
+
+export interface AssetPhoto {
+  id: string;
+  ownerType: AssetOwnerType;
+  ownerId: string;
+  storagePath: string;
+  originalFilename?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  displayOrder: number;
+  caption?: string;
+  isPrimary: boolean;
+  uploadedBy?: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
 // ── Machine / Service Revenue (§17-28) ──────────────────────────

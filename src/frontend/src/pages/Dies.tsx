@@ -23,6 +23,10 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { useDrawingEditorStore } from "@/drawingEditor/store/useDrawingEditorStore";
 import {
+  addMachineDieRemote,
+  removeMachineDieRemote,
+} from "@/lib/machineCompatibilityApi";
+import {
   Cog,
   Filter,
   ImagePlus,
@@ -30,6 +34,7 @@ import {
   Plus,
   ShieldOff,
   Trash2,
+  X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -44,6 +49,7 @@ import { useStore } from "../store";
 import type { Die, DieStatus, MachineCondition } from "../types";
 
 const DIE_STATUSES: DieStatus[] = [
+  "Draft",
   "Available",
   "In Use",
   "Under Maintenance",
@@ -58,13 +64,22 @@ const CONDITIONS: MachineCondition[] = [
 ];
 
 const STATUS_COLOR: Record<DieStatus, string> = {
+  Draft: "bg-secondary text-secondary-foreground border-border",
   Available: "bg-success/10 text-success border-success/30",
   "In Use": "bg-info/10 text-info border-info/30",
   "Under Maintenance": "bg-warning/15 text-warning border-warning/30",
   Retired: "bg-muted text-muted-foreground border-border",
 };
 
-export function Dies() {
+interface DiesProps {
+  /** Opens the real DieDetail workspace for a row - omitted (rather than
+   * defaulted to a no-op) when the caller doesn't wire navigation, so the
+   * die-name cell simply renders as plain (non-clickable) text instead of
+   * being present but silently doing nothing. */
+  onViewDie?: (id: string) => void;
+}
+
+export function Dies({ onViewDie }: DiesProps = {}) {
   const { currentUser } = useAuth();
   const pCreate = canCreate(currentUser, "tooling_dies");
   const pEdit = canEdit(currentUser, "tooling_dies");
@@ -74,10 +89,13 @@ export function Dies() {
     dies,
     machines,
     projects,
+    machineDies,
     addDie,
     updateDie,
     deleteDie,
     generateDieCode,
+    addMachineDieLocal,
+    removeMachineDieLocal,
   } = useStore();
 
   const [search, setSearch] = useState("");
@@ -92,6 +110,15 @@ export function Dies() {
   // on this. See DrawingLinkPicker.tsx for why this stays purely local
   // in Create mode (the die has no id yet to link against).
   const [pendingDrawingIds, setPendingDrawingIds] = useState<string[]>([]);
+  // Phase 5 (Group 2) — compatible machines now come from the real
+  // many-to-many machine_dies junction (already live, already used by
+  // MachineDetail.tsx's own "Compatible Tooling" side of this exact
+  // relationship) instead of the legacy single compatibleMachineId
+  // field. Same create-pending/edit-immediate dual mode as
+  // pendingDrawingIds above, for the same reason: a not-yet-saved die
+  // has no id to link machine_dies rows against yet.
+  const [pendingMachineIds, setPendingMachineIds] = useState<string[]>([]);
+  const [isCompatSaving, setIsCompatSaving] = useState(false);
   const {
     links: drawingLinks,
     linksLoaded,
@@ -136,15 +163,21 @@ export function Dies() {
   );
 
   function openNew() {
-    setForm({ status: "Available" });
+    // Phase 61 — new dies default to Draft, not Available: a die is
+    // required to have a linked drawing before the database will let it
+    // become Available/In Use (enforced by a trigger on dies.status).
+    // Draft has no such requirement, matching an ordinary tool.
+    setForm({ status: "Draft" });
     setEditingDie(null);
     setPendingDrawingIds([]);
+    setPendingMachineIds([]);
     setShowForm(true);
   }
 
   function openEdit(d: Die) {
     setForm({ ...d });
     setEditingDie(d);
+    setPendingMachineIds([]);
     setPendingDrawingIds([]);
     setShowForm(true);
   }
@@ -153,6 +186,13 @@ export function Dies() {
     id ? (machines || []).find((m) => m.id === id)?.name : undefined;
   const projectName = (id?: string) =>
     id ? (projects || []).find((p) => p.id === id)?.projectName : undefined;
+  // Phase 5 (Group 2) — replaces the single machineName(d.compatibleMachineId)
+  // list-column lookup now that a die can be compatible with many machines.
+  const compatibleMachinesFor = (dieId: string) =>
+    (machineDies || [])
+      .filter((md) => md.dieId === dieId)
+      .map((md) => machineName(md.machineId))
+      .filter((name): name is string => Boolean(name));
 
   // Phase 43 — same compress-to-JPEG-dataURL flow as MachineDetail.tsx's
   // handlePhotoUpload / Tools.tsx's handlePhotoSelect. Stored into form
@@ -189,6 +229,21 @@ export function Dies() {
         .map((l) => l.drawingId)
     : [];
 
+  // Phase 5 (Group 2) — same edit-immediate/create-pending split as
+  // linkedDrawingIdsForEdit above, sourced from the real machine_dies
+  // junction instead of a local editor store.
+  const compatibleMachineIdsForEdit = editingDie
+    ? (machineDies || [])
+        .filter((md) => md.dieId === editingDie.id)
+        .map((md) => md.machineId)
+    : [];
+  const currentCompatibleMachineIds = editingDie
+    ? compatibleMachineIdsForEdit
+    : pendingMachineIds;
+  const availableMachinesToLink = (machines || []).filter(
+    (m) => !currentCompatibleMachineIds.includes(m.id),
+  );
+
   function handleAddDrawingLink(drawingId: string) {
     if (editingDie) {
       addDrawingLink(drawingId, "die", editingDie.id);
@@ -210,6 +265,63 @@ export function Dies() {
       if (link) removeDrawingLink(link.id);
     } else {
       setPendingDrawingIds((prev) => prev.filter((id) => id !== drawingId));
+    }
+  }
+
+  // Phase 5 (Group 2) — same remote-then-local pattern MachineDetail.tsx's
+  // own handleAddCompatibleDie/handleRemoveCompatibleDie already use for
+  // the exact same machine_dies pair, called from the Die side instead of
+  // the Machine side. Create mode stays purely local (pendingMachineIds)
+  // until the die has a real id, same reasoning as the drawing links above.
+  async function handleAddCompatibleMachine(machineId: string) {
+    if (!editingDie) {
+      setPendingMachineIds((prev) =>
+        prev.includes(machineId) ? prev : [...prev, machineId],
+      );
+      return;
+    }
+    setIsCompatSaving(true);
+    try {
+      const result = await addMachineDieRemote(machineId, editingDie.id);
+      if (result.status === "unauthenticated") {
+        toast.error("Not signed in to Supabase - machine was not linked.");
+        return;
+      }
+      if (result.status === "error" || result.status === "denied") {
+        toast.error(
+          `Could not link machine: ${result.error ?? "unknown error"}`,
+        );
+        return;
+      }
+      addMachineDieLocal(machineId, editingDie.id);
+      toast.success("Machine linked");
+    } finally {
+      setIsCompatSaving(false);
+    }
+  }
+
+  async function handleRemoveCompatibleMachine(machineId: string) {
+    if (!editingDie) {
+      setPendingMachineIds((prev) => prev.filter((id) => id !== machineId));
+      return;
+    }
+    setIsCompatSaving(true);
+    try {
+      const result = await removeMachineDieRemote(machineId, editingDie.id);
+      if (result.status === "unauthenticated") {
+        toast.error("Not signed in to Supabase - machine was not unlinked.");
+        return;
+      }
+      if (result.status === "error" || result.status === "denied") {
+        toast.error(
+          `Could not unlink machine: ${result.error ?? "unknown error"}`,
+        );
+        return;
+      }
+      removeMachineDieLocal(machineId, editingDie.id);
+      toast.success("Machine unlinked");
+    } finally {
+      setIsCompatSaving(false);
     }
   }
 
@@ -257,10 +369,13 @@ export function Dies() {
           name: form.name!,
           type: form.type,
           purpose: form.purpose,
-          compatibleMachineId: form.compatibleMachineId,
+          // Phase 5 (Group 2) — compatibleMachineId deprecated: new dies
+          // get their compatible machines exclusively via machine_dies
+          // (flushed below, same pattern as pendingDrawingIds). Not sent
+          // here at all going forward; the column itself is untouched.
           originalProjectId: form.originalProjectId,
           location: form.location,
-          status: form.status || "Available",
+          status: form.status || "Draft",
           dateCreated: form.dateCreated,
           condition: form.condition,
           notes: form.notes,
@@ -290,6 +405,17 @@ export function Dies() {
           await addDrawingLink(drawingId, "die", result.data.id);
         }
         setPendingDrawingIds([]);
+        // Same flush for pending compatible-machine links.
+        for (const machineId of pendingMachineIds) {
+          const linkResult = await addMachineDieRemote(
+            machineId,
+            result.data.id,
+          );
+          if (linkResult.status === "success") {
+            addMachineDieLocal(machineId, result.data.id);
+          }
+        }
+        setPendingMachineIds([]);
         toast.success(`Die ${result.data.dieCode} added`);
       }
       setShowForm(false);
@@ -432,7 +558,7 @@ export function Dies() {
                   <th className="text-left p-2 text-xs font-semibold">Die</th>
                   <th className="text-left p-2 text-xs font-semibold">Type</th>
                   <th className="text-left p-2 text-xs font-semibold">
-                    Compatible Machine
+                    Compatible Machines
                   </th>
                   <th className="text-left p-2 text-xs font-semibold">
                     Original Project
@@ -450,9 +576,18 @@ export function Dies() {
               </thead>
               <tbody>
                 {filtered.map((d, i) => (
+                  // Row onClick is a mouse/touch convenience only — the
+                  // real keyboard-accessible control is the die-name
+                  // <button> nested below, which calls the same handler.
+                  // biome-ignore lint/a11y/useKeyWithClickEvents: see comment above
                   <tr
                     key={d.id}
-                    className="border-t hover:bg-muted/30"
+                    className={
+                      onViewDie
+                        ? "border-t hover:bg-muted/30 cursor-pointer"
+                        : "border-t hover:bg-muted/30"
+                    }
+                    onClick={onViewDie ? () => onViewDie(d.id) : undefined}
                     data-ocid={`dies.item.${i + 1}`}
                   >
                     <td className="p-2">
@@ -470,7 +605,21 @@ export function Dies() {
                           </div>
                         )}
                         <div>
-                          <div className="font-medium">{d.name}</div>
+                          {onViewDie ? (
+                            <button
+                              type="button"
+                              className="font-medium text-left hover:underline focus-visible:underline"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onViewDie(d.id);
+                              }}
+                              data-ocid={`dies.open_button.${i + 1}`}
+                            >
+                              {d.name}
+                            </button>
+                          ) : (
+                            <div className="font-medium">{d.name}</div>
+                          )}
                           <div className="text-xs text-muted-foreground">
                             {d.dieCode}
                           </div>
@@ -481,7 +630,12 @@ export function Dies() {
                       {d.type || "—"}
                     </td>
                     <td className="p-2 text-muted-foreground">
-                      {machineName(d.compatibleMachineId) || "—"}
+                      {(() => {
+                        const names = compatibleMachinesFor(d.id);
+                        if (names.length === 0) return "—";
+                        if (names.length <= 2) return names.join(", ");
+                        return `${names[0]}, ${names[1]} +${names.length - 2} more`;
+                      })()}
                     </td>
                     <td className="p-2 text-muted-foreground">
                       {projectName(d.originalProjectId) || "—"}
@@ -498,12 +652,19 @@ export function Dies() {
                       </Badge>
                     </td>
                     <td className="p-2">
+                      {/* "View" removed (§1/§4) — the die name cell above
+                          now opens DieDetail directly when onViewDie is
+                          wired, so a second icon-only View button here
+                          would be redundant. */}
                       <div className="flex items-center gap-1">
                         {pEdit && (
                           <button
                             type="button"
                             className="p-1 rounded hover:bg-muted transition-colors"
-                            onClick={() => openEdit(d)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openEdit(d);
+                            }}
                             title="Edit die"
                             data-ocid={`dies.edit_button.${i + 1}`}
                           >
@@ -514,7 +675,10 @@ export function Dies() {
                           <button
                             type="button"
                             className="p-1 rounded hover:bg-muted transition-colors"
-                            onClick={() => setDeleteTarget(d)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setDeleteTarget(d);
+                            }}
                             title="Delete die"
                             data-ocid={`dies.delete_button.${i + 1}`}
                           >
@@ -600,23 +764,45 @@ export function Dies() {
               </div>
               <div className="space-y-1.5">
                 <Label className="text-xs">Status *</Label>
-                <Select
-                  value={form.status || "Available"}
-                  onValueChange={(v) =>
-                    setForm((p) => ({ ...p, status: v as DieStatus }))
-                  }
-                >
-                  <SelectTrigger data-ocid="dies.form.status.select">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {DIE_STATUSES.map((s) => (
-                      <SelectItem key={s} value={s}>
-                        {s}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                {editingDie ? (
+                  <Select
+                    value={form.status || "Draft"}
+                    onValueChange={(v) =>
+                      setForm((p) => ({ ...p, status: v as DieStatus }))
+                    }
+                  >
+                    <SelectTrigger data-ocid="dies.form.status.select">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {DIE_STATUSES.map((s) => (
+                        <SelectItem key={s} value={s}>
+                          {s}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  // Phase 61 UX hardening — a brand-new die can't have a
+                  // drawing yet (its id doesn't exist until the insert
+                  // completes), so it always starts Draft; the database
+                  // trigger requires a linked drawing before it can ever
+                  // become Available/In Use. Not a choice at create time —
+                  // that choice happens later, on Edit, once a drawing is
+                  // attached.
+                  <div
+                    className="flex items-center gap-2 rounded-md border bg-muted/30 px-3 py-2 text-sm"
+                    data-ocid="dies.form.status.locked_draft"
+                  >
+                    <Badge variant="outline" className={STATUS_COLOR.Draft}>
+                      Draft
+                    </Badge>
+                    <span className="text-xs text-muted-foreground">
+                      New dies start as Draft. Attach a drawing, then edit this
+                      die to mark it Available.
+                    </span>
+                  </div>
+                )}
               </div>
               <div className="space-y-1.5">
                 <Label className="text-xs">Condition</Label>
@@ -640,31 +826,6 @@ export function Dies() {
                     ))}
                   </SelectContent>
                 </Select>
-              </div>
-              <div className="space-y-1.5">
-                <Label className="text-xs">Compatible Machine</Label>
-                <SearchableSelect
-                  value={form.compatibleMachineId || "none"}
-                  onChange={(v) =>
-                    setForm((p) => ({
-                      ...p,
-                      compatibleMachineId: v === "none" ? undefined : v,
-                    }))
-                  }
-                  options={[
-                    { value: "none", label: "None" },
-                    ...(machines || []).map((m) => ({
-                      value: m.id,
-                      label: m.name,
-                      searchText: `${m.machineCode ?? ""} ${m.type ?? ""}`,
-                    })),
-                  ]}
-                  placeholder="None"
-                  searchPlaceholder="Search by name, code, or type…"
-                  emptyText="No machines found."
-                  className="w-full"
-                  data-ocid="dies.form.compatible_machine.select"
-                />
               </div>
               <div className="space-y-1.5">
                 <Label className="text-xs">
@@ -759,6 +920,61 @@ export function Dies() {
                   className="w-full"
                   data-ocid="dies.form.purchase_vendor.select"
                 />
+              </div>
+              <div className="space-y-1.5 col-span-2">
+                <Label className="text-xs">Compatible Machines</Label>
+                {availableMachinesToLink.length > 0 && (
+                  <Select
+                    value=""
+                    onValueChange={(v) => handleAddCompatibleMachine(v)}
+                    disabled={isCompatSaving}
+                  >
+                    <SelectTrigger data-ocid="dies.form.compatible_machine.add_select">
+                      <SelectValue placeholder="+ Link a machine..." />
+                    </SelectTrigger>
+                    <SelectContent className="max-h-64">
+                      {availableMachinesToLink.map((m) => (
+                        <SelectItem key={m.id} value={m.id}>
+                          {m.name} ({m.machineCode})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
+                {currentCompatibleMachineIds.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">
+                    No compatible machines linked yet.
+                  </p>
+                ) : (
+                  <div className="space-y-1.5">
+                    {currentCompatibleMachineIds.map((machineId) => {
+                      const m = (machines || []).find(
+                        (x) => x.id === machineId,
+                      );
+                      return (
+                        <div
+                          key={machineId}
+                          className="flex items-center justify-between text-sm bg-muted/30 rounded px-3 py-1.5"
+                        >
+                          <span>
+                            {m ? `${m.name} (${m.machineCode})` : machineId}
+                          </span>
+                          <button
+                            type="button"
+                            disabled={isCompatSaving}
+                            onClick={() =>
+                              handleRemoveCompatibleMachine(machineId)
+                            }
+                            className="text-muted-foreground hover:text-destructive"
+                            data-ocid="dies.form.compatible_machine.remove_button"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
               <div className="space-y-1.5 col-span-2">
                 <Label className="text-xs">

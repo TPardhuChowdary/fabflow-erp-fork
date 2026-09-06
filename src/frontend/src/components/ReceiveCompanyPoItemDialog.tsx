@@ -73,12 +73,6 @@ const MACHINE_STATUSES: MachineStatus[] = [
   "Idle",
   "Decommissioned",
 ];
-const DIE_STATUSES: DieStatus[] = [
-  "Available",
-  "In Use",
-  "Under Maintenance",
-  "Retired",
-];
 
 interface Props {
   po: CompanyPO | null;
@@ -318,7 +312,10 @@ export function ReceiveCompanyPoItemDialog({ po, open, onClose }: Props) {
         name: guidedForm.name.trim(),
         type: guidedForm.type || undefined,
         purpose: guidedForm.purpose || undefined,
-        status: (guidedForm.status as DieStatus) || "Available",
+        // Phase 61 — a die needs a linked drawing before the database
+        // allows Available/In Use; this receiving flow doesn't attach
+        // one, so a newly-registered die must start as Draft.
+        status: (guidedForm.status as DieStatus) || "Draft",
         sourceCompanyPoItemId: po!.id,
         isActive: true,
         createdAt: Date.now(),
@@ -608,23 +605,26 @@ export function ReceiveCompanyPoItemDialog({ po, open, onClose }: Props) {
                         </div>
                         <div>
                           <Label className="text-xs">Status</Label>
-                          <Select
-                            value={guidedForm.status || "Available"}
-                            onValueChange={(v) =>
-                              setGuidedForm((f) => ({ ...f, status: v }))
-                            }
-                          >
-                            <SelectTrigger>
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {DIE_STATUSES.map((s) => (
-                                <SelectItem key={s} value={s}>
-                                  {s}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
+                          {/* Phase 61 UX hardening — this flow only ever
+                              creates a new die, never edits an existing
+                              one, so status is never a choice here: a new
+                              die can't have a drawing yet, and the
+                              database trigger requires one before it can
+                              become Available/In Use. Attach a drawing
+                              and mark it Available from the Dies page
+                              afterward. */}
+                          <div className="flex items-center gap-2 rounded-md border bg-muted/30 px-3 py-2 text-sm">
+                            <Badge
+                              variant="outline"
+                              className="bg-secondary text-secondary-foreground border-border"
+                            >
+                              Draft
+                            </Badge>
+                            <span className="text-xs text-muted-foreground">
+                              New dies start as Draft — attach a drawing on the
+                              Dies page, then mark it Available.
+                            </span>
+                          </div>
                         </div>
                       </div>
                     )}

@@ -269,27 +269,59 @@ async function removePdfObjectBestEffort(
 
 // ── Reads ─────────────────────────────────────────────────────────────
 
+// Gap-closure fix — every list read below used to run a single unbounded
+// .select(), which silently truncates at Supabase's default max-rows
+// (confirmed live elsewhere: a 2,506-row table returned only 1,000, no
+// error). Pages through with .range() until a page comes back short, so
+// these always return the complete matching set regardless of size.
+async function fetchAllDrawingRows(
+  buildPage: (
+    from: number,
+    to: number,
+  ) => PromiseLike<{
+    data: DrawingRow[] | null;
+    error: { message: string } | null;
+  }>,
+): Promise<DrawingRow[]> {
+  const pageSize = 1000;
+  const all: DrawingRow[] = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await buildPage(from, from + pageSize - 1);
+    if (error) throw new Error(`Failed to load drawings: ${error.message}`);
+    const page = data ?? [];
+    all.push(...page);
+    if (page.length < pageSize) break;
+    from += pageSize;
+  }
+  return all;
+}
+
 export async function getAllDrawings(): Promise<DrawingDocument[]> {
   const client = getSupabase();
-  const { data, error } = await client
-    .from("drawings")
-    .select("*")
-    .order("created_at", { ascending: false });
-  if (error) throw new Error(`Failed to load drawings: ${error.message}`);
-  return ((data as DrawingRow[]) ?? []).map((r) => rowToDrawing(r));
+  const rows = await fetchAllDrawingRows((from, to) =>
+    client
+      .from("drawings")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .range(from, to),
+  );
+  return rows.map((r) => rowToDrawing(r));
 }
 
 export async function getDrawingsByProject(
   projectId: string,
 ): Promise<DrawingDocument[]> {
   const client = getSupabase();
-  const { data, error } = await client
-    .from("drawings")
-    .select("*")
-    .eq("project_id", projectId)
-    .order("created_at", { ascending: false });
-  if (error) throw new Error(`Failed to load drawings: ${error.message}`);
-  return ((data as DrawingRow[]) ?? []).map((r) => rowToDrawing(r));
+  const rows = await fetchAllDrawingRows((from, to) =>
+    client
+      .from("drawings")
+      .select("*")
+      .eq("project_id", projectId)
+      .order("created_at", { ascending: false })
+      .range(from, to),
+  );
+  return rows.map((r) => rowToDrawing(r));
 }
 
 /** Entity-owned drawings (project or machine) via owner_id. "library"
@@ -300,14 +332,16 @@ export async function getDrawingsByOwner(
   ownerId: string,
 ): Promise<DrawingDocument[]> {
   const client = getSupabase();
-  const { data, error } = await client
-    .from("drawings")
-    .select("*")
-    .eq("owner_id", ownerId)
-    .eq("owner_type", ownerType)
-    .order("created_at", { ascending: false });
-  if (error) throw new Error(`Failed to load drawings: ${error.message}`);
-  return ((data as DrawingRow[]) ?? []).map((r) => rowToDrawing(r));
+  const rows = await fetchAllDrawingRows((from, to) =>
+    client
+      .from("drawings")
+      .select("*")
+      .eq("owner_id", ownerId)
+      .eq("owner_type", ownerType)
+      .order("created_at", { ascending: false })
+      .range(from, to),
+  );
+  return rows.map((r) => rowToDrawing(r));
 }
 
 /** The only list/lookup function that eagerly fetches the PDF — every
@@ -576,13 +610,15 @@ export async function getChildDrawings(
   parentDrawingId: string,
 ): Promise<DrawingDocument[]> {
   const client = getSupabase();
-  const { data, error } = await client
-    .from("drawings")
-    .select("*")
-    .eq("parent_drawing_id", parentDrawingId)
-    .order("created_at", { ascending: false });
-  if (error) throw new Error(`Failed to load child drawings: ${error.message}`);
-  return ((data as DrawingRow[]) ?? []).map((r) => rowToDrawing(r));
+  const rows = await fetchAllDrawingRows((from, to) =>
+    client
+      .from("drawings")
+      .select("*")
+      .eq("parent_drawing_id", parentDrawingId)
+      .order("created_at", { ascending: false })
+      .range(from, to),
+  );
+  return rows.map((r) => rowToDrawing(r));
 }
 
 export interface CreateProductionDrawingOptions {
@@ -1043,11 +1079,27 @@ export async function getLinksForEntity(
   return ((data as DrawingLinkRow[]) ?? []).map(rowToLink);
 }
 
-/** Full link list — small dataset, loaded once and filtered client-side,
- * same pattern as getAllDrawings(). */
+/** Full link list, loaded once and filtered client-side, same pattern as
+ * getAllDrawings(). Gap-closure fix: this was a single unbounded .select()
+ * (the doc comment above used to call it "small dataset" — but nothing
+ * bounds drawing_links to under Supabase's default 1,000-row page, and every
+ * drawing can carry multiple links), so it's paged with .range() the same
+ * way getAllDrawings()/fetchAllDrawingRows() already are. */
 export async function getAllLinks(): Promise<DrawingLink[]> {
   const client = getSupabase();
-  const { data, error } = await client.from("drawing_links").select("*");
-  if (error) throw new Error(`Failed to load links: ${error.message}`);
-  return ((data as DrawingLinkRow[]) ?? []).map(rowToLink);
+  const pageSize = 1000;
+  const all: DrawingLinkRow[] = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await client
+      .from("drawing_links")
+      .select("*")
+      .range(from, from + pageSize - 1);
+    if (error) throw new Error(`Failed to load links: ${error.message}`);
+    const page = (data as DrawingLinkRow[]) ?? [];
+    all.push(...page);
+    if (page.length < pageSize) break;
+    from += pageSize;
+  }
+  return all.map(rowToLink);
 }

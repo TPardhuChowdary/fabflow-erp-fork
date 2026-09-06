@@ -2052,6 +2052,17 @@ export const exportLedger: AgentQuery<
 };
 
 // ── searchMachines (Master directive) ──────────────────────────────────────
+// QA finding: this used to match on `name` only and return only
+// name/type/status. createMachine's own description tells the model to
+// "always call searchMachines first to check for a plausible existing
+// match", but a machine is identified in the real world by its serial
+// number / model / machine code — none of which were searchable OR
+// returned. Confirmed live: with a machine already registered as
+// serial HP-2024-88431, model HPB-160/3200, asking the Agent to check
+// for it produced "No existing machine matches", and listing machines
+// reported "Not recorded" for models/serials that were in fact recorded.
+// Both are duplicate-asset hazards and factual misstatements about ERP
+// contents, so the identifiers are now both matched and returned.
 export const searchMachines: AgentQuery<
   { name?: string },
   Array<{
@@ -2060,18 +2071,22 @@ export const searchMachines: AgentQuery<
     name: string;
     type: string;
     status: string;
+    brand?: string;
+    model?: string;
+    serialNumber?: string;
   }>
 > = {
   name: "searchMachines",
   description:
-    "Find machines by name or list all — resolve a real machine id here before referencing one elsewhere; never invent one.",
+    "Find machines by name, machine code, brand, model or serial number (single `name` argument is matched against all of them), or list all. Resolve a real machine id here before referencing one elsewhere; never invent one. Use this to check for an existing machine before creating one — search by serial number or model, not just name.",
   permission: "machinery.view",
   parameters: {
     type: "object",
     properties: {
       name: {
         type: "string",
-        description: "Machine name to search for, optional.",
+        description:
+          "Text to search for, optional. Matched against machine name, machine code, brand, model and serial number.",
       },
     },
     required: [],
@@ -2080,7 +2095,13 @@ export const searchMachines: AgentQuery<
     const q = (name ?? "").trim().toUpperCase();
     const matches = useStore
       .getState()
-      .machines.filter((m) => !q || m.name.toUpperCase().includes(q));
+      .machines.filter(
+        (m) =>
+          !q ||
+          [m.name, m.machineCode, m.brand, m.model, m.serialNumber].some(
+            (field) => (field ?? "").toUpperCase().includes(q),
+          ),
+      );
     return {
       ok: true,
       message: `Found ${matches.length} machine(s).`,
@@ -2090,6 +2111,9 @@ export const searchMachines: AgentQuery<
         name: m.name,
         type: m.type,
         status: m.currentStatus,
+        brand: m.brand,
+        model: m.model,
+        serialNumber: m.serialNumber,
       })),
     };
   },

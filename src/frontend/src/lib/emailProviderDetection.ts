@@ -20,6 +20,7 @@
 
 import {
   type KnownProviderEntry,
+  getKnownProviderById,
   matchKnownProvider,
 } from "@/lib/emailProviderRegistry";
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
@@ -64,12 +65,19 @@ export function detectProviderLocal(
     return {
       provider: "google",
       reason: `${domain} is a Google consumer webmail domain.`,
+      // Phase 9F — OAuth is preferred for Google, but attaching the known
+      // IMAP/SMTP fallback here too means "Configure manually" never
+      // dead-ends in a blank form when a user needs an app-password path
+      // instead. No MX lookup happened for this exact-domain match, but
+      // an exact consumer-domain match is at least as certain as one.
+      knownProvider: getKnownProviderById("gmail") ?? undefined,
     };
   }
   if (MICROSOFT_CONSUMER_DOMAINS.has(domain)) {
     return {
       provider: "microsoft",
       reason: `${domain} is a Microsoft consumer webmail domain.`,
+      knownProvider: getKnownProviderById("microsoft365") ?? undefined,
     };
   }
   return null;
@@ -110,16 +118,25 @@ export async function detectProviderRemote(
   // against the REAL mxHosts it returned (never against the domain name),
   // so adding a new known provider never requires redeploying the MX
   // lookup function itself.
-  if (data.provider === "generic") {
-    const known = matchKnownProvider(data.mxHosts);
-    if (known) {
-      return {
-        provider: "generic",
-        reason: `${domain}'s mail servers (${data.mxHosts?.[0]}) match ${known.label} — using its known settings automatically.`,
-        mxHosts: data.mxHosts,
-        knownProvider: known,
-      };
-    }
+  //
+  // Phase 9F — this match is attempted regardless of whether the Edge
+  // Function itself recognized the provider as "google"/"microsoft" (an
+  // OAuth candidate) or left it "generic": the SAME real mxHosts that made
+  // it "google"/"microsoft" also match the registry's gmail/microsoft365
+  // entries (identical suffixes, see emailProviderRegistry.ts), so a
+  // Google/Microsoft custom domain gets a ready IMAP/SMTP fallback
+  // alongside its detected provider, never a blank manual form.
+  const known = matchKnownProvider(data.mxHosts);
+  if (known && data.provider === "generic") {
+    return {
+      provider: "generic",
+      reason: `${domain}'s mail servers (${data.mxHosts?.[0]}) match ${known.label} — using its known settings automatically.`,
+      mxHosts: data.mxHosts,
+      knownProvider: known,
+    };
+  }
+  if (known) {
+    return { ...data, knownProvider: known };
   }
   return data;
 }

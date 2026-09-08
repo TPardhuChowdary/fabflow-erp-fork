@@ -13,9 +13,18 @@
 // (more code, less tested, more edge cases silently wrong) for zero real
 // benefit.
 
-import { ImapFlow } from "npm:imapflow@1";
-import nodemailer from "npm:nodemailer@6";
-import { simpleParser } from "npm:mailparser@3";
+// Phase 9G cold-start fix: these three were static top-level value imports
+// (real network/compile work done during isolate BOOT, before Deno.serve
+// even starts listening). Live evidence (natural pg_cron ticks vs manual
+// invocations — see the Phase 9G investigation report) points at a
+// cold-isolate crash during ImapFlow's first real connection, severe
+// enough to bypass this file's own try/catch entirely; converting to
+// dynamic imports (below, at each actual use site) moves that cost into
+// the per-REQUEST budget instead of the isolate's boot budget. Only the
+// TYPE is still imported statically — `import type` is fully erased at
+// compile time, zero runtime cost, so this changes nothing about typing.
+import type { ImapFlow } from "npm:imapflow@1";
+import type { ParsedMail } from "npm:mailparser@3";
 import type {
   EmailAdapterMessage,
   EmailProviderAdapter,
@@ -49,32 +58,106 @@ function isImapSmtpCreds(
 // hiccup — can block `for await` indefinitely, since a deadline counter
 // inside the loop only gets a chance to check anything BETWEEN
 // already-yielded items. This wraps the whole operation so MY code stops
-// waiting after `ms` regardless. Deliberately does NOT force the
-// connection closed on timeout (an earlier version did — see
-// openImapClient's socketTimeout comment for why that caused an uncaught
-// exception instead of a clean failure); ImapFlow's own socketTimeout is
-// what actually bounds and gracefully fails a stuck operation now, this is
-// only a last-resort backstop for this code's own control flow.
-function withHardTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+// waiting after `ms` regardless — now genuinely, not just from this file's
+// own point of view.
+//
+// Phase 9G fix: this used to be a pure race — on timeout, only the
+// RETURNED promise rejected; `work` itself (the real IMAP connection,
+// in-flight fetch, and pending parse) kept running in the background,
+// unbounded, forever. Live evidence confirmed this directly: a
+// diagnostic checkpoint from an abandoned attempt was observed landing
+// in the database well AFTER this exact timeout had already fired and
+// been reported to the caller (see the Phase 9G investigation reports).
+// client.close() is ImapFlow's own real, public, SYNCHRONOUS API
+// (verified against the installed imapflow@1.7.8 source: it immediately
+// rejects the in-flight command via requestTagMap and tears down the
+// socket — see lib/imap-flow.js's own close()) — calling it here makes
+// this a genuine abort, not just an abandonment.
+//
+// Known residual risk, disclosed rather than hidden: this reintroduces
+// the general SHAPE of a pattern openImapClient's own comment already
+// flagged as historically dangerous — an external close() call racing
+// with ImapFlow's internal cleanup once caused an uncaught "Already
+// logged out" exception from deep inside the library, invisible to any
+// try/catch here. That trace pointed specifically at automatic IDLE/
+// session-keepalive machinery re-authenticating after logout(), which
+// disableAutoIdle (already set in openImapClient) is believed to fully
+// prevent — this file's `settled` guard also ensures this close() can
+// never fire after `work` has already settled normally, closing the
+// other half of the original race. Still: if an uncaught
+// "Already logged out"-style exception or isolate crash reappears, this
+// is the first place to look.
+// Live-verified gap (this pass): calling client.close() alone was not
+// enough. imapListMessages's own per-message loop wraps EACH message's
+// fetch in a try/catch specifically so one bad message never aborts the
+// whole sync — but that same catch also silently swallowed the
+// rejection this close() caused, and the loop just moved on to the NEXT
+// message on the now-dead connection. Live evidence: checkpoints for
+// messages AFTER the one in flight when the timeout fired were still
+// recorded, with empty bodies, as if they'd been legitimately processed.
+// An explicit AbortSignal — checked at the TOP of every loop iteration,
+// not inferred from whatever exception a dead socket happens to produce —
+// is what actually stops the loop, regardless of how a closed ImapFlow
+// client behaves for a fetch issued after close().
+// Live-verified need (this pass, second finding): a plain race that
+// rejects the INSTANT the timer fires can never satisfy "already-
+// processed messages survive a timeout" on its own — `work`'s own
+// graceful, non-throwing partial-result return (see imapListMessages'
+// pass2StoppedEarly logic) only happens on ITS next microtask
+// continuation, strictly AFTER this timer's synchronous callback has
+// already rejected. The two-step design below fixes that ordering: firing
+// the timer only ABORTS (signals + closes the socket) rather than
+// rejecting outright, giving `work` a brief grace window to notice the
+// abort and resolve normally with whatever it already has. Only if
+// `work` still hasn't settled after that grace window does this reject —
+// a genuine last-resort backstop for an abort that somehow didn't
+// actually stop the operation, not the primary signal for the common case.
+const ABORT_GRACE_MS = 3_000;
+
+export function withHardTimeout<T>(
+  client: ImapFlow,
+  controller: AbortController,
+  work: Promise<T>,
+  ms: number,
+): Promise<T> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error(`IMAP operation timed out after ${ms}ms`)),
-      ms,
-    );
+    let settled = false;
+    let hardKillTimer: ReturnType<typeof setTimeout> | undefined;
+    const abortTimer = setTimeout(() => {
+      if (settled) return;
+      controller.abort();
+      try {
+        client.close();
+      } catch {
+        // already closed / never fully opened
+      }
+      hardKillTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error(`IMAP operation timed out after ${ms}ms`));
+      }, ABORT_GRACE_MS);
+    }, ms);
     work.then(
       (value) => {
-        clearTimeout(timer);
+        if (settled) return;
+        settled = true;
+        clearTimeout(abortTimer);
+        clearTimeout(hardKillTimer);
         resolve(value);
       },
       (err) => {
-        clearTimeout(timer);
+        if (settled) return;
+        settled = true;
+        clearTimeout(abortTimer);
+        clearTimeout(hardKillTimer);
         reject(err);
       },
     );
   });
 }
 
-function openImapClient(creds: ImapSmtpCredentials): ImapFlow {
+async function openImapClient(creds: ImapSmtpCredentials): Promise<ImapFlow> {
+  const { ImapFlow } = await import("npm:imapflow@1");
   return new ImapFlow({
     host: creds.imapHost,
     port: creds.imapPort,
@@ -107,6 +190,25 @@ function openImapClient(creds: ImapSmtpCredentials): ImapFlow {
     // concern) — always on now, since IDLE is never wanted here
     // regardless of encryption mode.
     disableAutoIdle: true,
+    // Phase 9G diagnostic fix (see the investigation report): the natural
+    // pg_cron/pg_net invocation path has been VERIFIED to crash the whole
+    // isolate specifically inside ImapFlow's own client.connect() call —
+    // Node's real tls.connect()/net.connect(), running through Deno's
+    // Node-compat shim, not fetch() (already proven working fine under
+    // the identical pg_net path via a separate diagnostic). `tls` here is
+    // spread directly into the options object ImapFlow hands to that
+    // underlying connect() call (confirmed by reading imapflow@1.7.8's
+    // own source), so `family: 4` forces IPv4 resolution — a standard
+    // mitigation for dual-stack DNS/IPv6 connect issues in Node-compat
+    // socket shims. `as any` because @types/imapflow's own `tls?`
+    // declaration is narrower (Node's tls.ConnectionOptions) than what
+    // ImapFlow actually forwards to net.connect()/tls.connect() at
+    // runtime — `family` is a real, valid option on both, just not
+    // reflected in the shipped .d.ts. Hypothesis under live test, not yet
+    // confirmed; safe to remove (revert this one field) if it doesn't
+    // change the outcome.
+    // deno-lint-ignore no-explicit-any
+    tls: { family: 4 } as any,
   });
 }
 
@@ -138,6 +240,7 @@ interface MessageMetadata {
     cc?: Array<{ address?: string }>;
     subject?: string;
     date?: string | Date;
+    messageId?: string;
   } | undefined;
   flags: Set<string> | undefined;
   attachments: EmailAdapterMessage["attachments"];
@@ -205,9 +308,15 @@ function walkAttachments(
 // empty, the same graceful-degradation shape already used for a
 // mailparser parse failure. This is what satisfies "one oversized message
 // must not prevent later messages from syncing."
-async function imapListMessages(
+export async function imapListMessages(
   client: ImapFlow,
   opts: ListMessagesOptions,
+  // Checked at the top of every pass-2 loop iteration (see
+  // withHardTimeout's own comment) — set once the OUTER hard timeout has
+  // already fired and torn the connection down, so the loop stops
+  // immediately instead of mistaking a dead-connection fetch for "this
+  // one message failed, try the next."
+  signal?: AbortSignal,
 ): Promise<ListMessagesResult> {
   try {
     await client.connect();
@@ -237,7 +346,7 @@ async function imapListMessages(
       // outer withHardTimeout() below is still the real backstop, since
       // this check only runs BETWEEN already-yielded messages.) Applied
       // to BOTH passes below.
-      const deadline = Date.now() + 20_000;
+      const deadline = Date.now() + (opts.fetchDeadlineMs ?? 20_000);
 
       // PASS 1 — cheap, batched, metadata-only. No `source` requested.
       const metadata: MessageMetadata[] = [];
@@ -273,12 +382,59 @@ async function imapListMessages(
       // extracted via mailparser — a real MIME parser rather than a
       // hand-rolled multipart scanner, for the same "don't hand-roll what
       // a battle-tested library already solves" reasoning as
-      // ImapFlow/Nodemailer themselves.
+      // ImapFlow/Nodemailer themselves. Imported dynamically (once, here)
+      // rather than at module top-level — see this file's header comment
+      // on the Phase 9G cold-start fix; a repeat dynamic import of the
+      // same specifier resolves from Deno's module cache, so hoisting it
+      // outside the loop below just avoids redundant per-message calls.
+      // Explicit cast (rather than letting the dynamic import() expression's
+      // type infer on its own) — mailparser's simpleParser is overloaded
+      // (callback vs Promise-returning); TS resolves that overload set
+      // correctly through a static `import {...}` but collapses it to an
+      // unusable intersection type when resolved through a dynamic
+      // import()'s module namespace. Asserting the exact 1-argument,
+      // Promise-returning overload this file always calls sidesteps that
+      // resolution difference entirely, using the real (type-only,
+      // zero-runtime-cost) ParsedMail type rather than a hand-rolled shape.
+      const { simpleParser } = (await import("npm:mailparser@3")) as unknown as {
+        simpleParser: (source: Uint8Array) => Promise<ParsedMail>;
+      };
       const messages: EmailAdapterMessage[] = [];
+      // Phase 9G fix: this deadline check used to only gate whether to
+      // ATTEMPT a message's body fetch — once the deadline passed, every
+      // REMAINING message in `metadata` was still pushed to `messages`
+      // (with an empty body) and still counted toward `nextCursor` (via
+      // pass 1's own `highestUid`, computed independently of pass 2's
+      // real progress). That meant a message whose body fetch was
+      // skipped for running out of time had its body PERMANENTLY
+      // skipped — the cursor would already be past it, so it could never
+      // be re-fetched on a later sync. Live evidence (see the Phase 9G
+      // investigation reports) also showed 7 real messages fully
+      // fetched+parsed in one attempt before the OUTER 25s timeout fired
+      // — proving the work itself isn't stuck, there just isn't a
+      // reliable enough per-batch bound here to stay under that outer
+      // budget for a mailbox with many pending messages.
+      //
+      // Now: the loop actually STOPS once the deadline passes (mirroring
+      // pass 1's own `break`, and the exact "stop, don't discard, don't
+      // skip" invariant emailSyncCore.ts's own write-loop already
+      // enforces one layer up), `nextCursor` is capped to the last
+      // message this pass genuinely finished (not pass 1's independent
+      // `highestUid`), and `partial: true` tells the caller more remains
+      // — so the NEXT natural tick continues exactly where this one
+      // stopped, in a new, equally time-boxed attempt, rather than this
+      // one either silently losing message bodies or risking the outer
+      // hard-timeout/abort path at all under normal conditions.
+      let pass2StoppedEarly = false;
+      let lastCompletedUid = 0;
       for (const rec of metadata) {
+        if (Date.now() > deadline || signal?.aborted) {
+          pass2StoppedEarly = true;
+          break;
+        }
         let bodyText: string | undefined;
         let bodyHtml: string | undefined;
-        if (rec.estimatedBytes <= MAX_BODY_SOURCE_BYTES && Date.now() <= deadline) {
+        if (rec.estimatedBytes <= MAX_BODY_SOURCE_BYTES) {
           try {
             for await (const full of client.fetch(
               { uid: String(rec.uid) },
@@ -301,10 +457,33 @@ async function imapListMessages(
           }
         }
 
+        // Live-verified need (this pass): the abort could have landed
+        // WHILE this exact message's fetch/parse was in flight — its own
+        // try/catch above already swallowed whatever error that caused
+        // (by design, so one bad message never aborts a sync), so the
+        // top-of-loop check alone would let this message through with an
+        // uncertain, possibly-truncated body and incorrectly advance the
+        // cursor past it. Checking again here, immediately after that
+        // attempt, means an aborted-mid-message is treated the same as
+        // never having been attempted — never counted as done, so a
+        // retry correctly re-fetches it in full rather than leaving it
+        // permanently bodyless.
+        if (signal?.aborted) {
+          pass2StoppedEarly = true;
+          break;
+        }
+
         const envelope = rec.envelope;
         messages.push({
           providerMessageId: String(rec.uid),
           providerThreadId: undefined, // see capabilities.threads note
+          // Phase 5 Email Operations — ENVELOPE's messageId is the real
+          // RFC822 Message-ID header, a standard part of the IMAP
+          // ENVELOPE structure already fetched above at no extra
+          // round-trip cost. Distinct from providerMessageId (the UID,
+          // used for sync cursor/dedup, never valid as an In-Reply-To
+          // value for other mail clients).
+          internetMessageId: envelope?.messageId ?? undefined,
           fromAddress: envelope?.from?.[0]?.address ?? "unknown@unknown",
           fromName: envelope?.from?.[0]?.name ?? undefined,
           toAddresses: (envelope?.to ?? [])
@@ -321,11 +500,19 @@ async function imapListMessages(
           folder: "inbox",
           attachments: rec.attachments,
         });
+        lastCompletedUid = rec.uid;
       }
 
       return {
         messages,
-        nextCursor: highestUid > 0 ? String(highestUid) : opts.cursor ?? null,
+        nextCursor: pass2StoppedEarly
+          ? lastCompletedUid > 0
+            ? String(lastCompletedUid)
+            : (opts.cursor ?? null)
+          : highestUid > 0
+            ? String(highestUid)
+            : (opts.cursor ?? null),
+        partial: pass2StoppedEarly,
       };
     } finally {
       lock.release();
@@ -366,15 +553,22 @@ export const imapSmtpAdapter: EmailProviderAdapter = {
     if (!isImapSmtpCreds(creds)) {
       return { ok: false, error: "Missing IMAP connection details." };
     }
-    const client = openImapClient(creds);
+    const client = await openImapClient(creds);
     try {
       await client.connect();
       await client.mailboxOpen("INBOX");
       return { ok: true };
     } catch (err) {
+      // Diagnostic fix: ImapFlow throws the same generic "Command failed"
+      // Error.message for every tagged NO/BAD IMAP response regardless of
+      // the real reason, but separately attaches the server's own actual
+      // response text (RFC 3501 tagged-response TEXT — standard protocol
+      // text, never the submitted credentials) to err.responseText.
+      // Preferring it here is what turns a useless "Command failed" into
+      // the provider's real reason (e.g. "IMAP access is disabled").
       return {
         ok: false,
-        error: err instanceof Error ? err.message : "IMAP connection failed.",
+        error: err instanceof Error ? ((err as { responseText?: string }).responseText || err.message) : "IMAP connection failed.",
       };
     } finally {
       try {
@@ -401,15 +595,21 @@ export const imapSmtpAdapter: EmailProviderAdapter = {
     if (!isImapSmtpCreds(creds)) {
       throw new Error("Missing IMAP connection details.");
     }
-    const client = openImapClient(creds);
-    return withHardTimeout(imapListMessages(client, opts), 25_000);
+    const client = await openImapClient(creds);
+    const controller = new AbortController();
+    return withHardTimeout(
+      client,
+      controller,
+      imapListMessages(client, opts, controller.signal),
+      25_000,
+    );
   },
 
   async getAttachment(creds, providerMessageId, attachmentId) {
     if (!isImapSmtpCreds(creds)) {
       throw new Error("Missing IMAP connection details.");
     }
-    const client = openImapClient(creds);
+    const client = await openImapClient(creds);
     const doDownload = async (): Promise<Uint8Array> => {
       try {
         await client.connect();
@@ -448,13 +648,14 @@ export const imapSmtpAdapter: EmailProviderAdapter = {
         }
       }
     };
-    return withHardTimeout(doDownload(), 25_000);
+    return withHardTimeout(client, new AbortController(), doDownload(), 25_000);
   },
 
   async sendMessage(creds, message: SendMessageInput) {
     if (!isImapSmtpCreds(creds)) {
       throw new Error("Missing SMTP connection details.");
     }
+    const { default: nodemailer } = await import("npm:nodemailer@6");
     const transporter = nodemailer.createTransport({
       host: creds.smtpHost,
       port: creds.smtpPort,
@@ -462,13 +663,22 @@ export const imapSmtpAdapter: EmailProviderAdapter = {
       auth: { user: creds.username, pass: creds.password },
     });
     const info = await transporter.sendMail({
-      from: creds.username,
+      from: creds.username, // always the connected account's own
+      // credentials — never anything caller-supplied, so From can never
+      // be spoofed to a different address than the mailbox actually
+      // authenticated as (Phase 5 multi-mailbox rule).
       to: message.to.join(", "),
       cc: message.cc?.join(", "),
       subject: message.subject,
       text: message.bodyText,
       html: message.bodyHtml,
-      inReplyTo: message.inReplyToProviderMessageId,
+      inReplyTo: message.inReplyToInternetMessageId,
+      references: message.references?.join(" "),
+      attachments: message.attachments?.map((a) => ({
+        filename: a.filename,
+        contentType: a.mimeType,
+        content: a.content,
+      })),
     });
     return { providerMessageId: info.messageId };
   },

@@ -18,6 +18,7 @@ import {
   Factory,
   FileBox,
   FileText,
+  FileWarning,
   FolderKanban,
   Hammer,
   LayoutDashboard,
@@ -284,6 +285,15 @@ export const navGroups: NavGroup[] = [
         label: "Invoices",
         page: "invoices",
         icon: Receipt,
+        moduleKey: "invoices",
+      },
+      {
+        // Reuses the "invoices" module permission — this is a read/index
+        // view over invoices' own eway_bill_document field, not a new
+        // module with its own access control (see EwayBills.tsx).
+        label: "E-Way Bills",
+        page: "eway-bills",
+        icon: FileWarning,
         moduleKey: "invoices",
       },
       {

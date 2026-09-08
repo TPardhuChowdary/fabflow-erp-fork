@@ -241,10 +241,21 @@ export const MODULE_PERMISSIONS: Record<
   // grant mechanism. "sync" is its own action (not folded into "edit")
   // because triggering a mailbox sync is a distinct, narrower capability
   // than editing a message.
+  //
+  // "send" (Phase 5 Email Operations, database/20260907010200) is
+  // deliberately its OWN action, never reused from "view" or "edit" —
+  // sending a real outbound email is a materially more consequential
+  // capability than reading connected-mailbox data, same reasoning as
+  // job_cards.approve being split from job_cards.edit. NOT applied to
+  // the live database yet — this catalog entry exists so the Settings >
+  // Users permission editor and hasPermission() calls are consistent
+  // with the pending migration; it is inert until that migration is
+  // applied and has zero effect on any non-admin role until explicitly
+  // granted.
   email: {
     label: "Email Accounts",
     category: "System",
-    actions: ["view", "create", "edit", "delete", "sync"],
+    actions: ["view", "create", "edit", "delete", "sync", "send"],
   },
   // Phase 55 (Group 2, roadmap Phase 17) — Company Document Library.
   // Same not-seeded-by-default pattern as email above: only Admin can use

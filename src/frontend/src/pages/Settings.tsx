@@ -21,6 +21,11 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import {
   Dialog,
   DialogContent,
   DialogFooter,
@@ -48,9 +53,11 @@ import {
 } from "@/lib/emailAccountsApi";
 import {
   AlertTriangle,
+  Archive,
   Bot,
   Building2,
   CheckCircle2,
+  ChevronDown,
   Copy,
   Edit2,
   Eye,
@@ -71,10 +78,12 @@ import {
   RefreshCw,
   Settings as SettingsIcon,
   Shield,
+  SlidersHorizontal,
   Star,
   Sun,
   Unplug,
   UserCog,
+  Users,
   Volume2,
   XCircle,
 } from "lucide-react";
@@ -127,6 +136,186 @@ import { canView, hasPermission } from "../permissions";
 import { getModulesByCategory } from "../permissions";
 import { useStore } from "../store";
 import type { AppSettings } from "../types";
+
+// Settings simplification (see chat) — a plain, reusable collapsed-by-
+// default section wrapper for administrative/advanced groups (Team &
+// Access, Advanced, and the nested Legacy Data Migration group inside
+// it). Same Collapsible + ghost-button + rotating-chevron pattern
+// Employees.tsx's own "More details" disclosure already uses — not a new
+// UI primitive, just this page's own use of the existing one. Every
+// card rendered inside a section is the exact same component/JSX that
+// used to render directly on the page; nothing about what a section
+// contains, or how it behaves, changes — only whether it's visible by
+// default.
+function SettingsSection({
+  title,
+  description,
+  icon: Icon,
+  defaultOpen = false,
+  children,
+}: {
+  title: string;
+  description?: string;
+  icon: React.ComponentType<{ className?: string }>;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          className="w-full justify-between px-3 h-auto py-2.5"
+          data-ocid={`settings.section.${title.toLowerCase().replace(/[^a-z0-9]+/g, "_")}.trigger`}
+        >
+          <span className="flex items-center gap-2 text-sm font-semibold">
+            <Icon className="w-4 h-4 text-primary" />
+            {title}
+          </span>
+          <ChevronDown
+            className={`w-4 h-4 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
+          />
+        </Button>
+      </CollapsibleTrigger>
+      {description && (
+        <p className="text-xs text-muted-foreground px-3 mt-1">{description}</p>
+      )}
+      <CollapsibleContent className="space-y-4 pt-3">
+        {children}
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+// Settings simplification (see chat) — the old "Email Reminders (Gmail
+// SMTP)" card, verbatim (same fields, same save handler, same
+// Configured/Not Configured badge), extracted only so it can be tucked
+// behind its own collapsed-by-default disclosure inside Email &
+// Notifications instead of sitting next to the real Email Accounts
+// integration as if both were active systems. Confirmed unused by any
+// Edge Function (no gmailSenderEmail/gmailAppPassword reader exists
+// anywhere in supabase/functions) — not deleted, only de-emphasized.
+function LegacyGmailSmtpDisclosure({
+  emailConfigured,
+  emailForm,
+  setEmailForm,
+  handleSaveEmail,
+}: {
+  emailConfigured: boolean;
+  emailForm: { gmailSenderEmail: string; gmailAppPassword: string };
+  setEmailForm: React.Dispatch<
+    React.SetStateAction<{ gmailSenderEmail: string; gmailAppPassword: string }>
+  >;
+  handleSaveEmail: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          className="w-full justify-between px-3 h-auto py-2"
+          data-ocid="settings.email.legacy_trigger"
+        >
+          <span className="flex items-center gap-2 text-sm">
+            <Mail className="w-4 h-4 text-muted-foreground" />
+            Legacy Gmail SMTP settings
+            <Badge variant="secondary" className="text-xs">
+              Inactive
+            </Badge>
+          </span>
+          <ChevronDown
+            className={`w-4 h-4 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
+          />
+        </Button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="pt-2">
+        <Card data-ocid="settings.email.card">
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                <Mail className="w-4 h-4 text-primary" />
+                Email Reminders (Gmail SMTP)
+              </CardTitle>
+              {emailConfigured ? (
+                <Badge className="bg-success/10 text-success border-success/30 text-xs gap-1">
+                  <CheckCircle2 className="w-3 h-3" /> Configured
+                </Badge>
+              ) : (
+                <Badge variant="secondary" className="text-xs gap-1">
+                  <XCircle className="w-3 h-3" /> Not Configured
+                </Badge>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div>
+              <Label className="text-xs">Sender Email (Gmail)</Label>
+              <Input
+                data-ocid="settings.gmail_email.input"
+                type="email"
+                className="mt-1 h-8 text-sm"
+                placeholder="yourname@gmail.com"
+                value={emailForm.gmailSenderEmail}
+                onChange={(e) =>
+                  setEmailForm((p) => ({
+                    ...p,
+                    gmailSenderEmail: e.target.value,
+                  }))
+                }
+              />
+            </div>
+            <div>
+              <Label className="text-xs">Gmail App Password</Label>
+              <Input
+                data-ocid="settings.gmail_password.input"
+                type="password"
+                className="mt-1 h-8 text-sm font-mono"
+                placeholder="xxxx xxxx xxxx xxxx"
+                value={emailForm.gmailAppPassword}
+                onChange={(e) =>
+                  setEmailForm((p) => ({
+                    ...p,
+                    gmailAppPassword: e.target.value,
+                  }))
+                }
+              />
+            </div>
+            <div className="flex items-start gap-2 rounded-md bg-warning/15 border border-warning/30 p-3">
+              <AlertTriangle className="w-3.5 h-3.5 text-warning mt-0.5 shrink-0" />
+              <p className="text-xs text-warning">
+                Use a{" "}
+                <a
+                  href="https://support.google.com/accounts/answer/185833"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline font-medium"
+                >
+                  Gmail App Password
+                </a>{" "}
+                &mdash; not your regular Gmail password. You must enable 2-Step
+                Verification on your Google account first. Email delivery
+                requires a server-side SMTP relay for production.
+              </p>
+            </div>
+            <div className="flex justify-end">
+              <Button
+                size="sm"
+                onClick={handleSaveEmail}
+                data-ocid="settings.email.save_button"
+              >
+                Save Email Settings
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
 
 export function Settings() {
   const { currentUser } = useAuth();
@@ -636,13 +825,26 @@ export function Settings() {
             </ToggleGroup>
           </div>
 
-          <div
-            className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3"
-            data-ocid="settings.appearance.theme_grid"
-          >
-            {themes
-              .filter((preset) => !preset.id.startsWith("style-"))
-              .map((preset) => (
+          {/* Settings simplification (see chat) — this used to be two
+              visually separate grids ("Theme" plain accents, then a
+              border-divided "UI Style" section below it) that both wrote
+              the exact same themeId/setThemeId selection underneath (one
+              active preset at a time, like Instrument already does).
+              Presenting one setting as two sections was confusing, not
+              two independent choices — merged into a single grid with
+              one description. No preset was added or removed, and
+              selection behavior (mutually exclusive, same onSelect) is
+              unchanged. */}
+          <div>
+            <p className="text-xs text-muted-foreground mb-3">
+              Pick an accent color or a named style direction — either one sets
+              the whole look at once.
+            </p>
+            <div
+              className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3"
+              data-ocid="settings.appearance.theme_grid"
+            >
+              {themes.map((preset) => (
                 <ThemePreviewCard
                   key={preset.id}
                   preset={preset}
@@ -651,419 +853,347 @@ export function Settings() {
                   onSelect={() => setThemeId(preset.id)}
                 />
               ))}
-          </div>
-
-          {/* Style Lab comparison (see chat) — a real, separately-labeled
-              "UI Style" group, distinct from the plain accent-color grid
-              above. Same single themeId/setThemeId selection underneath
-              (this app has one active preset at a time, exactly like
-              Instrument already does) - picking a style here is mutually
-              exclusive with picking a plain accent above, not a second
-              independent axis composed on top of it. Only the 6 Style
-              Lab directions with a real, fully-defined color+font
-              identity are offered; each one's sidebar-shape/shadow
-              identity is intentionally not reproduced (would require a
-              second design system). */}
-          <div className="pt-2 border-t border-border">
-            <Label className="text-sm font-medium">UI Style</Label>
-            <p className="text-xs text-muted-foreground mb-3">
-              Named design directions from the Style Lab. Selecting one sets
-              your accent color too — pick either an accent above or a style
-              here, not both at once.
-            </p>
-            <div
-              className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3"
-              data-ocid="settings.appearance.style_grid"
-            >
-              {themes
-                .filter((preset) => preset.id.startsWith("style-"))
-                .map((preset) => (
-                  <ThemePreviewCard
-                    key={preset.id}
-                    preset={preset}
-                    mode={resolvedMode}
-                    isSelected={preset.id === themeId}
-                    onSelect={() => setThemeId(preset.id)}
-                  />
-                ))}
             </div>
           </div>
         </CardContent>
       </Card>
 
-      {/* AI Agent redesign (see chat) — configurable assistant name plus
-          voice settings, read by AgentPage.tsx/agent/voice.ts directly
-          from the store (falls back to "FabFlow Copilot" / voice off when
-          unset). Voice controls are disabled with an explicit note rather
-          than hidden when the browser doesn't support the underlying Web
-          Speech API — never a setting that silently does nothing. */}
-      <Card data-ocid="settings.ai_assistant.card">
-        <CardHeader className="pb-3">
-          <CardTitle className="text-sm font-semibold flex items-center gap-2">
-            <Bot className="w-4 h-4 text-primary" />
-            AI Assistant
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-1">
-            <Label className="text-xs">Assistant Name</Label>
-            <Input
-              className="h-8 text-sm max-w-sm"
-              placeholder="FabFlow Copilot"
-              value={aiAssistantForm.aiAssistantName}
-              onChange={(e) =>
-                setAiAssistantForm((f) => ({
-                  ...f,
-                  aiAssistantName: e.target.value,
-                }))
-              }
-              data-ocid="settings.ai_assistant.name.input"
-            />
-            <p className="text-xs text-muted-foreground">
-              Shown in the AI Agent conversation header. Leave blank to use the
-              default, "FabFlow Copilot".
-            </p>
-          </div>
+      {/* Settings simplification (see chat) — Email Accounts (the real,
+          active multi-mailbox integration) is listed first so it reads as
+          the primary email configuration; WhatsApp reminders and the
+          legacy Gmail SMTP card (demoted into its own collapsed
+          disclosure below) are secondary. No card's own logic changed. */}
+      <div>
+        <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide px-1 mb-2">
+          Email &amp; Notifications
+        </h2>
+        <div className="space-y-4">
+          <EmailAccountsCard />
 
-          <div className="pt-1 border-t border-border space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Mic className="w-3.5 h-3.5 text-muted-foreground" />
-                <Label className="text-xs font-medium">
-                  Voice Conversation
-                </Label>
-              </div>
-              <Switch
-                checked={aiAssistantForm.voiceEnabled}
-                onCheckedChange={(checked) =>
-                  setAiAssistantForm((f) => ({
-                    ...f,
-                    voiceEnabled: checked,
-                  }))
-                }
-                disabled={!speechSupported}
-                data-ocid="settings.ai_assistant.voice_enabled.switch"
-              />
-            </div>
-            {!speechSupported && (
-              <p className="text-xs text-warning">
-                This browser doesn't support speech input or playback (Web
-                Speech API) — voice conversation stays unavailable here, but
-                text chat is unaffected.
-              </p>
-            )}
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <Label className="text-xs">Voice Input Language</Label>
-                <Select
-                  value={aiAssistantForm.voiceInputLanguage}
-                  onValueChange={(value) =>
-                    setAiAssistantForm((f) => ({
-                      ...f,
-                      voiceInputLanguage: value,
-                    }))
-                  }
-                  disabled={!sttSupported}
-                >
-                  <SelectTrigger
-                    className="h-8 text-sm"
-                    data-ocid="settings.ai_assistant.voice_input_lang.select"
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {SUPPORTED_VOICE_LANGUAGES.map((l) => (
-                      <SelectItem key={l.code} value={l.code}>
-                        {l.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                {!sttSupported && (
-                  <p className="text-xs text-muted-foreground">
-                    Speech recognition isn't supported in this browser.
-                  </p>
+          <Card data-ocid="settings.whatsapp.card">
+            <CardHeader className="pb-3">
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                  <MessageSquare className="w-4 h-4 text-primary" />
+                  WhatsApp Reminders (via Twilio)
+                </CardTitle>
+                {whatsappConfigured ? (
+                  <Badge className="bg-success/10 text-success border-success/30 text-xs gap-1">
+                    <CheckCircle2 className="w-3 h-3" /> Configured
+                  </Badge>
+                ) : (
+                  <Badge variant="secondary" className="text-xs gap-1">
+                    <XCircle className="w-3 h-3" /> Not Configured
+                  </Badge>
                 )}
               </div>
-              <div className="space-y-1">
-                <Label className="text-xs">Voice Output Language</Label>
-                <Select
-                  value={aiAssistantForm.voiceOutputLanguage}
-                  onValueChange={(value) =>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div>
+                <Label className="text-xs">Twilio Account SID</Label>
+                <Input
+                  data-ocid="settings.twilio_sid.input"
+                  className="mt-1 h-8 text-sm font-mono"
+                  placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                  value={whatsappForm.twilioAccountSid}
+                  onChange={(e) =>
+                    setWhatsappForm((p) => ({
+                      ...p,
+                      twilioAccountSid: e.target.value,
+                    }))
+                  }
+                />
+              </div>
+              <div>
+                <Label className="text-xs">Auth Token</Label>
+                <Input
+                  data-ocid="settings.twilio_token.input"
+                  type="password"
+                  className="mt-1 h-8 text-sm font-mono"
+                  placeholder="\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
+                  value={whatsappForm.twilioAuthToken}
+                  onChange={(e) =>
+                    setWhatsappForm((p) => ({
+                      ...p,
+                      twilioAuthToken: e.target.value,
+                    }))
+                  }
+                />
+              </div>
+              <div>
+                <Label className="text-xs">From Number (WhatsApp)</Label>
+                <Input
+                  data-ocid="settings.twilio_from.input"
+                  className="mt-1 h-8 text-sm font-mono"
+                  placeholder="whatsapp:+14155238886"
+                  value={whatsappForm.twilioFromNumber}
+                  onChange={(e) =>
+                    setWhatsappForm((p) => ({
+                      ...p,
+                      twilioFromNumber: e.target.value,
+                    }))
+                  }
+                />
+              </div>
+              <div className="flex items-start gap-2 rounded-md bg-info/10 border border-info/30 p-3">
+                <Info className="w-3.5 h-3.5 text-info mt-0.5 shrink-0" />
+                <p className="text-xs text-info">
+                  Credentials are stored locally in the browser. For production,
+                  ensure your environment has proper CORS handling for Twilio
+                  API calls. Get your credentials from{" "}
+                  <a
+                    href="https://console.twilio.com"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline font-medium"
+                  >
+                    console.twilio.com
+                  </a>
+                  .
+                </p>
+              </div>
+              <div className="flex justify-end">
+                <Button
+                  size="sm"
+                  onClick={handleSaveWhatsApp}
+                  data-ocid="settings.whatsapp.save_button"
+                >
+                  Save WhatsApp Settings
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Gmail SMTP — confirmed genuinely unused (no Edge Function
+              reads gmailSenderEmail/gmailAppPassword anywhere; the real
+              outbound path is EmailAccountsCard above). Not removed, just
+              demoted into its own collapsed-by-default "Legacy" section
+              so it never reads as a second active email system next to
+              Email Accounts. Same card, same fields, same save handler —
+              only the disclosure wrapper is new. */}
+          <LegacyGmailSmtpDisclosure
+            emailConfigured={emailConfigured}
+            emailForm={emailForm}
+            setEmailForm={setEmailForm}
+            handleSaveEmail={handleSaveEmail}
+          />
+        </div>
+      </div>
+
+      {/* Settings simplification (see chat) — Team & Access groups every
+          user/role/permission control in one collapsed-by-default
+          section instead of them sitting in the main flow of the page.
+          Same UserManagement/AccountRecoveryCard components, same
+          internal Edit/Reset-Password/Activate-Deactivate/permission-
+          matrix behavior — only visibility-by-default changed. */}
+      <SettingsSection
+        title="Team & Access"
+        description="Users, roles, permissions, and admin account recovery."
+        icon={Users}
+      >
+        <UserManagement />
+        <AccountRecoveryCard />
+      </SettingsSection>
+
+      {/* Data */}
+      <div>
+        <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide px-1 mb-2">
+          Data
+        </h2>
+        <BackupRestore />
+      </div>
+
+      {/* Settings simplification (see chat) — Advanced groups the AI
+          Assistant voice config, the Security Audit Log, and the
+          one-time Legacy Data Migration tools behind one collapsed-by-
+          default section, so a normal user opening Settings doesn't land
+          on four migration cards or an audit log table first. Every
+          child component/card here is unchanged. */}
+      <SettingsSection
+        title="Advanced"
+        description="AI Assistant voice settings, the security audit log, and one-time legacy data migration tools."
+        icon={SlidersHorizontal}
+      >
+        <Card data-ocid="settings.ai_assistant.card">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm font-semibold flex items-center gap-2">
+              <Bot className="w-4 h-4 text-primary" />
+              AI Assistant
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-1">
+              <Label className="text-xs">Assistant Name</Label>
+              <Input
+                className="h-8 text-sm max-w-sm"
+                placeholder="FabFlow Copilot"
+                value={aiAssistantForm.aiAssistantName}
+                onChange={(e) =>
+                  setAiAssistantForm((f) => ({
+                    ...f,
+                    aiAssistantName: e.target.value,
+                  }))
+                }
+                data-ocid="settings.ai_assistant.name.input"
+              />
+              <p className="text-xs text-muted-foreground">
+                Shown in the AI Agent conversation header. Leave blank to use
+                the default, "FabFlow Copilot".
+              </p>
+            </div>
+
+            <div className="pt-1 border-t border-border space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Mic className="w-3.5 h-3.5 text-muted-foreground" />
+                  <Label className="text-xs font-medium">
+                    Voice Conversation
+                  </Label>
+                </div>
+                <Switch
+                  checked={aiAssistantForm.voiceEnabled}
+                  onCheckedChange={(checked) =>
                     setAiAssistantForm((f) => ({
                       ...f,
-                      voiceOutputLanguage: value,
+                      voiceEnabled: checked,
+                    }))
+                  }
+                  disabled={!speechSupported}
+                  data-ocid="settings.ai_assistant.voice_enabled.switch"
+                />
+              </div>
+              {!speechSupported && (
+                <p className="text-xs text-warning">
+                  This browser doesn't support speech input or playback (Web
+                  Speech API) — voice conversation stays unavailable here, but
+                  text chat is unaffected.
+                </p>
+              )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <Label className="text-xs">Voice Input Language</Label>
+                  <Select
+                    value={aiAssistantForm.voiceInputLanguage}
+                    onValueChange={(value) =>
+                      setAiAssistantForm((f) => ({
+                        ...f,
+                        voiceInputLanguage: value,
+                      }))
+                    }
+                    disabled={!sttSupported}
+                  >
+                    <SelectTrigger
+                      className="h-8 text-sm"
+                      data-ocid="settings.ai_assistant.voice_input_lang.select"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {SUPPORTED_VOICE_LANGUAGES.map((l) => (
+                        <SelectItem key={l.code} value={l.code}>
+                          {l.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {!sttSupported && (
+                    <p className="text-xs text-muted-foreground">
+                      Speech recognition isn't supported in this browser.
+                    </p>
+                  )}
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Voice Output Language</Label>
+                  <Select
+                    value={aiAssistantForm.voiceOutputLanguage}
+                    onValueChange={(value) =>
+                      setAiAssistantForm((f) => ({
+                        ...f,
+                        voiceOutputLanguage: value,
+                      }))
+                    }
+                    disabled={!ttsSupported}
+                  >
+                    <SelectTrigger
+                      className="h-8 text-sm"
+                      data-ocid="settings.ai_assistant.voice_output_lang.select"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {SUPPORTED_VOICE_LANGUAGES.map((l) => (
+                        <SelectItem key={l.code} value={l.code}>
+                          {l.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {!ttsSupported && (
+                    <p className="text-xs text-muted-foreground">
+                      Speech playback isn't supported in this browser.
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Volume2 className="w-3.5 h-3.5 text-muted-foreground" />
+                  <Label className="text-xs font-medium">
+                    Auto-Speak Responses
+                  </Label>
+                </div>
+                <Switch
+                  checked={aiAssistantForm.autoSpeakResponses}
+                  onCheckedChange={(checked) =>
+                    setAiAssistantForm((f) => ({
+                      ...f,
+                      autoSpeakResponses: checked,
                     }))
                   }
                   disabled={!ttsSupported}
-                >
-                  <SelectTrigger
-                    className="h-8 text-sm"
-                    data-ocid="settings.ai_assistant.voice_output_lang.select"
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {SUPPORTED_VOICE_LANGUAGES.map((l) => (
-                      <SelectItem key={l.code} value={l.code}>
-                        {l.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                {!ttsSupported && (
-                  <p className="text-xs text-muted-foreground">
-                    Speech playback isn't supported in this browser.
-                  </p>
-                )}
+                  data-ocid="settings.ai_assistant.auto_speak.switch"
+                />
               </div>
+              <p className="text-xs text-muted-foreground">
+                When on, every assistant reply is read aloud automatically. Off
+                by default — you can always play a reply's audio manually from
+                its speaker button in the conversation.
+              </p>
             </div>
 
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Volume2 className="w-3.5 h-3.5 text-muted-foreground" />
-                <Label className="text-xs font-medium">
-                  Auto-Speak Responses
-                </Label>
-              </div>
-              <Switch
-                checked={aiAssistantForm.autoSpeakResponses}
-                onCheckedChange={(checked) =>
-                  setAiAssistantForm((f) => ({
-                    ...f,
-                    autoSpeakResponses: checked,
-                  }))
-                }
-                disabled={!ttsSupported}
-                data-ocid="settings.ai_assistant.auto_speak.switch"
-              />
-            </div>
-            <p className="text-xs text-muted-foreground">
-              When on, every assistant reply is read aloud automatically. Off by
-              default — you can always play a reply's audio manually from its
-              speaker button in the conversation.
-            </p>
-          </div>
-
-          <Button
-            size="sm"
-            onClick={handleSaveAiAssistant}
-            data-ocid="settings.ai_assistant.save_button"
-          >
-            Save
-          </Button>
-        </CardContent>
-      </Card>
-
-      {/* WhatsApp / Twilio */}
-      <Card data-ocid="settings.whatsapp.card">
-        <CardHeader className="pb-3">
-          <div className="flex items-center justify-between">
-            <CardTitle className="text-sm font-semibold flex items-center gap-2">
-              <MessageSquare className="w-4 h-4 text-primary" />
-              WhatsApp Reminders (via Twilio)
-            </CardTitle>
-            {whatsappConfigured ? (
-              <Badge className="bg-success/10 text-success border-success/30 text-xs gap-1">
-                <CheckCircle2 className="w-3 h-3" /> Configured
-              </Badge>
-            ) : (
-              <Badge variant="secondary" className="text-xs gap-1">
-                <XCircle className="w-3 h-3" /> Not Configured
-              </Badge>
-            )}
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div>
-            <Label className="text-xs">Twilio Account SID</Label>
-            <Input
-              data-ocid="settings.twilio_sid.input"
-              className="mt-1 h-8 text-sm font-mono"
-              placeholder="ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-              value={whatsappForm.twilioAccountSid}
-              onChange={(e) =>
-                setWhatsappForm((p) => ({
-                  ...p,
-                  twilioAccountSid: e.target.value,
-                }))
-              }
-            />
-          </div>
-          <div>
-            <Label className="text-xs">Auth Token</Label>
-            <Input
-              data-ocid="settings.twilio_token.input"
-              type="password"
-              className="mt-1 h-8 text-sm font-mono"
-              placeholder="\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"
-              value={whatsappForm.twilioAuthToken}
-              onChange={(e) =>
-                setWhatsappForm((p) => ({
-                  ...p,
-                  twilioAuthToken: e.target.value,
-                }))
-              }
-            />
-          </div>
-          <div>
-            <Label className="text-xs">From Number (WhatsApp)</Label>
-            <Input
-              data-ocid="settings.twilio_from.input"
-              className="mt-1 h-8 text-sm font-mono"
-              placeholder="whatsapp:+14155238886"
-              value={whatsappForm.twilioFromNumber}
-              onChange={(e) =>
-                setWhatsappForm((p) => ({
-                  ...p,
-                  twilioFromNumber: e.target.value,
-                }))
-              }
-            />
-          </div>
-          <div className="flex items-start gap-2 rounded-md bg-info/10 border border-info/30 p-3">
-            <Info className="w-3.5 h-3.5 text-info mt-0.5 shrink-0" />
-            <p className="text-xs text-info">
-              Credentials are stored locally in the browser. For production,
-              ensure your environment has proper CORS handling for Twilio API
-              calls. Get your credentials from{" "}
-              <a
-                href="https://console.twilio.com"
-                target="_blank"
-                rel="noreferrer"
-                className="underline font-medium"
-              >
-                console.twilio.com
-              </a>
-              .
-            </p>
-          </div>
-          <div className="flex justify-end">
             <Button
               size="sm"
-              onClick={handleSaveWhatsApp}
-              data-ocid="settings.whatsapp.save_button"
+              onClick={handleSaveAiAssistant}
+              data-ocid="settings.ai_assistant.save_button"
             >
-              Save WhatsApp Settings
+              Save
             </Button>
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
 
-      {/* Gmail SMTP */}
-      <Card data-ocid="settings.email.card">
-        <CardHeader className="pb-3">
-          <div className="flex items-center justify-between">
-            <CardTitle className="text-sm font-semibold flex items-center gap-2">
-              <Mail className="w-4 h-4 text-primary" />
-              Email Reminders (Gmail SMTP)
-            </CardTitle>
-            {emailConfigured ? (
-              <Badge className="bg-success/10 text-success border-success/30 text-xs gap-1">
-                <CheckCircle2 className="w-3 h-3" /> Configured
-              </Badge>
-            ) : (
-              <Badge variant="secondary" className="text-xs gap-1">
-                <XCircle className="w-3 h-3" /> Not Configured
-              </Badge>
-            )}
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div>
-            <Label className="text-xs">Sender Email (Gmail)</Label>
-            <Input
-              data-ocid="settings.gmail_email.input"
-              type="email"
-              className="mt-1 h-8 text-sm"
-              placeholder="yourname@gmail.com"
-              value={emailForm.gmailSenderEmail}
-              onChange={(e) =>
-                setEmailForm((p) => ({
-                  ...p,
-                  gmailSenderEmail: e.target.value,
-                }))
-              }
-            />
-          </div>
-          <div>
-            <Label className="text-xs">Gmail App Password</Label>
-            <Input
-              data-ocid="settings.gmail_password.input"
-              type="password"
-              className="mt-1 h-8 text-sm font-mono"
-              placeholder="xxxx xxxx xxxx xxxx"
-              value={emailForm.gmailAppPassword}
-              onChange={(e) =>
-                setEmailForm((p) => ({
-                  ...p,
-                  gmailAppPassword: e.target.value,
-                }))
-              }
-            />
-          </div>
-          <div className="flex items-start gap-2 rounded-md bg-warning/15 border border-warning/30 p-3">
-            <AlertTriangle className="w-3.5 h-3.5 text-warning mt-0.5 shrink-0" />
-            <p className="text-xs text-warning">
-              Use a{" "}
-              <a
-                href="https://support.google.com/accounts/answer/185833"
-                target="_blank"
-                rel="noreferrer"
-                className="underline font-medium"
-              >
-                Gmail App Password
-              </a>{" "}
-              &mdash; not your regular Gmail password. You must enable 2-Step
-              Verification on your Google account first. Email delivery requires
-              a server-side SMTP relay for production.
-            </p>
-          </div>
-          <div className="flex justify-end">
-            <Button
-              size="sm"
-              onClick={handleSaveEmail}
-              data-ocid="settings.email.save_button"
-            >
-              Save Email Settings
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+        <SecurityAuditLog />
 
-      {/* Universal Email Integration (see chat) — distinct from the
-          "Email Reminders (Gmail SMTP)" card just above: that card is a
-          pre-existing, unrelated (and currently inert — no Edge Function
-          reads it) single outbound-reminder credential. This card is the
-          real, multi-mailbox Email Center connection manager, backed by
-          database/phase-50 + the email-connect/email-sync Edge
-          Functions. */}
-      <EmailAccountsCard />
-
-      {/* Backup & Restore */}
-      <BackupRestore />
-
-      {/* Drawing Repository migration (Phase 14, one-time, self-service) */}
-      <DrawingRepositoryMigration />
-
-      {/* Machinery migration (Phase 35, one-time, self-service) */}
-      <MachinesMigration />
-
-      {/* Production Stages migration (Phase 45, one-time, self-service) */}
-      <ProductionStagesMigration />
-
-      {/* QMS Inspection workflow migration (Phase 46, one-time, self-service) */}
-      <QmsInspectionsMigration />
-
-      {/* User Management */}
-      <UserManagement />
-
-      {/* Account Recovery (admin-only self-service, see chat) */}
-      <AccountRecoveryCard />
-
-      {/* Security Audit Log */}
-      <SecurityAuditLog />
+        {/* Legacy Data Migration — one-time, self-service tools (Phases
+            14/35/45/46) for importing older browser-local data saved
+            before Supabase became authoritative. Nested one level deeper
+            and collapsed by default: normal FabFlow modules already save
+            directly to Supabase through their own workflows, so these are
+            not something a user needs to run to "keep Supabase updated". */}
+        <SettingsSection
+          title="Legacy Data Migration"
+          description={
+            "These tools are for importing older browser-local data from previous migration periods. Normal FabFlow records are saved directly to Supabase."
+          }
+          icon={Archive}
+        >
+          <DrawingRepositoryMigration />
+          <MachinesMigration />
+          <ProductionStagesMigration />
+          <QmsInspectionsMigration />
+        </SettingsSection>
+      </SettingsSection>
 
       {/* Company Profile Preview Modal */}
       <CompanyProfilePrintView
@@ -1120,6 +1250,32 @@ function EmailAccountsCard() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally mount-only — refresh is redefined every render but this effect should only ever run once, on mount.
   useEffect(() => {
     void refresh();
+  }, []);
+
+  // Phase 9E — email-oauth-callback redirects back here (via
+  // FABFLOW_APP_URL) with ?oauthConnected=1 or ?oauthError=... after the
+  // Google consent screen. Surface the result once, refresh the list, and
+  // strip the query params so a page reload doesn't re-show the toast.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally mount-only — reads window.location.search once.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const oauthConnected = params.get("oauthConnected");
+    const oauthError = params.get("oauthError");
+    if (!oauthConnected && !oauthError) return;
+    if (oauthConnected) {
+      toast.success("Mailbox connected via Google.");
+      void refresh();
+    } else if (oauthError) {
+      toast.error(oauthError);
+    }
+    params.delete("oauthConnected");
+    params.delete("oauthError");
+    const newSearch = params.toString();
+    window.history.replaceState(
+      null,
+      "",
+      window.location.pathname + (newSearch ? `?${newSearch}` : ""),
+    );
   }, []);
 
   const handleSync = async (id: string) => {
@@ -1401,25 +1557,38 @@ function BackupRestore() {
             backup.
           </p>
         </CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap gap-3">
+        <CardContent className="space-y-4">
+          <Button
+            onClick={handleExport}
+            data-ocid="settings.backup.primary_button"
+          >
+            Export Backup
+          </Button>
+
+          {/* Settings simplification (see chat) — Restore is the one
+              irreversible, destructive action on this page (it overwrites
+              every current record), so it gets its own visually distinct
+              "danger zone" box instead of sitting next to Export as an
+              equally-weighted button. Same handler, same confirm dialog,
+              same behavior — only the styling changed. */}
+          <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3">
+            <p className="text-xs font-medium text-destructive flex items-center gap-1.5">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              Danger zone
+            </p>
+            <p className="text-xs text-muted-foreground mt-1 mb-3">
+              Restoring will replace all current data permanently. This cannot
+              be undone.
+            </p>
             <Button
-              onClick={handleExport}
-              data-ocid="settings.backup.primary_button"
-            >
-              Export Backup
-            </Button>
-            <Button
-              variant="outline"
+              variant="destructive"
+              size="sm"
               onClick={() => fileInputRef.current?.click()}
               data-ocid="settings.restore.secondary_button"
             >
               Restore Data
             </Button>
           </div>
-          <p className="text-xs text-destructive mt-3">
-            ⚠ Restoring will replace all current data permanently.
-          </p>
           <input
             ref={fileInputRef}
             type="file"
@@ -1447,6 +1616,7 @@ function BackupRestore() {
               Cancel
             </AlertDialogCancel>
             <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={handleRestore}
               data-ocid="settings.restore.confirm_button"
             >

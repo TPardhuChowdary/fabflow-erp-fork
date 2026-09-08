@@ -27,6 +27,17 @@ const DEFAULT_REASONING_EFFORT = "medium";
 const MAX_REQUEST_BYTES = 500_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 
+// TEMPORARY DIAGNOSTIC (Phase 8 Scenario 9 investigation) — maps an HTTP
+// status to a coarse, sanitized category for the failure log line below;
+// never touches the response body. Remove alongside the diagnostic logging.
+function categorizeHttpStatus(status: number): string {
+  if (status === 401 || status === 403) return "auth_error";
+  if (status === 429) return "rate_limited";
+  if (status >= 400 && status < 500) return "client_error";
+  if (status >= 500) return "provider_server_error";
+  return "http_error";
+}
+
 // ── Responses API request/response item shapes actually used here ─────
 // (only the fields this function reads or writes — not the full API surface)
 
@@ -194,6 +205,26 @@ export class OpenAIProvider implements ChatProvider {
   ) {}
 
   async complete(req: ChatRequest): Promise<ChatResponse> {
+    // TEMPORARY DIAGNOSTIC (Phase 8 Scenario 9 investigation) — logs
+    // exactly one line, ONLY on failure, containing nothing but: a
+    // correlation id, a sanitized category, HTTP status/statusText (when
+    // one was actually received), the already-non-secret model name, and
+    // elapsed duration. Never the API key, never any header, never the
+    // request/response body, never req.system/req.messages (which is
+    // where email content/ERP data would live). This is additive only —
+    // every existing thrown Error's message/control-flow is byte-for-byte
+    // unchanged; this only adds a console.error immediately before each
+    // existing throw. Remove once Scenario 9 is diagnosed.
+    const correlationId = crypto.randomUUID();
+    const startedAt = Date.now();
+    const logOpenAiFailure = (category: string, status?: number, statusText?: string) => {
+      console.error(
+        `[openai-provider-diagnostic] correlationId=${correlationId} category=${category} ` +
+          `status=${status ?? "n/a"} statusText=${statusText ?? "n/a"} model=${this.model} ` +
+          `durationMs=${Date.now() - startedAt}`,
+      );
+    };
+
     const tools: ResponsesFunctionTool[] = req.tools.map((t) => ({
       type: "function",
       name: t.name,
@@ -215,6 +246,7 @@ export class OpenAIProvider implements ChatProvider {
       store: false,
     });
     if (body.length > MAX_REQUEST_BYTES) {
+      logOpenAiFailure("request_too_large");
       throw new Error("Conversation has grown too large for one request — this usually means a tool-call loop went wrong.");
     }
 
@@ -233,8 +265,10 @@ export class OpenAIProvider implements ChatProvider {
       });
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") {
+        logOpenAiFailure("timeout");
         throw new Error("The LLM API did not respond in time.");
       }
+      logOpenAiFailure("network_error");
       throw new Error(`Could not reach the LLM API: ${err instanceof Error ? err.message : "unknown error"}`);
     } finally {
       clearTimeout(timeout);
@@ -242,9 +276,11 @@ export class OpenAIProvider implements ChatProvider {
 
     const parsed = await res.json().catch(() => null);
     if (!res.ok || !parsed) {
+      logOpenAiFailure(categorizeHttpStatus(res.status), res.status, res.statusText);
       throw new Error(`LLM API error: ${parsed?.error?.message ?? res.statusText}`);
     }
     if (parsed.status === "failed") {
+      logOpenAiFailure("provider_reported_failure", res.status, res.statusText);
       throw new Error(`LLM API error: ${parsed?.error?.message ?? "request failed"}`);
     }
 

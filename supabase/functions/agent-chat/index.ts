@@ -33,8 +33,8 @@
 // and nothing here deletes them (that's a manual decision, not this
 // migration's job).
 
-import { OpenAIProvider } from "./openaiProvider.ts";
-import type { ChatMessage, ChatProvider, ChatToolSchema } from "./provider.ts";
+import { OpenAIProvider } from "../_shared/openaiProvider.ts";
+import type { ChatMessage, ChatProvider, ChatToolSchema } from "../_shared/provider.ts";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",

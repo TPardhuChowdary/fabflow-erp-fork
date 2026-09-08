@@ -25,6 +25,21 @@ import {
   createDeliveryChallanRemote,
 } from "@/lib/deliveryChallansApi";
 import { computeNextDieCode, createDieRemote } from "@/lib/diesApi";
+import { listEmailAccounts } from "@/lib/emailAccountsApi";
+import {
+  acknowledgeEmailAlert as acknowledgeEmailAlertRemote,
+  createEmailAlert,
+  resolveEmailAlert as resolveEmailAlertRemote,
+} from "@/lib/emailAlertsApi";
+import { getEmailMessage, listEmailAttachments } from "@/lib/emailMessagesApi";
+import {
+  confirmEmailOutboundSend,
+  createEmailOutboundSend,
+  getEmailOutboundSend,
+  markEmailOutboundSendSending,
+  markEmailOutboundSendUnreachable,
+  requestEmailOutboundSend,
+} from "@/lib/emailOutboundApi";
 import { createEmployeeRemote } from "@/lib/employeesApi";
 import {
   computeNextFloatNumber,
@@ -85,6 +100,11 @@ import type {
   CompanyPOStatus,
   DCStatus,
   DieStatus,
+  EmailAlertConfidence,
+  EmailAlertIssueType,
+  EmailAlertMatchedRecord,
+  EmailAlertSeverity,
+  EmailOutboundAttachmentRef,
   InvLineItem,
   LineItem,
   MachineStatus,
@@ -4423,6 +4443,836 @@ export const addTenderRequirement: AgentAction = {
   },
 };
 
+// ── Phase 5 Email Operations (draft/send) ──────────────────────────────────
+// Reuses agent/queries.ts's searchEmails/readEmailMessage to find/inspect
+// the source email (never re-implemented here), lib/emailOutboundApi.ts
+// for the persisted draft/state-machine (database/20260907010000, WRITTEN
+// NOT APPLIED), and imapSmtpAdapter.sendMessage() via the email-send Edge
+// Function (WRITTEN, NOT DEPLOYED) for the one step that must happen
+// server-side. Drafting is kind:"read" — not because it has no database
+// effect (it does: a real row is inserted) but because "read" in this
+// registry's actual contract means "runs without human confirmation",
+// and drafting has no EXTERNAL side effect (explicit Phase 5 product
+// decision) — see agent/types.ts's own comment on what kind really
+// gates. Sending is kind:"write", destructive:true — the most
+// consequential category this registry has, since a sent email cannot
+// be recalled the way a database row can be corrected.
+
+function parseJsonStringArray(raw: unknown, fieldName: string): string[] {
+  if (raw === undefined || raw === null || raw === "") return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(String(raw));
+  } catch {
+    throw new Error(
+      `"${fieldName}" must be a valid JSON array of strings, e.g. ["a@b.com"].`,
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`"${fieldName}" must be a JSON array, e.g. ["a@b.com"].`);
+  }
+  return parsed.map((v) => String(v).trim()).filter(Boolean);
+}
+
+interface RawAttachmentRef {
+  emailMessageId?: string;
+  attachmentId?: string;
+}
+
+/** Resolves attachment references against the REAL email_attachments
+ * table, scoped to the specific source message each ref names — never
+ * a bare attachmentId trusted on its own. Throws with a clear message
+ * for any ref that doesn't resolve, rather than silently dropping it
+ * (dropping an attachment the user asked for is exactly the kind of
+ * silent change Phase 5's confirmation-integrity rule forbids). */
+async function resolveAttachmentRefs(
+  attachmentsJson: unknown,
+): Promise<EmailOutboundAttachmentRef[]> {
+  if (!attachmentsJson) return [];
+  let raw: unknown;
+  try {
+    raw = JSON.parse(String(attachmentsJson));
+  } catch {
+    throw new Error(
+      '"attachmentsJson" must be a valid JSON array, e.g. [{"emailMessageId":"...","attachmentId":"..."}].',
+    );
+  }
+  if (!Array.isArray(raw)) {
+    throw new Error('"attachmentsJson" must be a JSON array.');
+  }
+  const refs: RawAttachmentRef[] = raw.filter(
+    (r): r is RawAttachmentRef => Boolean(r) && typeof r === "object",
+  );
+  const resolved: EmailOutboundAttachmentRef[] = [];
+  const byMessage = new Map<string, RawAttachmentRef[]>();
+  for (const r of refs) {
+    if (!r.emailMessageId || !r.attachmentId) {
+      throw new Error(
+        'Each attachment reference needs both "emailMessageId" and "attachmentId" — call readEmailMessage first to get real ids, never invent one.',
+      );
+    }
+    byMessage.set(r.emailMessageId, [
+      ...(byMessage.get(r.emailMessageId) ?? []),
+      r,
+    ]);
+  }
+  for (const [emailMessageId, wanted] of byMessage) {
+    const result = await listEmailAttachments(emailMessageId);
+    if (result.status !== "success") {
+      throw new Error(
+        `Could not look up attachments for message ${emailMessageId}: ${result.error ?? result.status}.`,
+      );
+    }
+    const available = result.data ?? [];
+    for (const w of wanted) {
+      const match = available.find((a) => a.id === w.attachmentId);
+      if (!match || match.processingStatus !== "stored") {
+        throw new Error(
+          `Attachment ${w.attachmentId} on message ${emailMessageId} is not available to attach (not found or not fully stored).`,
+        );
+      }
+      resolved.push({
+        type: "email_attachment",
+        attachmentId: match.id,
+        filename: match.filename,
+        mimeType: match.mimeType,
+        sizeBytes: match.sizeBytes,
+      });
+    }
+  }
+  return resolved;
+}
+
+/** Resolves which mailbox sends: an explicit, human/AI-chosen
+ * emailAccountId (validated for real, connected, and — since this call
+ * is itself RLS-scoped to the caller's own session — implicitly in this
+ * organization), or the organization's enforced default sender when
+ * none is given (Phase 5 mailbox-selection rule: default automatically,
+ * but never silently use a disconnected/ineligible one). */
+async function resolveSendingMailbox(
+  explicitAccountId: string | undefined,
+): Promise<
+  | { ok: true; accountId: string; fromAddress: string }
+  | { ok: false; message: string }
+> {
+  const result = await listEmailAccounts();
+  if (result.status !== "success") {
+    return {
+      ok: false,
+      message: `Could not look up connected mailboxes: ${result.error ?? result.status}.`,
+    };
+  }
+  const accounts = result.data ?? [];
+  if (explicitAccountId) {
+    const chosen = accounts.find((a) => a.id === explicitAccountId);
+    if (!chosen)
+      return {
+        ok: false,
+        message: "That mailbox was not found, or you don't have access to it.",
+      };
+    if (chosen.status !== "connected") {
+      return {
+        ok: false,
+        message: `Mailbox ${chosen.emailAddress} is not connected (status: ${chosen.status}) — choose a different one.`,
+      };
+    }
+    return { ok: true, accountId: chosen.id, fromAddress: chosen.emailAddress };
+  }
+  const defaultSender = accounts.find(
+    (a) => a.isDefaultSender && a.status === "connected",
+  );
+  if (!defaultSender) {
+    return {
+      ok: false,
+      message:
+        "No connected default-sender mailbox is configured — an explicit emailAccountId is required.",
+    };
+  }
+  return {
+    ok: true,
+    accountId: defaultSender.id,
+    fromAddress: defaultSender.emailAddress,
+  };
+}
+
+export const draftEmailReply: AgentAction = {
+  name: "draftEmailReply",
+  description:
+    "Create a persisted DRAFT reply to an existing email (no confirmation needed — drafting has no external effect, nothing is sent). Always call readEmailMessage on replyToMessageId first. Refuses to create the draft if the original message has no captured Message-ID (this mailbox's provider doesn't support reliable reply-threading for it) — offer draftNewEmail instead in that case, never a fabricated reply. toAddresses/ccAddresses must be explicit JSON string arrays you decide — never silently copy the sender's address without saying so.",
+  permission: "email.send",
+  riskLevel: "low",
+  kind: "read",
+  destructive: false,
+  parameters: {
+    type: "object",
+    properties: {
+      replyToMessageId: {
+        type: "string",
+        description:
+          "The email being replied to (from searchEmails/readEmailMessage) — required.",
+      },
+      emailAccountId: {
+        type: "string",
+        description:
+          "Sending mailbox id to use instead of the organization's default sender — optional.",
+      },
+      toAddressesJson: {
+        type: "string",
+        description:
+          'Required. JSON array of recipient addresses, e.g. ["buyer@customer.com"].',
+      },
+      ccAddressesJson: {
+        type: "string",
+        description:
+          "Optional. JSON array of CC addresses. BCC is not supported.",
+      },
+      subject: { type: "string", description: "Required." },
+      bodyText: { type: "string", description: "Required — the reply body." },
+      bodyHtml: {
+        type: "string",
+        description: "Optional HTML version of the body.",
+      },
+      attachmentsJson: {
+        type: "string",
+        description:
+          'Optional. JSON array of {"emailMessageId","attachmentId"} to forward — ids only from readEmailMessage/listEmailAttachments results, never invented.',
+      },
+    },
+    required: ["replyToMessageId", "toAddressesJson", "subject", "bodyText"],
+  },
+  validate: (p) => ({
+    replyToMessageId: required(p, "replyToMessageId"),
+    emailAccountId: (p.emailAccountId as string) || undefined,
+    toAddressesJson: required(p, "toAddressesJson"),
+    ccAddressesJson: (p.ccAddressesJson as string) || undefined,
+    subject: required(p, "subject"),
+    bodyText: required(p, "bodyText"),
+    bodyHtml: (p.bodyHtml as string) || undefined,
+    attachmentsJson: (p.attachmentsJson as string) || undefined,
+  }),
+  execute: async (p): Promise<AgentActionOutcome> => {
+    const original = await getEmailMessage(p.replyToMessageId as string);
+    if (original.status !== "success" || !original.data) {
+      return {
+        ok: false,
+        message: "Original message not found, or you don't have access to it.",
+      };
+    }
+    // Phase 5 thread rule: never fabricate a reply target. A real
+    // RFC822 Message-ID is the only thing In-Reply-To may reference.
+    if (!original.data.providerInternetMessageId) {
+      return {
+        ok: false,
+        message:
+          "This mailbox's provider did not capture a reliable Message-ID for the original email, so a threaded reply cannot be constructed safely. Use draftNewEmail instead, or ask the human how they'd like to proceed.",
+      };
+    }
+    const mailbox = await resolveSendingMailbox(
+      p.emailAccountId as string | undefined,
+    );
+    if (!mailbox.ok) return { ok: false, message: mailbox.message };
+    let toAddresses: string[];
+    let ccAddresses: string[];
+    let attachments: EmailOutboundAttachmentRef[];
+    try {
+      toAddresses = parseJsonStringArray(p.toAddressesJson, "toAddressesJson");
+      ccAddresses = parseJsonStringArray(p.ccAddressesJson, "ccAddressesJson");
+      attachments = await resolveAttachmentRefs(p.attachmentsJson);
+    } catch (err) {
+      return {
+        ok: false,
+        message: err instanceof Error ? err.message : "Invalid input.",
+      };
+    }
+    if (toAddresses.length === 0)
+      return { ok: false, message: "At least one recipient is required." };
+    const result = await createEmailOutboundSend({
+      emailAccountId: mailbox.accountId,
+      kind: "reply",
+      replyToMessageId: p.replyToMessageId as string,
+      toAddresses,
+      ccAddresses,
+      subject: p.subject as string,
+      bodyText: p.bodyText as string,
+      bodyHtml: p.bodyHtml as string | undefined,
+      attachments,
+    });
+    if (result.status !== "success" || !result.data) {
+      return {
+        ok: false,
+        message: `Could not create draft: ${result.error ?? result.status}`,
+      };
+    }
+    return {
+      ok: true,
+      message: `Draft reply created (id ${result.data.id}). From: ${mailbox.fromAddress}. To: ${toAddresses.join(", ")}. CC: ${ccAddresses.length ? ccAddresses.join(", ") : "None"}. Subject: "${p.subject}". Body: ${p.bodyText}. ${attachments.length} attachment(s). This is a REPLY to "${original.data.subject ?? "(no subject)"}" — nothing has been sent. To send it, call sendEmailReply with this draftId (echoing this exact From/To/CC/Subject/Body/attachments/reply-target back as its display parameters), which will require your explicit confirmation.`,
+      data: { draftId: result.data.id },
+    };
+  },
+};
+
+export const draftNewEmail: AgentAction = {
+  name: "draftNewEmail",
+  description:
+    "Create a persisted DRAFT new outbound email, not tied to any existing thread (no confirmation needed — drafting has no external effect). Use this rather than draftEmailReply whenever there is no existing message to reply to, or when the original message has no reliable Message-ID for threading.",
+  permission: "email.send",
+  riskLevel: "low",
+  kind: "read",
+  destructive: false,
+  parameters: {
+    type: "object",
+    properties: {
+      emailAccountId: {
+        type: "string",
+        description:
+          "Sending mailbox id to use instead of the organization's default sender — optional.",
+      },
+      toAddressesJson: {
+        type: "string",
+        description:
+          'Required. JSON array of recipient addresses, e.g. ["buyer@customer.com"]. External (not-yet-known-to-ERP) recipients are allowed but must be explicit.',
+      },
+      ccAddressesJson: {
+        type: "string",
+        description:
+          "Optional. JSON array of CC addresses. BCC is not supported.",
+      },
+      subject: { type: "string", description: "Required." },
+      bodyText: { type: "string", description: "Required." },
+      bodyHtml: {
+        type: "string",
+        description: "Optional HTML version of the body.",
+      },
+      attachmentsJson: {
+        type: "string",
+        description:
+          'Optional. JSON array of {"emailMessageId","attachmentId"} to forward — ids only from readEmailMessage/listEmailAttachments results, never invented.',
+      },
+    },
+    required: ["toAddressesJson", "subject", "bodyText"],
+  },
+  validate: (p) => ({
+    emailAccountId: (p.emailAccountId as string) || undefined,
+    toAddressesJson: required(p, "toAddressesJson"),
+    ccAddressesJson: (p.ccAddressesJson as string) || undefined,
+    subject: required(p, "subject"),
+    bodyText: required(p, "bodyText"),
+    bodyHtml: (p.bodyHtml as string) || undefined,
+    attachmentsJson: (p.attachmentsJson as string) || undefined,
+  }),
+  execute: async (p): Promise<AgentActionOutcome> => {
+    const mailbox = await resolveSendingMailbox(
+      p.emailAccountId as string | undefined,
+    );
+    if (!mailbox.ok) return { ok: false, message: mailbox.message };
+    let toAddresses: string[];
+    let ccAddresses: string[];
+    let attachments: EmailOutboundAttachmentRef[];
+    try {
+      toAddresses = parseJsonStringArray(p.toAddressesJson, "toAddressesJson");
+      ccAddresses = parseJsonStringArray(p.ccAddressesJson, "ccAddressesJson");
+      attachments = await resolveAttachmentRefs(p.attachmentsJson);
+    } catch (err) {
+      return {
+        ok: false,
+        message: err instanceof Error ? err.message : "Invalid input.",
+      };
+    }
+    if (toAddresses.length === 0)
+      return { ok: false, message: "At least one recipient is required." };
+    const result = await createEmailOutboundSend({
+      emailAccountId: mailbox.accountId,
+      kind: "new",
+      toAddresses,
+      ccAddresses,
+      subject: p.subject as string,
+      bodyText: p.bodyText as string,
+      bodyHtml: p.bodyHtml as string | undefined,
+      attachments,
+    });
+    if (result.status !== "success" || !result.data) {
+      return {
+        ok: false,
+        message: `Could not create draft: ${result.error ?? result.status}`,
+      };
+    }
+    return {
+      ok: true,
+      message: `Draft NEW email created (id ${result.data.id}, no thread target). From: ${mailbox.fromAddress}. To: ${toAddresses.join(", ")}. CC: ${ccAddresses.length ? ccAddresses.join(", ") : "None"}. Subject: "${p.subject}". Body: ${p.bodyText}. ${attachments.length} attachment(s). Nothing has been sent. To send it, call sendNewEmail with this draftId (echoing this exact From/To/CC/Subject/Body/attachments back as its display parameters), which will require your explicit confirmation.`,
+      data: { draftId: result.data.id },
+    };
+  },
+};
+
+/** Shared by sendEmailReply/sendNewEmail: drives the persisted state
+ * machine through confirmed -> sending, then calls the email-send Edge
+ * Function (WRITTEN, NOT DEPLOYED) for the actual provider call. The
+ * draftId is the only thing trusted for the real payload — every other
+ * parameter on the calling action exists solely so describePendingCall
+ * (AgentPage.tsx) can render a synchronous, specific confirmation
+ * without an async lookup; execute() never uses them for the send
+ * itself, only re-fetches and re-validates the real draft row. */
+async function executeSendDraft(
+  draftId: string,
+  expectedKind: "reply" | "new",
+): Promise<AgentActionOutcome> {
+  const draftResult = await getEmailOutboundSend(draftId);
+  if (draftResult.status !== "success" || !draftResult.data) {
+    return {
+      ok: false,
+      message: `Draft not found, or you don't have access to it: ${draftResult.error ?? draftResult.status}`,
+    };
+  }
+  const draft = draftResult.data;
+  if (draft.kind !== expectedKind) {
+    return {
+      ok: false,
+      message: `This draft is a "${draft.kind}" email, not a "${expectedKind}" one — call ${draft.kind === "reply" ? "sendEmailReply" : "sendNewEmail"} instead.`,
+    };
+  }
+  if (draft.status !== "draft") {
+    return {
+      ok: false,
+      message: `This draft is already "${draft.status}" — it cannot be sent again from here.`,
+    };
+  }
+  const confirmResult = await confirmEmailOutboundSend(draftId);
+  if (confirmResult.status !== "success") {
+    return {
+      ok: false,
+      message: `Could not confirm draft: ${confirmResult.error ?? confirmResult.status}`,
+    };
+  }
+  const sendingResult = await markEmailOutboundSendSending(draftId);
+  if (sendingResult.status !== "success" || !sendingResult.data) {
+    return {
+      ok: false,
+      message: `Could not begin sending: ${sendingResult.error ?? sendingResult.status}`,
+    };
+  }
+  const sendResult = await requestEmailOutboundSend(
+    draftId,
+    sendingResult.data.idempotencyKey,
+  );
+  if (sendResult.status !== "success" || !sendResult.data) {
+    // The Edge Function call itself failed (unreachable, not deployed,
+    // network error) — a genuinely unknown provider outcome, not a
+    // resolved failure. Without this, the row would be stuck in
+    // 'sending' forever with no visibility and no retry path. See
+    // markEmailOutboundSendUnreachable's own comment for why 'unknown'
+    // is the correct status here, not a made-up "error" status.
+    const errorDetail = sendResult.error ?? sendResult.status;
+    await markEmailOutboundSendUnreachable(
+      draftId,
+      `Send request could not be completed: ${errorDetail}`,
+    );
+    return {
+      ok: false,
+      message: `Send request could not be completed (${errorDetail}). This draft has been marked "unknown" — its actual send outcome cannot be determined, and it will NOT be automatically retried. This requires human review.`,
+      data: { draftId, status: "unknown" },
+    };
+  }
+  const outcome = sendResult.data;
+  if (outcome.status === "sent") {
+    return {
+      ok: true,
+      message: `Email sent. Provider message id: ${outcome.providerMessageId ?? "(not reported)"}.`,
+      data: { draftId, status: "sent" },
+    };
+  }
+  if (outcome.status === "unknown") {
+    return {
+      ok: false,
+      message:
+        outcome.message ||
+        "Send outcome is unknown — the provider did not respond in time. This requires human review before any retry; it has NOT been automatically retried.",
+      data: { draftId, status: "unknown" },
+    };
+  }
+  return {
+    ok: false,
+    message: `Send failed (${outcome.status}): ${outcome.error ?? "unknown error"}`,
+    data: { draftId, status: outcome.status },
+  };
+}
+
+export const sendEmailReply: AgentAction = {
+  name: "sendEmailReply",
+  description:
+    "Send an already-drafted reply (from draftEmailReply). REQUIRES explicit human confirmation — this is the actual outbound send, irreversible once it succeeds. The draftId's persisted content is authoritative; the other parameters here exist only so the confirmation card can show the exact From/To/CC/Subject/attachments/thread target without a second lookup — they must exactly echo what draftEmailReply already reported, never a reinterpretation.",
+  permission: "email.send",
+  riskLevel: "high",
+  kind: "write",
+  destructive: true,
+  parameters: {
+    type: "object",
+    properties: {
+      draftId: {
+        type: "string",
+        description: "The draft id from draftEmailReply — required.",
+      },
+      fromMailboxLabel: {
+        type: "string",
+        description:
+          "Display-only: the sending mailbox address, as reported by draftEmailReply.",
+      },
+      toSummary: {
+        type: "string",
+        description:
+          "Display-only: recipient address(es), as reported by draftEmailReply.",
+      },
+      ccSummary: {
+        type: "string",
+        description: "Display-only: CC address(es), if any.",
+      },
+      subject: {
+        type: "string",
+        description:
+          "Display-only: the subject, as reported by draftEmailReply.",
+      },
+      bodyPreview: {
+        type: "string",
+        description:
+          "Display-only: the exact body text, as reported by draftEmailReply — echoed verbatim, never summarized or reworded.",
+      },
+      replyTargetSummary: {
+        type: "string",
+        description: "Display-only: which original email this replies to.",
+      },
+      attachmentsSummary: {
+        type: "string",
+        description: "Display-only: attachment count/names, if any.",
+      },
+    },
+    required: [
+      "draftId",
+      "fromMailboxLabel",
+      "toSummary",
+      "subject",
+      "bodyPreview",
+      "replyTargetSummary",
+    ],
+  },
+  validate: (p) => ({
+    draftId: required(p, "draftId"),
+    fromMailboxLabel: required(p, "fromMailboxLabel"),
+    toSummary: required(p, "toSummary"),
+    ccSummary: (p.ccSummary as string) || "",
+    subject: required(p, "subject"),
+    bodyPreview: required(p, "bodyPreview"),
+    replyTargetSummary: required(p, "replyTargetSummary"),
+    attachmentsSummary: (p.attachmentsSummary as string) || "none",
+  }),
+  execute: async (p): Promise<AgentActionOutcome> =>
+    executeSendDraft(p.draftId as string, "reply"),
+};
+
+export const sendNewEmail: AgentAction = {
+  name: "sendNewEmail",
+  description:
+    "Send an already-drafted new email (from draftNewEmail). REQUIRES explicit human confirmation — this is the actual outbound send, irreversible once it succeeds. The draftId's persisted content is authoritative; the other parameters here exist only so the confirmation card can show the exact From/To/CC/Subject/attachments without a second lookup — they must exactly echo what draftNewEmail already reported, never a reinterpretation.",
+  permission: "email.send",
+  riskLevel: "high",
+  kind: "write",
+  destructive: true,
+  parameters: {
+    type: "object",
+    properties: {
+      draftId: {
+        type: "string",
+        description: "The draft id from draftNewEmail — required.",
+      },
+      fromMailboxLabel: {
+        type: "string",
+        description:
+          "Display-only: the sending mailbox address, as reported by draftNewEmail.",
+      },
+      toSummary: {
+        type: "string",
+        description:
+          "Display-only: recipient address(es), as reported by draftNewEmail.",
+      },
+      ccSummary: {
+        type: "string",
+        description: "Display-only: CC address(es), if any.",
+      },
+      subject: {
+        type: "string",
+        description: "Display-only: the subject, as reported by draftNewEmail.",
+      },
+      bodyPreview: {
+        type: "string",
+        description:
+          "Display-only: the exact body text, as reported by draftNewEmail — echoed verbatim, never summarized or reworded.",
+      },
+      attachmentsSummary: {
+        type: "string",
+        description: "Display-only: attachment count/names, if any.",
+      },
+    },
+    required: [
+      "draftId",
+      "fromMailboxLabel",
+      "toSummary",
+      "subject",
+      "bodyPreview",
+    ],
+  },
+  validate: (p) => ({
+    draftId: required(p, "draftId"),
+    fromMailboxLabel: required(p, "fromMailboxLabel"),
+    toSummary: required(p, "toSummary"),
+    ccSummary: (p.ccSummary as string) || "",
+    bodyPreview: required(p, "bodyPreview"),
+    subject: required(p, "subject"),
+    attachmentsSummary: (p.attachmentsSummary as string) || "none",
+  }),
+  execute: async (p): Promise<AgentActionOutcome> =>
+    executeSendDraft(p.draftId as string, "new"),
+};
+
+// ── Email Operational Alerts (Phase 7) ──────────────────────────────────
+// Detection/notification only — see database/20260907030000 (written,
+// NOT applied) and lib/emailAlertsApi.ts's own header. All three actions
+// below are kind:"read" — same reasoning as draftEmailReply/draftNewEmail
+// in Phase 5: creating, acknowledging, or resolving an alert has no
+// external side effect (no email sent, no ERP record touched, no
+// permission escalated), so none of them go through the write-
+// confirmation gate. That gate exists for consequential actions; an
+// internal bookkeeping row about what the Agent noticed is not one.
+const EMAIL_ALERT_ISSUE_TYPES = [
+  "delivery_delay",
+  "quantity_change",
+  "quality_rejection",
+  "po_change",
+  "invoice_po_mismatch",
+  "price_discrepancy",
+  "correction_revision",
+  "follow_up_reminder",
+  "duplicate",
+  "unanswered",
+  "ambiguous_match",
+  "other",
+] as const;
+const EMAIL_ALERT_SEVERITIES = ["critical", "high", "medium", "low"] as const;
+const EMAIL_ALERT_CONFIDENCES = [
+  "high_confidence",
+  "possible_match",
+  "ambiguous",
+  "no_match",
+] as const;
+
+function requireEnum<T extends string>(
+  p: Record<string, unknown>,
+  field: string,
+  allowed: readonly T[],
+): T {
+  const v = required(p, field);
+  if (!allowed.includes(v as T)) {
+    throw new Error(
+      `${field} must be one of: ${allowed.join(", ")} (got "${v}")`,
+    );
+  }
+  return v as T;
+}
+
+export const recordEmailAlert: AgentAction = {
+  name: "recordEmailAlert",
+  description:
+    "Persist one operational alert for an email you have already read and analyzed (via readEmailMessage + MATCHING/CONFLICT DETECTION). Only call this for a message that actually warrants attention — not every email needs one. If this message already has an alert (checked automatically by a unique constraint), the existing one is returned instead of a duplicate — this is what prevents repeat monitoring runs from re-notifying anyone. matchedRecordsJson must be a JSON array of {type,id,label,confidence} objects, confidence using the same four-way scale as everywhere else — never invent a record that MATCHING didn't actually verify.",
+  permission: "email.view",
+  riskLevel: "low",
+  kind: "read",
+  destructive: false,
+  parameters: {
+    type: "object",
+    properties: {
+      emailMessageId: {
+        type: "string",
+        description: "The email id, from searchEmails/readEmailMessage.",
+      },
+      issueType: {
+        type: "string",
+        description: `One of: ${EMAIL_ALERT_ISSUE_TYPES.join(", ")}.`,
+      },
+      severity: {
+        type: "string",
+        description: `One of: ${EMAIL_ALERT_SEVERITIES.join(", ")}.`,
+      },
+      confidence: {
+        type: "string",
+        description: `Overall confidence, one of: ${EMAIL_ALERT_CONFIDENCES.join(", ")}.`,
+      },
+      summary: {
+        type: "string",
+        description:
+          "Concise plain-language description of the detected issue.",
+      },
+      matchedRecordsJson: {
+        type: "string",
+        description:
+          'JSON array of {"type","id","label","confidence"} — the real ERP records identified, or "[]" if none.',
+      },
+      detailsJson: {
+        type: "string",
+        description:
+          'Optional JSON object of the actual quantities/amounts/dates compared (e.g. {"emailQty":25,"erpQty":10}) — only fields you actually have, or omit entirely.',
+      },
+      recommendedAction: {
+        type: "string",
+        description:
+          "Optional plain-language description of what a human could do next.",
+      },
+    },
+    required: [
+      "emailMessageId",
+      "issueType",
+      "severity",
+      "confidence",
+      "summary",
+    ],
+  },
+  validate: (p) => ({
+    emailMessageId: required(p, "emailMessageId"),
+    issueType: requireEnum(p, "issueType", EMAIL_ALERT_ISSUE_TYPES),
+    severity: requireEnum(p, "severity", EMAIL_ALERT_SEVERITIES),
+    confidence: requireEnum(p, "confidence", EMAIL_ALERT_CONFIDENCES),
+    summary: required(p, "summary"),
+    matchedRecordsJson: (p.matchedRecordsJson as string) || "[]",
+    detailsJson: (p.detailsJson as string) || "{}",
+    recommendedAction: (p.recommendedAction as string) || undefined,
+  }),
+  execute: async (p): Promise<AgentActionOutcome> => {
+    let matchedRecords: EmailAlertMatchedRecord[];
+    let details: Record<string, unknown>;
+    try {
+      const parsedRecords = JSON.parse(
+        (p.matchedRecordsJson as string) || "[]",
+      );
+      if (!Array.isArray(parsedRecords)) {
+        throw new Error(
+          'matchedRecordsJson must be a JSON array, e.g. [{"type":"customer","id":"...","label":"...","confidence":"high_confidence"}].',
+        );
+      }
+      matchedRecords = parsedRecords as EmailAlertMatchedRecord[];
+      const parsedDetails = JSON.parse((p.detailsJson as string) || "{}");
+      if (
+        typeof parsedDetails !== "object" ||
+        parsedDetails === null ||
+        Array.isArray(parsedDetails)
+      ) {
+        throw new Error("detailsJson must be a JSON object.");
+      }
+      details = parsedDetails;
+    } catch (err) {
+      return {
+        ok: false,
+        message: `Invalid JSON: ${err instanceof Error ? err.message : "could not parse matchedRecordsJson/detailsJson"}`,
+      };
+    }
+    // emailAccountId is deliberately NOT a model-supplied parameter —
+    // across a long multi-message scan the model can transpose digits
+    // between similar-looking UUIDs it's juggling (observed live during
+    // Phase 7 testing: several calls arrived with a corrupted account
+    // id, correctly rejected by the table's own foreign-key constraint).
+    // The message's own real account id is already known and
+    // unambiguous, so it's looked up here rather than trusted from the
+    // conversation — the same "never trust the model for an id you can
+    // resolve yourself" principle sendEmailReply/sendNewEmail already
+    // apply to their draftId's persisted content.
+    const messageResult = await getEmailMessage(p.emailMessageId as string);
+    if (messageResult.status !== "success" || !messageResult.data) {
+      return {
+        ok: false,
+        message: `Could not record alert: the referenced email (${messageResult.error ?? messageResult.status}) could not be re-verified.`,
+      };
+    }
+    const result = await createEmailAlert({
+      emailMessageId: p.emailMessageId as string,
+      emailAccountId: messageResult.data.emailAccountId,
+      issueType: p.issueType as EmailAlertIssueType,
+      severity: p.severity as EmailAlertSeverity,
+      confidence: p.confidence as EmailAlertConfidence,
+      summary: p.summary as string,
+      matchedRecords,
+      details,
+      recommendedAction: p.recommendedAction as string | undefined,
+    });
+    if (result.status !== "success" || !result.data) {
+      return {
+        ok: false,
+        message: `Could not record alert: ${result.error ?? result.status}`,
+      };
+    }
+    return {
+      ok: true,
+      message: result.data.alreadyExisted
+        ? `This message already had an alert recorded (id ${result.data.alert.id}) — not duplicated.`
+        : `Alert recorded (id ${result.data.alert.id}): ${p.severity} severity, ${p.confidence}.`,
+      data: {
+        alertId: result.data.alert.id,
+        alreadyExisted: result.data.alreadyExisted,
+      },
+    };
+  },
+};
+
+export const acknowledgeEmailAlert: AgentAction = {
+  name: "acknowledgeEmailAlert",
+  description:
+    "Mark an operational alert as acknowledged (a human has seen it) — a plain status toggle, no ERP or email side effect.",
+  permission: "email.view",
+  riskLevel: "low",
+  kind: "read",
+  destructive: false,
+  parameters: {
+    type: "object",
+    properties: {
+      alertId: { type: "string", description: "The alert id." },
+    },
+    required: ["alertId"],
+  },
+  validate: (p) => ({ alertId: required(p, "alertId") }),
+  execute: async ({ alertId }): Promise<AgentActionOutcome> => {
+    const result = await acknowledgeEmailAlertRemote(alertId as string);
+    if (result.status !== "success" || !result.data) {
+      return {
+        ok: false,
+        message: `Could not acknowledge alert: ${result.error ?? result.status}`,
+      };
+    }
+    return { ok: true, message: "Alert acknowledged.", data: { alertId } };
+  },
+};
+
+export const resolveEmailAlert: AgentAction = {
+  name: "resolveEmailAlert",
+  description:
+    "Mark an operational alert as resolved — a plain status toggle, no ERP or email side effect. Only do this when the user tells you the underlying issue is actually handled, or real ERP/email data you've checked genuinely shows it's resolved — never merely because the alert has existed for a while.",
+  permission: "email.view",
+  riskLevel: "low",
+  kind: "read",
+  destructive: false,
+  parameters: {
+    type: "object",
+    properties: {
+      alertId: { type: "string", description: "The alert id." },
+    },
+    required: ["alertId"],
+  },
+  validate: (p) => ({ alertId: required(p, "alertId") }),
+  execute: async ({ alertId }): Promise<AgentActionOutcome> => {
+    const result = await resolveEmailAlertRemote(alertId as string);
+    if (result.status !== "success" || !result.data) {
+      return {
+        ok: false,
+        message: `Could not resolve alert: ${result.error ?? result.status}`,
+      };
+    }
+    return { ok: true, message: "Alert resolved.", data: { alertId } };
+  },
+};
+
 export const AGENT_ACTIONS: Record<string, AgentAction> = {
   findCustomer,
   createCustomer,
@@ -4463,6 +5313,13 @@ export const AGENT_ACTIONS: Record<string, AgentAction> = {
   findTender,
   createTender,
   addTenderRequirement,
+  draftEmailReply,
+  draftNewEmail,
+  sendEmailReply,
+  sendNewEmail,
+  recordEmailAlert,
+  acknowledgeEmailAlert,
+  resolveEmailAlert,
 };
 
 /** The single execution gate every action call goes through: re-checks

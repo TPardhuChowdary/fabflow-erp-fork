@@ -243,6 +243,8 @@ const WRITE_ACTION_LABELS: Record<string, string> = {
   createBillableService: "Create billable service",
   recordMachineServiceUsage: "Record machine/service usage",
   createSalaryAdvance: "Record salary advance",
+  sendEmailReply: "Send email reply",
+  sendNewEmail: "Send new email",
 };
 
 function describePendingCall(call: PendingToolCall): {
@@ -576,6 +578,36 @@ function describePendingCall(call: PendingToolCall): {
         parts.push(`₹${Number(p.amount).toLocaleString("en-IN")}`);
       }
       parts.push(p.signatureData ? "signed" : "signature required");
+      break;
+    }
+    // Phase 5: these two are the only actions where the confirmation must
+    // show a full message envelope, not a one-line summary — recipient,
+    // sender mailbox, and (for a reply) the thread target are exactly the
+    // facts the approved design requires a human to see before the send
+    // is irreversible. Every value below comes straight from call.input —
+    // the display-only fields the model must echo verbatim from what
+    // draftEmailReply/draftNewEmail already reported — never recomputed
+    // or reinterpreted here.
+    case "sendEmailReply": {
+      parts.push("REPLY");
+      if (p.fromMailboxLabel) parts.push(`From: ${p.fromMailboxLabel}`);
+      if (p.toSummary) parts.push(`To: ${p.toSummary}`);
+      parts.push(`CC: ${p.ccSummary || "None"}`);
+      if (p.subject) parts.push(`Subject: "${p.subject}"`);
+      if (p.bodyPreview) parts.push(`Body: ${p.bodyPreview}`);
+      if (p.replyTargetSummary)
+        parts.push(`Replying to: ${p.replyTargetSummary}`);
+      parts.push(`Attachments: ${p.attachmentsSummary || "none"}`);
+      break;
+    }
+    case "sendNewEmail": {
+      parts.push("NEW EMAIL");
+      if (p.fromMailboxLabel) parts.push(`From: ${p.fromMailboxLabel}`);
+      if (p.toSummary) parts.push(`To: ${p.toSummary}`);
+      parts.push(`CC: ${p.ccSummary || "None"}`);
+      if (p.subject) parts.push(`Subject: "${p.subject}"`);
+      if (p.bodyPreview) parts.push(`Body: ${p.bodyPreview}`);
+      parts.push(`Attachments: ${p.attachmentsSummary || "none"}`);
       break;
     }
   }

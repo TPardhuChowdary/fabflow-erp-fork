@@ -309,6 +309,10 @@ export function JobCards() {
     document.body.appendChild(container);
     const root = createRoot(container);
     const docId = `job-card-print-${jc.id}`;
+    // Print Date requirement: the moment of printing, not the Job Card's
+    // own createdAt — computed here, once, right before rendering the
+    // print document, and never written back to `jc` or Supabase.
+    const printedAt = Date.now();
     flushSync(() => {
       root.render(
         <JobCardDocContent
@@ -317,6 +321,7 @@ export function JobCards() {
           projectLabel={projectLabel(jc.projectId)}
           stageLabel={stageName(jc.stageId) ?? null}
           settings={settings as unknown as Record<string, string>}
+          printedAt={printedAt}
         />,
       );
     });

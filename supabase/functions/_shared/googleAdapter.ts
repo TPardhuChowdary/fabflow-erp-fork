@@ -34,6 +34,16 @@ function isConfigured(): boolean {
   );
 }
 
+// Phase 9E — the exact scopes this adapter's own methods need, and no
+// more: gmail.readonly covers testConnection/listMessages/getAttachment
+// (all read-only Gmail API calls below); gmail.send covers sendMessage.
+// Nothing broader (e.g. gmail.modify, which would also allow deleting/
+// labeling) is requested, since nothing in this file ever does that.
+export const GOOGLE_OAUTH_SCOPES = [
+  "https://www.googleapis.com/auth/gmail.readonly",
+  "https://www.googleapis.com/auth/gmail.send",
+] as const;
+
 const NOT_CONFIGURED_ERROR =
   "Google OAuth is not configured on this FabFlow instance yet (missing GOOGLE_OAUTH_CLIENT_ID/GOOGLE_OAUTH_CLIENT_SECRET). Connect this mailbox using IMAP/SMTP with a Google App Password instead, or ask your FabFlow administrator to register the Google OAuth app.";
 
@@ -77,6 +87,69 @@ async function gmailFetch(
       Authorization: `Bearer ${accessToken}`,
     },
   });
+}
+
+export interface GmailPart {
+  mimeType?: string;
+  filename?: string;
+  headers?: Array<{ name: string; value: string }>;
+  body?: { attachmentId?: string; size?: number; data?: string };
+  parts?: GmailPart[];
+}
+
+function decodeBase64Url(data: string): string {
+  const base64 = data.replace(/-/g, "+").replace(/_/g, "/");
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder("utf-8").decode(bytes);
+}
+
+// Phase 9E fix: Gmail's format=full response is a MIME part TREE, not a
+// flat body — a plain message has body.data directly on the root part;
+// a multipart message (the common case, e.g. multipart/alternative
+// wrapping text/plain + text/html, itself possibly wrapped in
+// multipart/mixed alongside attachments) nests arbitrarily deep. This
+// walks it once, recursively, taking the FIRST text/plain and first
+// text/html part found (matching the conventional single-body-per-type
+// structure every real mail client produces) and collecting every real
+// attachment's metadata — never its bytes, which still come from
+// getAttachment on demand, exactly as before this fix. A part counts as
+// an attachment when it carries a filename (Gmail's own convention;
+// inline body parts never have one) AND an attachmentId (a part with a
+// filename but no attachmentId is fully inlined in this same response
+// and not something getAttachment could fetch separately anyway).
+export function extractGmailContent(payload: GmailPart | undefined): {
+  bodyText?: string;
+  bodyHtml?: string;
+  attachments: EmailAdapterMessage["attachments"];
+} {
+  let bodyText: string | undefined;
+  let bodyHtml: string | undefined;
+  const attachments: EmailAdapterMessage["attachments"] = [];
+
+  function walk(part: GmailPart | undefined) {
+    if (!part) return;
+    if (part.filename) {
+      if (part.body?.attachmentId) {
+        attachments.push({
+          id: part.body.attachmentId,
+          filename: part.filename,
+          mimeType: part.mimeType,
+          sizeBytes: part.body.size,
+        });
+      }
+      return;
+    }
+    if (part.mimeType === "text/plain" && part.body?.data && bodyText === undefined) {
+      bodyText = decodeBase64Url(part.body.data);
+    } else if (part.mimeType === "text/html" && part.body?.data && bodyHtml === undefined) {
+      bodyHtml = decodeBase64Url(part.body.data);
+    }
+    for (const child of part.parts ?? []) walk(child);
+  }
+  walk(payload);
+  return { bodyText, bodyHtml, attachments };
 }
 
 export const googleAdapter: EmailProviderAdapter = {
@@ -127,23 +200,28 @@ export const googleAdapter: EmailProviderAdapter = {
     };
     const messages: EmailAdapterMessage[] = [];
     for (const ref of list.messages ?? []) {
-      const detailRes = await gmailFetch(
-        `/messages/${ref.id}?format=metadata&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Cc&metadataHeaders=Subject&metadataHeaders=Date`,
-        token,
-      );
+      // Phase 9E fix: format=full (not metadata) — the previous
+      // metadata-only fetch never returned a body at all (a real,
+      // disclosed gap the Phase 9D audit flagged). One fetch per message
+      // either way (same request-count shape as before), just a richer
+      // response; getGmailPart below walks its MIME tree for text/plain,
+      // text/html, and attachment metadata (never their bytes — those
+      // still come from getAttachment on demand, same as before).
+      const detailRes = await gmailFetch(`/messages/${ref.id}?format=full`, token);
       if (!detailRes.ok) continue; // one bad message must not fail the batch
       const detail = (await detailRes.json()) as {
         id: string;
         threadId: string;
         snippet?: string;
         labelIds?: string[];
-        payload?: { headers?: Array<{ name: string; value: string }>; parts?: unknown[] };
+        payload?: GmailPart;
         internalDate?: string;
       };
       const header = (name: string) =>
         detail.payload?.headers?.find(
           (h) => h.name.toLowerCase() === name.toLowerCase(),
         )?.value;
+      const { bodyText, bodyHtml, attachments } = extractGmailContent(detail.payload);
       messages.push({
         providerMessageId: detail.id,
         providerThreadId: detail.threadId,
@@ -152,26 +230,14 @@ export const googleAdapter: EmailProviderAdapter = {
         toAddresses: (header("To") ?? "").split(",").map((s) => s.trim()).filter(Boolean),
         ccAddresses: (header("Cc") ?? "").split(",").map((s) => s.trim()).filter(Boolean),
         subject: header("Subject"),
-        // KNOWN GAP (tracked, not silently swallowed): unlike Microsoft
-        // Graph, Gmail's list/metadata call never includes the body —
-        // getting it requires a second format=full fetch per message plus
-        // a base64url multipart walk. Left unbuilt this pass because this
-        // adapter is inert until GOOGLE_OAUTH_CLIENT_ID/SECRET exist (see
-        // isConfigured() above), so there is no live mailbox to build or
-        // verify this against yet. Build this together with the OAuth
-        // wiring itself, not speculatively now — see the Phase 1B
-        // deployment report's "remains unverified" section.
-        bodyText: undefined,
-        bodyHtml: undefined,
+        bodyText,
+        bodyHtml,
         sentAt: detail.internalDate
           ? new Date(Number(detail.internalDate)).toISOString()
           : undefined,
         isRead: !(detail.labelIds ?? []).includes("UNREAD"),
         folder: (detail.labelIds ?? []).includes("SENT") ? "sent" : "inbox",
-        attachments: [], // attachment listing requires the full message
-        // format=full payload — deferred to the on-demand full-message
-        // fetch, not pulled for every message in a list call (cost
-        // control, per the plan's rate-limiting principle).
+        attachments,
       });
     }
     return { messages, nextCursor: list.nextPageToken ?? null };

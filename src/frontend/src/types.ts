@@ -564,6 +564,7 @@ export type Page =
   | "quality"
   | "delivery-challans"
   | "invoices"
+  | "eway-bills"
   | "payments"
   | "payables"
   | "customer-history"
@@ -646,6 +647,12 @@ export interface EmailMessage {
   emailAccountId: string;
   providerMessageId: string;
   providerThreadId?: string;
+  /** Phase 5 Email Operations — the real RFC822 Message-ID header, the
+   * only value a reply's In-Reply-To/References may correctly reference.
+   * Undefined for messages synced before this was captured, or from an
+   * adapter that doesn't (yet) report it — never fabricate a reply
+   * target when this is absent. */
+  providerInternetMessageId?: string;
   fromAddress: string;
   fromName?: string;
   toAddresses: string[];
@@ -675,6 +682,108 @@ export interface EmailAttachment {
   sizeBytes?: number;
   storagePath: string;
   processingStatus: EmailAttachmentProcessingStatus;
+}
+
+// Phase 5 Email Operations (database/20260907010000_email_outbound_sends.sql
+// — written, NOT applied). A reference into an EXISTING email_attachments
+// row, never a raw Storage path — the send path re-verifies attachmentId
+// against that table (organization-scoped) and reads bytes itself; the
+// other fields here are a denormalized snapshot for confirmation display
+// only. See emailAdapter.ts's SendMessageInput comment for why no raw
+// path is ever accepted.
+export interface EmailOutboundAttachmentRef {
+  type: "email_attachment";
+  attachmentId: string;
+  filename: string;
+  mimeType?: string;
+  sizeBytes?: number;
+}
+
+export type EmailOutboundSendStatus =
+  | "draft"
+  | "confirmed"
+  | "sending"
+  | "sent"
+  | "failed_before_provider"
+  | "provider_rejected"
+  | "unknown";
+
+export interface EmailOutboundSend {
+  id: string;
+  emailAccountId: string;
+  kind: "reply" | "new";
+  replyToMessageId?: string;
+  toAddresses: string[];
+  ccAddresses: string[];
+  subject: string;
+  bodyText: string;
+  bodyHtml?: string;
+  attachments: EmailOutboundAttachmentRef[];
+  status: EmailOutboundSendStatus;
+  idempotencyKey?: string;
+  providerMessageId?: string;
+  lastError?: string;
+  confirmedAt?: number;
+  sendingAt?: number;
+  sentAt?: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+// ── Email Operational Alerts (Phase 7) ──────────────────────────
+// Detection/notification only — see database/20260907030000. Nothing
+// that reads or writes this type may perform, or result from, an
+// autonomous ERP mutation, an outbound email, or a permission bypass.
+
+export type EmailAlertIssueType =
+  | "delivery_delay"
+  | "quantity_change"
+  | "quality_rejection"
+  | "po_change"
+  | "invoice_po_mismatch"
+  | "price_discrepancy"
+  | "correction_revision"
+  | "follow_up_reminder"
+  | "duplicate"
+  | "unanswered"
+  | "ambiguous_match"
+  | "other";
+
+export type EmailAlertSeverity = "critical" | "high" | "medium" | "low";
+
+// Same four-way scale as Phase 6's MATCHING confidence taxonomy
+// (agent/llm/orchestrator.ts) — never a numeric score.
+export type EmailAlertConfidence =
+  | "high_confidence"
+  | "possible_match"
+  | "ambiguous"
+  | "no_match";
+
+export type EmailAlertStatus = "new" | "acknowledged" | "resolved";
+
+export interface EmailAlertMatchedRecord {
+  type: string;
+  id: string;
+  label: string;
+  confidence: EmailAlertConfidence;
+}
+
+export interface EmailOperationalAlert {
+  id: string;
+  emailMessageId: string;
+  emailAccountId: string;
+  issueType: EmailAlertIssueType;
+  severity: EmailAlertSeverity;
+  confidence: EmailAlertConfidence;
+  summary: string;
+  matchedRecords: EmailAlertMatchedRecord[];
+  details: Record<string, unknown>;
+  recommendedAction?: string;
+  status: EmailAlertStatus;
+  acknowledgedAt?: number;
+  resolvedAt?: number;
+  createdAt: number;
+  updatedAt: number;
 }
 
 // ── Project Tracking Types ──────────────────────────────────────

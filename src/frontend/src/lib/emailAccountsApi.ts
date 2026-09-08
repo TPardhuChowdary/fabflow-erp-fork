@@ -199,6 +199,19 @@ export async function connectImapSmtpAccount(
   return { status: "success", data: rowToEmailAccount(result.data) };
 }
 
+/** Phase 9E — starts the Google OAuth authorization-code flow: asks
+ * email-oauth-start for a one-time authorization URL (bound server-side
+ * to this user/org/emailAddress), for the caller to navigate the browser
+ * to. Connection itself completes later, out-of-band, when Google
+ * redirects to email-oauth-callback — this function never sees a token. */
+export async function startGoogleOAuth(
+  emailAddress: string,
+): Promise<WriteResult<{ authorizeUrl: string }>> {
+  return invokeEmailFunction<{ authorizeUrl: string }>("email-oauth-start", {
+    emailAddress,
+  });
+}
+
 export async function syncEmailAccount(
   emailAccountId: string,
 ): Promise<WriteResult<{ newMessages: number }>> {

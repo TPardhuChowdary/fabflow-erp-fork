@@ -18,6 +18,7 @@ import {
 import {
   type ConnectImapSmtpInput,
   connectImapSmtpAccount,
+  startGoogleOAuth,
 } from "@/lib/emailAccountsApi";
 // FabFlow Email Integration — the "address → detect → connect" flow.
 // Product requirement: manual IMAP/SMTP server entry is NOT the normal
@@ -107,7 +108,13 @@ export function ConnectEmailAccountDialog({
     setDetection(result);
     setManual((m) => ({ ...m, username: trimmed }));
     setKnownCreds({ username: trimmed, password: "" });
-    if (result.provider === "google" || result.provider === "microsoft") {
+    // Phase 9F — Google still gets its own "oauth" step (OAuth is the
+    // preferred, working path there; that step now also offers the
+    // pre-filled IMAP/SMTP fallback below instead of a blank manual form).
+    // Microsoft has no OAuth flow at all yet, so it now routes straight to
+    // "known" — the same pre-filled password-only step Hostinger/Zoho
+    // already use — rather than a disabled OAuth button leading nowhere.
+    if (result.provider === "google") {
       setStep("oauth");
     } else if (result.knownProvider) {
       setStep("known");
@@ -115,6 +122,24 @@ export function ConnectEmailAccountDialog({
       setManualBackTarget("address");
       setStep("manual");
     }
+  };
+
+  // Phase 9E — Google only; Microsoft's authorization-code flow isn't
+  // implemented yet, so its button stays disabled below. No separate
+  // "is OAuth configured" check endpoint: email-oauth-start itself
+  // returns a clear 501/error when GOOGLE_OAUTH_CLIENT_ID/SECRET aren't
+  // set, which surfaces here as the same toast + fall-back-to-manual
+  // path that already existed for "not configured yet".
+  const handleGoogleOAuth = async () => {
+    const trimmed = emailAddress.trim();
+    setBusy(true);
+    const result = await startGoogleOAuth(trimmed);
+    setBusy(false);
+    if (result.status !== "success" || !result.data) {
+      toast.error(result.error || "Could not start Google sign-in.");
+      return;
+    }
+    window.location.href = result.data.authorizeUrl;
   };
 
   const handleConnectKnown = async () => {
@@ -235,43 +260,48 @@ export function ConnectEmailAccountDialog({
         )}
 
         {step === "oauth" && detection && (
+          // Reached for Google only (see handleDetect) — Microsoft has no
+          // OAuth flow yet and routes straight to the "known" step instead.
           <div className="space-y-4">
             <div className="rounded-lg border border-border bg-muted/30 p-3 space-y-1">
               <p className="text-xs text-muted-foreground uppercase tracking-wide">
                 Provider detected
               </p>
-              <p className="text-sm font-semibold">
-                {detection.provider === "google"
-                  ? "Google Workspace / Gmail"
-                  : "Microsoft 365"}
-              </p>
+              <p className="text-sm font-semibold">Google Workspace / Gmail</p>
               <p className="text-xs text-muted-foreground">
                 {detection.reason}
               </p>
             </div>
-            <div className="flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
-              <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-              <span>
-                {detection.provider === "google" ? "Google" : "Microsoft"} OAuth
-                is not configured on this FabFlow instance yet. You can still
-                connect this mailbox using IMAP/SMTP with an app password below.
-              </span>
-            </div>
             <DialogFooter className="flex-col sm:flex-col gap-2 items-stretch">
               <Button
-                disabled
-                title="Not configured yet"
+                disabled={busy}
+                onClick={() => void handleGoogleOAuth()}
                 data-ocid="email.connect_dialog.oauth_button"
               >
-                Continue with{" "}
-                {detection.provider === "google" ? "Google" : "Microsoft"}
+                {busy && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
+                Continue with Google
               </Button>
+              {detection.knownProvider && (
+                <Button
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => setStep("known")}
+                  data-ocid="email.connect_dialog.oauth_app_password_button"
+                >
+                  Use App Password instead (IMAP/SMTP)
+                </Button>
+              )}
               <Button
-                variant="outline"
-                onClick={() => {
-                  setManualBackTarget("address");
-                  setStep("manual");
-                }}
+                variant="ghost"
+                size="sm"
+                onClick={
+                  detection.knownProvider
+                    ? handleUseAdvanced
+                    : () => {
+                        setManualBackTarget("address");
+                        setStep("manual");
+                      }
+                }
               >
                 Configure manually (IMAP/SMTP)
               </Button>
@@ -315,12 +345,19 @@ export function ConnectEmailAccountDialog({
                 data-ocid="email.connect_dialog.known_password_input"
               />
             </div>
-            <p className="text-xs text-muted-foreground">
-              FabFlow already knows {detection.knownProvider.label}'s mail
-              server settings — you only need your mailbox password. Sent once,
-              directly to FabFlow's server, encrypted, and never stored in your
-              browser.
-            </p>
+            {detection.knownProvider.credentialHint ? (
+              <div className="flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                <span>{detection.knownProvider.credentialHint}</span>
+              </div>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                FabFlow already knows {detection.knownProvider.label}'s mail
+                server settings — you only need your mailbox password. Sent
+                once, directly to FabFlow's server, encrypted, and never stored
+                in your browser.
+              </p>
+            )}
             <DialogFooter className="flex-col sm:flex-col gap-2 items-stretch">
               <Button
                 onClick={() => void handleConnectKnown()}

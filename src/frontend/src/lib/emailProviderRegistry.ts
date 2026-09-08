@@ -18,6 +18,15 @@
 // live-tested against a real Zoho mailbox this session; if it ever proves
 // wrong, worst case is a failed testConnection() and a fallback to
 // "Advanced / Custom IMAP configuration", never a silent bad connection.
+//
+// Phase 9F — the gmail/microsoft365 entries are an IMAP/SMTP FALLBACK for
+// when OAuth isn't used (Microsoft has no OAuth flow yet at all; Google's
+// OAuth is preferred but a user may still want an app-password path).
+// Their mxSuffixes are deliberately identical to the ones
+// email-detect-provider/index.ts already uses to recognize "google"/
+// "microsoft" — reusing matchKnownProvider() against those same suffixes
+// is what lets emailProviderDetection.ts attach these without a second
+// detection system (see that file's own comment).
 
 import type { EmailEncryption } from "@/types";
 
@@ -38,6 +47,11 @@ export interface KnownProviderEntry {
    * records, never against the domain name itself. */
   mxSuffixes: string[];
   config: KnownProviderConfig;
+  /** Optional credential caveat shown instead of the generic "you only
+   * need your mailbox password" copy — set when a provider's IMAP/SMTP
+   * access genuinely doesn't accept the account's normal password (e.g.
+   * Gmail requires an App Password once 2-Step Verification is on). */
+  credentialHint?: string;
 }
 
 export const KNOWN_PROVIDERS: KnownProviderEntry[] = [
@@ -67,6 +81,34 @@ export const KNOWN_PROVIDERS: KnownProviderEntry[] = [
       smtpEncryption: "ssl",
     },
   },
+  {
+    id: "gmail",
+    label: "Gmail / Google Workspace",
+    mxSuffixes: ["google.com", "googlemail.com"],
+    config: {
+      imapHost: "imap.gmail.com",
+      imapPort: 993,
+      imapEncryption: "ssl",
+      smtpHost: "smtp.gmail.com",
+      smtpPort: 587,
+      smtpEncryption: "starttls",
+    },
+    credentialHint:
+      "Gmail requires an App Password, not your normal Google password. Turn on 2-Step Verification, then generate one at myaccount.google.com/apppasswords.",
+  },
+  {
+    id: "microsoft365",
+    label: "Microsoft 365 / Outlook",
+    mxSuffixes: ["outlook.com", "protection.outlook.com"],
+    config: {
+      imapHost: "outlook.office365.com",
+      imapPort: 993,
+      imapEncryption: "ssl",
+      smtpHost: "smtp.office365.com",
+      smtpPort: 587,
+      smtpEncryption: "starttls",
+    },
+  },
 ];
 
 /** Matches a domain's real MX hostnames against the registry. Returns null
@@ -82,4 +124,14 @@ export function matchKnownProvider(
       lower.some((h) => p.mxSuffixes.some((s) => h.endsWith(s))),
     ) ?? null
   );
+}
+
+/** Looks up a registry entry by its own id — used for the two consumer-
+ * webmail domains (gmail.com, outlook.com, ...) that detectProviderLocal
+ * recognizes WITHOUT an MX lookup, so there are no real mxHosts to match
+ * against yet. An exact hardcoded consumer-domain match is at least as
+ * certain as an MX-suffix match, so attaching the config this way isn't a
+ * weaker guess — it's the same registry, addressed the other way. */
+export function getKnownProviderById(id: string): KnownProviderEntry | null {
+  return KNOWN_PROVIDERS.find((p) => p.id === id) ?? null;
 }

@@ -46,6 +46,21 @@ const colorMap: Record<string, string> = {
   Unpaid: "bg-destructive/10 text-destructive border-destructive/30",
   PartiallyPaid: "bg-warning/15 text-warning border-warning/30",
   Paid: "bg-success/10 text-success border-success/30",
+  // Email Outbound Send (Phase 5) — Draft/Sent/Confirmed/Rejected reuse
+  // the entries above (each status list renders standalone, so token
+  // reuse never puts two same-colored badges side by side).
+  Sending: "bg-warning/15 text-warning border-warning/30",
+  Failed: "bg-destructive/10 text-destructive border-destructive/30",
+  Unknown: "bg-warning/15 text-warning border-warning/30",
+  // Email Operational Alerts (Phase 7) — severity is its own scale, not
+  // to be confused with any status above (a severity list never renders
+  // beside a status list, so token reuse is safe here too).
+  Critical: "bg-destructive/10 text-destructive border-destructive/30",
+  High: "bg-warning/15 text-warning border-warning/30",
+  Medium: "bg-info/10 text-info border-info/30",
+  Low: "bg-muted text-muted-foreground border-border",
+  Acknowledged: "bg-info/10 text-info border-info/30",
+  Resolved: "bg-success/10 text-success border-success/30",
 };
 
 export function StatusBadge({ status }: { status: string }) {

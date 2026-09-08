@@ -9,7 +9,10 @@ import { updateInvoiceEwayBillRemote } from "../lib/invoicesApi";
 import { canEdit } from "../permissions";
 import { useStore } from "../store";
 
-const EWAY_BILL_THRESHOLD = 50000;
+// Exported so any other view that needs the same ₹50,000 rule (e.g. the
+// central E-Way Bills repository's "Missing" filter) imports this one
+// constant instead of hardcoding the number a second time.
+export const EWAY_BILL_THRESHOLD = 50000;
 
 interface Props {
   /** undefined in the New-Invoice create form (no row exists yet to

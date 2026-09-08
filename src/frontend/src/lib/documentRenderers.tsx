@@ -1,6 +1,5 @@
 import {
   formatJobCardDuration,
-  formatJobCardTimestamp,
   getJobCardActiveSeconds,
 } from "../hooks/useJobCardTimer";
 /**
@@ -1969,12 +1968,19 @@ export function ChallanDocContent({
 //
 // Reuses the exact same existing JobCard row this whole feature is built
 // on — no second Job Card record, no new ledger, no new persistence.
-// Start/End/Active Time are read straight from the same persisted
-// fields and the same formatJobCardTimestamp/getJobCardActiveSeconds
-// helpers the in-app View dialog uses (hooks/useJobCardTimer.ts) — never
-// re-derived or fabricated here. A NotStarted/InProgress/OnHold card
-// correctly shows "Not started yet"/"Not completed yet" rather than a
-// blank or invented date, matching the in-app dialog exactly.
+// Active Time is read straight from the same persisted fields and the
+// same getJobCardActiveSeconds helper the in-app View dialog uses
+// (hooks/useJobCardTimer.ts) — never re-derived or fabricated here.
+//
+// The printed sheet is a blank shop-floor manual record, not a mirror of
+// the digital Job Card's own live progress: Start Time, Targeted End
+// Time, Completed/Rejected/Rework quantities, remarks and both
+// signatures are always printed blank (never pre-filled from `jobCard`,
+// see each block's own comment below) — a supervisor fills these in by
+// hand, then transcribes them back into the digital record. Only
+// Project/Employee/Operation/Production Stage/Expected Quantity/Status
+// and the new "Printed On" timestamp are auto-populated, since those are
+// identifying information rather than the physical work being recorded.
 
 // Fixed, literal row/cell identifiers for the blank manual-record table
 // below — genuinely static (not derived from a map index), matching the
@@ -2000,6 +2006,24 @@ interface JobCardDocProps {
    * it rather than silently blank. */
   stageLabel: string | null;
   settings: Record<string, string>;
+  /** The moment this print was generated (client clock, `Date.now()` at
+   * render time) — shown as "Printed On" so a supervisor can tell how
+   * fresh a physical sheet is. Deliberately NOT the Job Card's own
+   * createdAt, and never persisted anywhere (see handlePrintJobCard's own
+   * comment) — a value the caller computes fresh per print, not a field
+   * read off `jobCard`. */
+  printedAt: number;
+}
+
+function formatPrintedOn(ms: number): string {
+  return new Date(ms).toLocaleString("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  });
 }
 
 const JOB_CARD_LABEL_STYLE: React.CSSProperties = {
@@ -2017,17 +2041,8 @@ export function JobCardDocContent({
   projectLabel,
   stageLabel,
   settings,
+  printedAt,
 }: JobCardDocProps) {
-  const remainingQty = Math.max(
-    jobCard.expectedQuantity - jobCard.actualCompletedQty,
-    0,
-  );
-  const startDisplay = jobCard.startTime
-    ? formatJobCardTimestamp(jobCard.startTime)
-    : "Not started yet";
-  const endDisplay = jobCard.endTime
-    ? formatJobCardTimestamp(jobCard.endTime)
-    : "Not completed yet";
   const activeTimeDisplay = formatJobCardDuration(
     getJobCardActiveSeconds(jobCard),
   );
@@ -2040,8 +2055,8 @@ export function JobCardDocContent({
           display: "flex",
           justifyContent: "space-between",
           alignItems: "flex-start",
-          borderBottom: "3px solid #1a1a1a",
-          paddingBottom: "14px",
+          borderBottom: "2px solid #1a1a1a",
+          paddingBottom: "12px",
           marginBottom: "18px",
         }}
       >
@@ -2051,14 +2066,19 @@ export function JobCardDocContent({
               src={settings.companyLogo}
               alt="logo"
               style={{
-                maxHeight: "64px",
-                maxWidth: "130px",
+                maxHeight: "60px",
+                maxWidth: "120px",
                 objectFit: "contain",
               }}
             />
           )}
           <div>
-            <div style={{ fontSize: "22px", fontWeight: 800, color: "#111" }}>
+            {/* Same settings.companyName/companyLogo source Invoice's own
+                header reads (InvoicePrintView.tsx / InvoiceDocContent
+                above) — falls back to "FABFLOW" only when Company Profile
+                is genuinely unset, same as Invoice falls back to "YOUR
+                COMPANY NAME". Not a hardcoded product-branded header. */}
+            <div style={{ fontSize: "20px", fontWeight: 800, color: "#111" }}>
               {settings.companyName || "FABFLOW"}
             </div>
             {settings.companyAddress && (
@@ -2089,6 +2109,13 @@ export function JobCardDocContent({
           </div>
           <div style={{ fontSize: "16px", fontWeight: 700, color: "#333" }}>
             {jobCard.jobNo}
+          </div>
+          {/* Printed On — computed by the caller at print-generation time
+              (client clock), never the Job Card's own createdAt and
+              never written back to the Job Card. Same placement pattern
+              as Invoice's own No/Date block. */}
+          <div style={{ fontSize: "11px", color: "#444", marginTop: "4px" }}>
+            <strong>Printed On:</strong> {formatPrintedOn(printedAt)}
           </div>
         </div>
       </div>
@@ -2142,7 +2169,14 @@ export function JobCardDocContent({
         </div>
       </div>
 
-      {/* QUANTITY */}
+      {/* QUANTITY — only Expected comes from the digital Job Card
+          (requirement: it must stay auto-populated). Completed/Rejected/
+          Rework are always printed blank for the shop floor to fill in
+          by hand and later transcribe back into the digital record —
+          never pre-filled from jobCard.actualCompletedQty/rejectedQty/
+          reworkQty, even though those fields already hold real values
+          in the system. "Remaining" was dropped since it was only ever
+          derived from the (now-blank) completed quantity. */}
       <div style={{ marginBottom: "16px" }}>
         <div style={{ ...JOB_CARD_LABEL_STYLE, marginBottom: "8px" }}>
           Quantity
@@ -2150,37 +2184,45 @@ export function JobCardDocContent({
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(5, 1fr)",
+            gridTemplateColumns: "repeat(4, 1fr)",
             border: "1px solid #999",
             borderRadius: "4px",
             overflow: "hidden",
           }}
         >
-          {[
-            ["Expected", jobCard.expectedQuantity],
-            ["Completed", jobCard.actualCompletedQty],
-            ["Rejected", jobCard.rejectedQty],
-            ["Rework", jobCard.reworkQty],
-            ["Remaining", remainingQty],
-          ].map(([label, value], i) => (
+          <div style={{ padding: "10px 8px", textAlign: "center" }}>
+            <div style={{ fontSize: "10px", color: "#777" }}>Expected</div>
+            <div style={{ fontSize: "20px", fontWeight: 800, color: "#111" }}>
+              {jobCard.expectedQuantity}
+            </div>
+          </div>
+          {["Completed", "Rejected", "Rework"].map((label) => (
             <div
               key={label}
               style={{
                 padding: "10px 8px",
                 textAlign: "center",
-                borderLeft: i > 0 ? "1px solid #ddd" : undefined,
+                borderLeft: "1px solid #ddd",
               }}
             >
               <div style={{ fontSize: "10px", color: "#777" }}>{label}</div>
-              <div style={{ fontSize: "20px", fontWeight: 800, color: "#111" }}>
-                {value}
-              </div>
+              <div
+                style={{
+                  borderBottom: "1px solid #555",
+                  height: "22px",
+                  marginTop: "4px",
+                }}
+              />
             </div>
           ))}
         </div>
       </div>
 
-      {/* TIME + STATUS */}
+      {/* TIME + STATUS — Status and Active Time are read straight off the
+          digital record (identifying/system information). Start Time and
+          Targeted End Time are always printed blank: they are the
+          shop-floor's own manual fields, never pre-filled from
+          jobCard.startTime/endTime. */}
       <div
         style={{
           display: "grid",
@@ -2192,12 +2234,14 @@ export function JobCardDocContent({
           fontSize: "12px",
         }}
       >
-        {[
-          ["Start Date & Time", startDisplay],
-          ["End Date & Time", endDisplay],
-          ["Active Time", activeTimeDisplay],
-          ["Status", JOB_CARD_STATUS_LABEL[jobCard.status]],
-        ].map(([label, value], i) => (
+        {(
+          [
+            ["Start Time", null],
+            ["Targeted End Time", null],
+            ["Active Time", activeTimeDisplay],
+            ["Status", JOB_CARD_STATUS_LABEL[jobCard.status]],
+          ] as const
+        ).map(([label, value], i) => (
           <div
             key={label}
             style={{
@@ -2206,7 +2250,17 @@ export function JobCardDocContent({
             }}
           >
             <div style={{ fontSize: "10px", color: "#777" }}>{label}</div>
-            <div style={{ fontWeight: 700, color: "#111" }}>{value}</div>
+            {value === null ? (
+              <div
+                style={{
+                  borderBottom: "1px solid #555",
+                  height: "18px",
+                  marginTop: "4px",
+                }}
+              />
+            ) : (
+              <div style={{ fontWeight: 700, color: "#111" }}>{value}</div>
+            )}
           </div>
         ))}
       </div>

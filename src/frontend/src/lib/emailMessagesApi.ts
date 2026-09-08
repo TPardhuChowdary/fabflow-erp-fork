@@ -35,6 +35,7 @@ interface EmailMessageRow {
   email_account_id: string;
   provider_message_id: string;
   provider_thread_id: string | null;
+  provider_internet_message_id: string | null;
   from_address: string;
   from_name: string | null;
   to_addresses: string[] | null;
@@ -55,6 +56,7 @@ function rowToEmailMessage(row: EmailMessageRow): EmailMessage {
     emailAccountId: row.email_account_id,
     providerMessageId: row.provider_message_id,
     providerThreadId: row.provider_thread_id ?? undefined,
+    providerInternetMessageId: row.provider_internet_message_id ?? undefined,
     fromAddress: row.from_address,
     fromName: row.from_name ?? undefined,
     toAddresses: row.to_addresses ?? [],
@@ -75,6 +77,7 @@ function rowToEmailMessage(row: EmailMessageRow): EmailMessage {
 // selects the full column set for the detail view.
 const EMAIL_MESSAGE_LIST_COLUMNS =
   "id, email_account_id, provider_message_id, provider_thread_id, " +
+  "provider_internet_message_id, " +
   "from_address, from_name, to_addresses, cc_addresses, subject, " +
   "snippet, sent_at, is_read, folder, has_attachments";
 const EMAIL_MESSAGE_FULL_COLUMNS = `${EMAIL_MESSAGE_LIST_COLUMNS}, body_text, body_html`;
@@ -157,8 +160,16 @@ export async function listEmailMessages(
   if (filter.hasAttachmentsOnly) query = query.eq("has_attachments", true);
   if (filter.searchText?.trim()) {
     const term = `%${filter.searchText.trim()}%`;
+    // body_text is filterable here even though EMAIL_MESSAGE_LIST_COLUMNS
+    // doesn't select it back (PostgREST filters operate on the underlying
+    // table regardless of the select list) — added because a reference
+    // number (a PO/invoice number, say) is often only in the body, never
+    // the subject/snippet, and both the Email Center search box and the
+    // Agent's searchEmails tool (agent/queries.ts) share this one function;
+    // widening it here benefits both, and is strictly more permissive than
+    // before (never excludes a previously-matching message).
     query = query.or(
-      `subject.ilike.${term},from_address.ilike.${term},from_name.ilike.${term},snippet.ilike.${term}`,
+      `subject.ilike.${term},from_address.ilike.${term},from_name.ilike.${term},snippet.ilike.${term},body_text.ilike.${term}`,
     );
   }
   const { data, error } = await query;

@@ -28,6 +28,7 @@ import { Dies } from "./pages/Dies";
 import { EmailCenter } from "./pages/EmailCenter";
 import { EmployeeDetail } from "./pages/EmployeeDetail";
 import { Employees } from "./pages/Employees";
+import { EwayBills } from "./pages/EwayBills";
 import { ExportEngine } from "./pages/ExportEngine";
 import { Inventory } from "./pages/Inventory";
 import { Invoices } from "./pages/Invoices";
@@ -179,7 +180,7 @@ function AppInner() {
       setModuleNavContext(null);
     }
   }, [page, moduleNavContext]);
-  const { customers, tenders } = useStore();
+  const { customers, tenders, invoices } = useStore();
 
   if (isInitializing) {
     return (
@@ -411,6 +412,18 @@ function AppInner() {
         return <DeliveryChallans />;
       case "invoices":
         return <Invoices />;
+      case "eway-bills":
+        return (
+          <EwayBills
+            onViewInvoice={(invoiceId) => {
+              // Reuses the app-level InvoicePrintView dialog wired below
+              // (selectedInvoice/setSelectedInvoice) — no second invoice
+              // viewer is created for this page.
+              const inv = invoices.find((i) => i.id === invoiceId);
+              if (inv) setSelectedInvoice(inv);
+            }}
+          />
+        );
       case "payments":
         if (!canView(currentUser, "payments")) return accessDenied;
         return <Payments />;

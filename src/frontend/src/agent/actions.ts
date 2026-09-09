@@ -19,7 +19,7 @@ import {
   computeNextCpoNumber,
   createCompanyPORemote,
 } from "@/lib/companyPosApi";
-import { createCustomerRemote } from "@/lib/customersApi";
+import { createCustomerRemote, updateCustomerRemote } from "@/lib/customersApi";
 import {
   computeNextDcNumber,
   createDeliveryChallanRemote,
@@ -122,6 +122,7 @@ import type {
   AgentAction,
   AgentActionContext,
   AgentActionOutcome,
+  ToolParameterSchema,
 } from "./types";
 
 const PAYMENT_MODES: PaymentMode[] = ["Cash", "Cheque", "NEFT", "RTGS", "UPI"];
@@ -180,10 +181,215 @@ export const findCustomer: AgentAction = {
   },
 };
 
+// ── Customer field-parity helpers ───────────────────────────────────────
+//
+// The real Customer model (types.ts) and its Supabase-backed write path
+// (customersApi.ts) is: name, contactPerson, phone, email, address,
+// gstin, stateName, stateCode, primaryEmail, additionalDetails (a
+// free-form key/value array — Customers.tsx uses this for things like
+// "PAN Number"/"CIN No." rather than dedicated columns), and
+// deliveryAddresses (an array of {label, address} free-text entries —
+// NOT structured line1/line2/city/pin/country; that structure doesn't
+// exist anywhere in FabFlow). createCustomer previously exposed only
+// {name, contactPerson, phone, email, address, gstin} — a real
+// capability gap versus what the Customers.tsx form can already save.
+// This section brings the Agent up to full parity with that real model,
+// nothing invented beyond it, plus updateCustomer (which had no Agent
+// action at all before this).
+
+// Official GST state-code prefixes (India) — stable public reference
+// data, not a FabFlow-specific field. Used only to fill stateCode/
+// stateName when the caller supplied a gstin but not those fields
+// directly (e.g. extracted from a document that shows the GSTIN and the
+// state name but not FabFlow's own two-letter... two-digit code) —
+// never overrides an explicitly supplied stateCode/stateName.
+const GST_STATE_CODES: Record<string, string> = {
+  "01": "Jammu and Kashmir",
+  "02": "Himachal Pradesh",
+  "03": "Punjab",
+  "04": "Chandigarh",
+  "05": "Uttarakhand",
+  "06": "Haryana",
+  "07": "Delhi",
+  "08": "Rajasthan",
+  "09": "Uttar Pradesh",
+  "10": "Bihar",
+  "11": "Sikkim",
+  "12": "Arunachal Pradesh",
+  "13": "Nagaland",
+  "14": "Manipur",
+  "15": "Mizoram",
+  "16": "Tripura",
+  "17": "Meghalaya",
+  "18": "Assam",
+  "19": "West Bengal",
+  "20": "Jharkhand",
+  "21": "Odisha",
+  "22": "Chhattisgarh",
+  "23": "Madhya Pradesh",
+  "24": "Gujarat",
+  "25": "Daman and Diu",
+  "26": "Dadra and Nagar Haveli",
+  "27": "Maharashtra",
+  "28": "Andhra Pradesh (Old)",
+  "29": "Karnataka",
+  "30": "Goa",
+  "31": "Lakshadweep",
+  "32": "Kerala",
+  "33": "Tamil Nadu",
+  "34": "Puducherry",
+  "35": "Andaman and Nicobar Islands",
+  "36": "Telangana",
+  "37": "Andhra Pradesh",
+  "38": "Ladakh",
+  "97": "Other Territory",
+  "99": "Centre Jurisdiction",
+};
+
+function deriveStateFromGstin(gstin: string): {
+  stateCode?: string;
+  stateName?: string;
+} {
+  const prefix = gstin.trim().slice(0, 2);
+  const name = GST_STATE_CODES[prefix];
+  return name ? { stateCode: prefix, stateName: name } : {};
+}
+
+/** Parses the {"key","value"}[] shape additionalDetails/emails-style JSON
+ * params use — same tolerant-array convention as lineItemsJson etc.
+ * elsewhere in this file. Returns [] (never throws) for empty/omitted
+ * input; a genuinely malformed non-empty value throws, matching the
+ * existing lineItemsJson precedent. */
+function parseKeyValueJson(
+  raw: unknown,
+  paramName: string,
+): Array<{ key: string; value: string }> {
+  const str = String(raw ?? "").trim();
+  if (!str) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(str);
+  } catch {
+    throw new Error(
+      `"${paramName}" must be a valid JSON array, e.g. [{"key":"PAN Number","value":"AABCM3693B"}].`,
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`"${paramName}" must be a JSON array.`);
+  }
+  return parsed
+    .filter(
+      (it): it is Record<string, unknown> =>
+        Boolean(it) && typeof it === "object",
+    )
+    .map((it) => ({
+      key: String(it.key ?? "").trim(),
+      value: String(it.value ?? "").trim(),
+    }))
+    .filter((it) => it.key);
+}
+
+/** Parses the {"label","address"}[] shape deliveryAddressesJson uses. A
+ * missing/blank label defaults to "Delivery" so "use the same address
+ * for delivery" (no label mentioned) still produces a valid, labeled
+ * entry rather than being rejected. */
+function parseDeliveryAddressesJson(
+  raw: unknown,
+): Array<{ id: string; label: string; address: string }> {
+  const str = String(raw ?? "").trim();
+  if (!str) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(str);
+  } catch {
+    throw new Error(
+      '"deliveryAddressesJson" must be a valid JSON array, e.g. [{"label":"Delivery","address":"..."}].',
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error('"deliveryAddressesJson" must be a JSON array.');
+  }
+  return parsed
+    .filter(
+      (it): it is Record<string, unknown> =>
+        Boolean(it) && typeof it === "object",
+    )
+    .map((it) => ({
+      id: crypto.randomUUID(),
+      label: String(it.label ?? "").trim() || "Delivery",
+      address: String(it.address ?? "").trim(),
+    }))
+    .filter((it) => it.address);
+}
+
+const CUSTOMER_FIELD_SCHEMA: ToolParameterSchema["properties"] = {
+  name: { type: "string", description: "Company/customer name." },
+  contactPerson: {
+    type: "string",
+    description: "Primary contact person's name (optional).",
+  },
+  phone: { type: "string", description: "Contact phone number (optional)." },
+  email: {
+    type: "string",
+    description: "Contact email address (optional).",
+  },
+  primaryEmail: {
+    type: "string",
+    description:
+      "The primary email, if different from / more specific than 'email' (optional). Defaults to 'email' when omitted.",
+  },
+  address: {
+    type: "string",
+    description: "Billing/business address, free text (optional).",
+  },
+  gstin: { type: "string", description: "GSTIN, if known (optional)." },
+  stateName: {
+    type: "string",
+    description:
+      "State name (optional) — if omitted but gstin is supplied, derived automatically from the GSTIN's state-code prefix.",
+  },
+  stateCode: {
+    type: "string",
+    description:
+      'GST state code, e.g. "36" for Telangana (optional) — if omitted but gstin is supplied, derived automatically from the GSTIN.',
+  },
+  additionalDetailsJson: {
+    type: "string",
+    description:
+      'Optional JSON array of extra labeled fields FabFlow stores as free-form key/value pairs — this is where PAN, CIN, or any other field without its own dedicated column belongs, e.g. [{"key":"PAN Number","value":"AABCM3693B"},{"key":"CIN No.","value":"L31909TG1988PLC008652"}].',
+  },
+  deliveryAddressesJson: {
+    type: "string",
+    description:
+      'Optional JSON array of labeled delivery addresses, e.g. [{"label":"Factory","address":"..."}]. To use the same address for billing and delivery, pass the same address text here as in "address" with a label such as "Delivery".',
+  },
+};
+
+function validateCustomerFields(p: Record<string, unknown>) {
+  const gstin = (p.gstin as string) || "";
+  const derived = gstin ? deriveStateFromGstin(gstin) : {};
+  return {
+    contactPerson: (p.contactPerson as string) || "",
+    phone: (p.phone as string) || "",
+    email: (p.email as string) || "",
+    primaryEmail: (p.primaryEmail as string) || (p.email as string) || "",
+    address: (p.address as string) || "",
+    gstin,
+    stateName: (p.stateName as string) || derived.stateName || "",
+    stateCode: (p.stateCode as string) || derived.stateCode || "",
+    additionalDetails: parseKeyValueJson(
+      p.additionalDetailsJson,
+      "additionalDetailsJson",
+    ),
+    deliveryAddresses: parseDeliveryAddressesJson(p.deliveryAddressesJson),
+  };
+}
+
 // ── createCustomer ────────────────────────────────────────────────────
 export const createCustomer: AgentAction = {
   name: "createCustomer",
-  description: "Create a new customer (company).",
+  description:
+    "Create a new customer (company), with full field support: contact details, GSTIN, billing address, state/state code, extra labeled fields (PAN, CIN, etc. via additionalDetailsJson), and one or more delivery addresses (deliveryAddressesJson). Map extracted document/image/conversation information onto these fields intelligently rather than leaving them blank when the information is actually available.",
   permission: "customers.create",
   riskLevel: "low",
   kind: "write",
@@ -192,33 +398,13 @@ export const createCustomer: AgentAction = {
     type: "object",
     properties: {
       name: { type: "string", description: "Company/customer name." },
-      contactPerson: {
-        type: "string",
-        description: "Primary contact person's name (optional).",
-      },
-      phone: {
-        type: "string",
-        description: "Contact phone number (optional).",
-      },
-      email: {
-        type: "string",
-        description: "Contact email address (optional).",
-      },
-      address: {
-        type: "string",
-        description: "Billing/business address (optional).",
-      },
-      gstin: { type: "string", description: "GSTIN, if known (optional)." },
+      ...CUSTOMER_FIELD_SCHEMA,
     },
     required: ["name"],
   },
   validate: (p) => ({
     name: required(p, "name"),
-    contactPerson: (p.contactPerson as string) || "",
-    phone: (p.phone as string) || "",
-    email: (p.email as string) || "",
-    address: (p.address as string) || "",
-    gstin: (p.gstin as string) || "",
+    ...validateCustomerFields(p),
   }),
   execute: async (p): Promise<AgentActionOutcome> => {
     const result = await createCustomerRemote({
@@ -226,8 +412,20 @@ export const createCustomer: AgentAction = {
       contactPerson: p.contactPerson as string,
       phone: p.phone as string,
       email: p.email as string,
+      primaryEmail: p.primaryEmail as string,
       address: p.address as string,
       gstin: p.gstin as string,
+      stateName: p.stateName as string,
+      stateCode: p.stateCode as string,
+      additionalDetails: p.additionalDetails as Array<{
+        key: string;
+        value: string;
+      }>,
+      deliveryAddresses: p.deliveryAddresses as Array<{
+        id: string;
+        label: string;
+        address: string;
+      }>,
     });
     if (result.status !== "success" || !result.data) {
       return {
@@ -239,6 +437,137 @@ export const createCustomer: AgentAction = {
     return {
       ok: true,
       message: `Created customer "${result.data.name}" (id ${result.data.id}).`,
+      data: { id: result.data.id, name: result.data.name },
+    };
+  },
+};
+
+// ── updateCustomer ────────────────────────────────────────────────────
+export const updateCustomer: AgentAction = {
+  name: "updateCustomer",
+  description:
+    "Edit an existing customer's details — any of contact info, address, GSTIN, state/state code, extra labeled fields, or delivery addresses. Always resolve the real customer first (via findCustomer) — never invent a customerId. Only the fields you actually pass are changed; everything else is left as-is. To ADD a delivery address without losing existing ones, first look up the customer's current deliveryAddresses (findCustomer's result / prior conversation context) and include them alongside the new one in deliveryAddressesJson — it replaces the whole list, it does not merge automatically.",
+  permission: "customers.edit",
+  riskLevel: "low",
+  kind: "write",
+  destructive: false,
+  parameters: {
+    type: "object",
+    properties: {
+      customerId: {
+        type: "string",
+        description:
+          "The customer id to edit (required, never guessed — resolve via findCustomer first).",
+      },
+      name: {
+        type: "string",
+        description: "New company/customer name (optional).",
+      },
+      ...CUSTOMER_FIELD_SCHEMA,
+    },
+    required: ["customerId"],
+  },
+  validate: (p) => {
+    const hasAnyField =
+      p.name !== undefined ||
+      p.contactPerson !== undefined ||
+      p.phone !== undefined ||
+      p.email !== undefined ||
+      p.primaryEmail !== undefined ||
+      p.address !== undefined ||
+      p.gstin !== undefined ||
+      p.stateName !== undefined ||
+      p.stateCode !== undefined ||
+      p.additionalDetailsJson !== undefined ||
+      p.deliveryAddressesJson !== undefined;
+    if (!hasAnyField) {
+      throw new Error("Specify at least one field to change.");
+    }
+    return {
+      customerId: required(p, "customerId"),
+      name: p.name as string | undefined,
+      contactPerson: p.contactPerson as string | undefined,
+      phone: p.phone as string | undefined,
+      email: p.email as string | undefined,
+      primaryEmail: p.primaryEmail as string | undefined,
+      address: p.address as string | undefined,
+      gstin: p.gstin as string | undefined,
+      stateName: p.stateName as string | undefined,
+      stateCode: p.stateCode as string | undefined,
+      additionalDetailsJson: p.additionalDetailsJson as string | undefined,
+      deliveryAddressesJson: p.deliveryAddressesJson as string | undefined,
+    };
+  },
+  execute: async (p): Promise<AgentActionOutcome> => {
+    const current = useStore
+      .getState()
+      .customers.find((c) => c.id === p.customerId);
+    if (!current) {
+      return {
+        ok: false,
+        message: "Customer not found — resolve it with findCustomer first.",
+      };
+    }
+    // Merge helper: treats a blank/whitespace-only string the same as
+    // "not provided" and keeps the current value. Deliberately NOT a
+    // bare `?? current.x` — reproduced live: some LLM tool calls include
+    // every declared optional parameter with an empty-string value for
+    // the ones they don't intend to change (rather than omitting the
+    // key), and `""` is not nullish, so `?? ` alone let a real update
+    // silently blank out name/phone/etc. that the caller never meant to
+    // touch. There is no legitimate voice/text instruction that means
+    // "clear this field by leaving it out" — an explicit clear would say
+    // so, which isn't a case this registry supports for Customer today.
+    const keep = (newVal: string | undefined, currentVal: string): string =>
+      newVal?.trim() ? newVal : currentVal;
+
+    const gstin = keep(p.gstin as string | undefined, current.gstin);
+    const gstinChanged = Boolean(
+      (p.gstin as string | undefined)?.trim() && gstin !== current.gstin,
+    );
+    const derived = gstinChanged ? deriveStateFromGstin(gstin) : {};
+    const additionalDetailsJson = p.additionalDetailsJson as string | undefined;
+    const deliveryAddressesJson = p.deliveryAddressesJson as string | undefined;
+    const result = await updateCustomerRemote({
+      ...current,
+      name: keep(p.name as string | undefined, current.name),
+      contactPerson: keep(
+        p.contactPerson as string | undefined,
+        current.contactPerson,
+      ),
+      phone: keep(p.phone as string | undefined, current.phone),
+      email: keep(p.email as string | undefined, current.email),
+      primaryEmail: keep(
+        p.primaryEmail as string | undefined,
+        current.primaryEmail ?? "",
+      ),
+      address: keep(p.address as string | undefined, current.address),
+      gstin,
+      stateName: keep(
+        p.stateName as string | undefined,
+        derived.stateName ?? current.stateName ?? "",
+      ),
+      stateCode: keep(
+        p.stateCode as string | undefined,
+        derived.stateCode ?? current.stateCode ?? "",
+      ),
+      additionalDetails: additionalDetailsJson?.trim()
+        ? parseKeyValueJson(additionalDetailsJson, "additionalDetailsJson")
+        : current.additionalDetails,
+      deliveryAddresses: deliveryAddressesJson?.trim()
+        ? parseDeliveryAddressesJson(deliveryAddressesJson)
+        : current.deliveryAddresses,
+    });
+    if (result.status !== "success" || !result.data) {
+      return {
+        ok: false,
+        message: `Could not update customer: ${result.error ?? result.status}`,
+      };
+    }
+    useStore.getState().updateCustomer(result.data);
+    return {
+      ok: true,
+      message: `Updated customer "${result.data.name}" (id ${result.data.id}).`,
       data: { id: result.data.id, name: result.data.name },
     };
   },
@@ -5276,6 +5605,7 @@ export const resolveEmailAlert: AgentAction = {
 export const AGENT_ACTIONS: Record<string, AgentAction> = {
   findCustomer,
   createCustomer,
+  updateCustomer,
   findProject,
   createProject,
   createRepeatOrder,

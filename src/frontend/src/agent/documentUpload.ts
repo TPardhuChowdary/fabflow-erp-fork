@@ -89,22 +89,33 @@ export interface UploadAgentFileError {
 }
 
 /** Sanitizes a filename for use as a Storage path segment: strips path
- * separators and non-printable characters so a malicious filename (for
- * example one containing "../" or embedded slashes) can never escape
+ * separators and anything outside printable ASCII so a malicious filename
+ * (for example one containing "../" or embedded slashes) can never escape
  * the intended `${orgId}/${uploadId}/` prefix or inject extra path
  * segments. The random uploadId prefix is the primary defense (the
  * sanitized name is never used alone to build the path); this is
- * defense in depth on top of that. */
+ * defense in depth on top of that.
+ *
+ * Restricted to ASCII 32-126 (plain space through `~`) rather than just
+ * excluding control characters — reproduced live: macOS inserts U+202F
+ * (NARROW NO-BREAK SPACE, not a plain space) before "AM"/"PM" in
+ * Screenshot-named files, e.g. "Screenshot 2026-09-09 at 1.24.12 PM.png".
+ * It is visually indistinguishable from a normal space, the previous
+ * `code > 31` check let it straight through (8239 > 31), and Supabase
+ * Storage's own key validator rejects it at upload time with
+ * `Invalid key: <path>` — the exact error this fixes. Any other non-ASCII
+ * character (accented letters, other scripts, emoji, other Unicode
+ * whitespace) is replaced the same way rather than allow-listed one by
+ * one, since Storage's accepted key range is ASCII, not "everything
+ * except this one character we happened to find". */
 function sanitizeFileName(rawName: string): string {
   const noSeparators = rawName.split("/").join("_").split("\\").join("_");
-  let printable = "";
+  let safe = "";
   for (let i = 0; i < noSeparators.length; i++) {
     const code = noSeparators.charCodeAt(i);
-    if (code > 31 && code !== 127) {
-      printable += noSeparators[i];
-    }
+    safe += code >= 32 && code <= 126 ? noSeparators[i] : "_";
   }
-  const trimmed = printable.slice(-200);
+  const trimmed = safe.slice(-200);
   return trimmed.length > 0 ? trimmed : "file";
 }
 

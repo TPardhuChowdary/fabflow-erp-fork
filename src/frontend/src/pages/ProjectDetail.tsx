@@ -162,6 +162,11 @@ interface Props {
     drawingId?: string;
   }) => void;
   onViewInvoices?: () => void;
+  /** Universal cross-module linking (Master ERP Architecture, Phase 2)
+   * — opens one exact invoice (App.tsx's navigateToRecord("invoice",
+   * id)), distinct from onViewInvoices above which just lands on the
+   * unfiltered Invoices list. */
+  onViewInvoice?: (invoiceId: string) => void;
 }
 
 const fmt = (n: number) => `₹${n.toLocaleString("en-IN")}`;
@@ -437,6 +442,7 @@ export function ProjectDetail({
   onGenerateReport,
   onOpenDrawingEditor,
   onViewInvoices,
+  onViewInvoice,
 }: Props) {
   const {
     projects,
@@ -6912,7 +6918,28 @@ export function ProjectDetail({
                           return (
                             <div
                               key={inv.id}
-                              className="rounded-md border border-border p-2.5"
+                              className={cn(
+                                "rounded-md border border-border p-2.5",
+                                onViewInvoice &&
+                                  "cursor-pointer hover:bg-muted/40",
+                              )}
+                              role={onViewInvoice ? "button" : undefined}
+                              tabIndex={onViewInvoice ? 0 : undefined}
+                              onClick={
+                                onViewInvoice
+                                  ? () => onViewInvoice(inv.id)
+                                  : undefined
+                              }
+                              onKeyDown={
+                                onViewInvoice
+                                  ? (e) => {
+                                      if (e.key === "Enter" || e.key === " ") {
+                                        e.preventDefault();
+                                        onViewInvoice(inv.id);
+                                      }
+                                    }
+                                  : undefined
+                              }
                               data-ocid={`project-detail.invoices.item.${inv.id}`}
                             >
                               <div className="flex items-center justify-between gap-2">

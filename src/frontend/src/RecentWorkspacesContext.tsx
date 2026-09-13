@@ -41,7 +41,8 @@ export type WorkspaceRecordType =
   | "vendor"
   | "die"
   | "tool"
-  | "tender";
+  | "tender"
+  | "invoice";
 
 export interface RecentWorkspaceEntry {
   key: string;
@@ -132,6 +133,12 @@ function resolveDisplay(
       const t = s.tenders.find((x) => x.id === id);
       if (!t) return null;
       return { label: t.tenderNumber, secondary: t.title || "Tender" };
+    }
+    case "invoice": {
+      const inv = s.invoices.find((x) => x.id === id);
+      if (!inv) return null;
+      const cust = s.customers.find((c) => c.id === inv.customerId);
+      return { label: inv.invNo, secondary: cust?.name ?? "Invoice" };
     }
   }
 }

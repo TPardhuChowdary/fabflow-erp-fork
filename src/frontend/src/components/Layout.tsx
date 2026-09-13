@@ -21,6 +21,7 @@ import {
   Hammer,
   LogOut,
   Menu,
+  Receipt,
   Search,
   Settings,
   Store,
@@ -54,6 +55,7 @@ const WORKSPACE_ICON: Record<WorkspaceRecordType, typeof FolderKanban> = {
   die: Cog,
   tool: Hammer,
   tender: ClipboardList,
+  invoice: Receipt,
 };
 
 // Role identity badges — deliberately NOT the success/warning/destructive

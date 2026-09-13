@@ -17,6 +17,12 @@ interface Props {
   customer: Customer | null;
   open: boolean;
   onClose: () => void;
+  /** Universal cross-module linking (Master ERP Architecture, Phase 2).
+   * Optional: callers that don't have anywhere to navigate to (e.g. a
+   * page that only shows the print preview standalone) simply omit
+   * these and the buttons don't render — never a dead/fake link. */
+  onViewProject?: (projectId: string) => void;
+  onViewCustomer?: (customerId: string) => void;
 }
 
 const fmt = (n: number) => `₹${n.toLocaleString("en-IN")}`;
@@ -90,7 +96,14 @@ function amountToWords(amount: number): string {
   return `${words} Only`;
 }
 
-export function InvoicePrintView({ invoice, customer, open, onClose }: Props) {
+export function InvoicePrintView({
+  invoice,
+  customer,
+  open,
+  onClose,
+  onViewProject,
+  onViewCustomer,
+}: Props) {
   const { settings } = useStore();
 
   if (!invoice) return null;
@@ -138,6 +151,26 @@ export function InvoicePrintView({ invoice, customer, open, onClose }: Props) {
           id="action-buttons"
           className="hidden sm:flex gap-3 no-print justify-end mt-2 mb-2 items-center"
         >
+          {onViewProject && invoice.projectId && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => onViewProject(invoice.projectId as string)}
+              data-ocid="invoice-print.open_project_button"
+            >
+              Open Project
+            </Button>
+          )}
+          {onViewCustomer && customer && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => onViewCustomer(customer.id)}
+              data-ocid="invoice-print.open_customer_button"
+            >
+              Open Customer
+            </Button>
+          )}
           <Button
             size="sm"
             variant="ghost"

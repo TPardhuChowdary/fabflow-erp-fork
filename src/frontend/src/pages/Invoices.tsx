@@ -35,7 +35,7 @@ import {
   X,
 } from "lucide-react";
 import { ShieldOff } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { toast } from "sonner";
@@ -118,7 +118,22 @@ const emptyForm = () => ({
   selectedEmail: "",
 });
 
-export function Invoices() {
+interface InvoicesProps {
+  /** Set by App.tsx's navigateToRecord("invoice", id) — same
+   * moduleNavContext.highlightId "land on this page, open this exact
+   * record" mechanism Vendors.tsx already uses, reused rather than
+   * inventing a second one (see App.tsx). Opens the existing read-only
+   * preview dialog (setViewInvoice) — no new UI surface. */
+  highlightInvoiceId?: string;
+  onViewProject?: (projectId: string) => void;
+  onViewCustomer?: (customerId: string) => void;
+}
+
+export function Invoices({
+  highlightInvoiceId,
+  onViewProject,
+  onViewCustomer,
+}: InvoicesProps = {}) {
   function daysBetween(date?: string): number {
     if (!date) return 0;
     const now = new Date();
@@ -165,6 +180,17 @@ export function Invoices() {
   const [form, setForm] = useState(emptyForm());
   const [search, setSearch] = useState("");
   const [viewInvoice, setViewInvoice] = useState<Invoice | null>(null);
+
+  // Universal cross-module linking (Master ERP Architecture, Phase 2) —
+  // same highlightId pattern Vendors.tsx already uses, reused rather
+  // than invented: App.tsx's navigateToRecord("invoice", id) lands here
+  // and opens the real invoice in the SAME preview dialog a manual row
+  // click already uses, never a second UI.
+  useEffect(() => {
+    if (!highlightInvoiceId) return;
+    const match = invoices.find((inv) => inv.id === highlightInvoiceId);
+    if (match) setViewInvoice(match);
+  }, [highlightInvoiceId, invoices]);
   async function handleDownload(inv: Invoice) {
     const container = document.createElement("div");
     container.style.cssText =
@@ -1053,6 +1079,8 @@ export function Invoices() {
         onClose={() => {
           setViewInvoice(null);
         }}
+        onViewProject={onViewProject}
+        onViewCustomer={onViewCustomer}
       />
 
       <Dialog

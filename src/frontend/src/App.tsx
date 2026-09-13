@@ -245,6 +245,13 @@ function AppInner() {
         setSelectedTenderId(id);
         setPage("tender-detail");
         break;
+      case "invoice":
+        // Same "land on this list page, open this exact record" pattern
+        // already used for "vendor" above — Invoices.tsx is a dialog/
+        // list page with no separate detail route, exactly like Vendors.
+        setModuleNavContext({ highlightId: id });
+        setPage("invoices");
+        break;
     }
     pushRecent(type, id);
   };
@@ -356,6 +363,7 @@ function AppInner() {
               setPage("drawing-editor");
             }}
             onViewInvoices={() => setPage("invoices")}
+            onViewInvoice={(id) => navigateToRecord("invoice", id)}
           />
         );
       case "employees":
@@ -411,7 +419,15 @@ function AppInner() {
       case "delivery-challans":
         return <DeliveryChallans />;
       case "invoices":
-        return <Invoices />;
+        return (
+          <Invoices
+            highlightInvoiceId={
+              page === "invoices" ? moduleNavContext?.highlightId : undefined
+            }
+            onViewProject={(id) => navigateToRecord("project", id)}
+            onViewCustomer={(id) => navigateToRecord("customer", id)}
+          />
+        );
       case "eway-bills":
         return (
           <EwayBills

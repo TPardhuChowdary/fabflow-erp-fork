@@ -2967,6 +2967,300 @@ export const findEmailAlerts: AgentQuery<
   },
 };
 
+// ── Phase 5 (Master ERP Architecture) — production planning ────────────
+// FabFlow's Job Card record (types.ts) has no per-card due-date or
+// machine field — only project-level dates exist (targetCompletionDate/
+// customerCommittedDeliveryDate). Rather than invent a due-date this
+// data doesn't have, "at risk" below is explicitly a project-level
+// proxy: the owning project's committed/target date has passed and this
+// card still isn't Completed. Always surfaced via `atRisk` + a caveat,
+// never silently treated as a real per-card deadline.
+export interface JobCardListEntry {
+  id: string;
+  jobNo: string;
+  projectId: string;
+  projectLabel: string;
+  employeeName: string;
+  jobDescription: string;
+  status: string;
+  expectedQuantity: number;
+  actualCompletedQty: number;
+  startTime?: string;
+  /** True when the OWNING PROJECT's committed/target date has passed and
+   * this card is still not Completed — a project-level proxy, not a
+   * real per-job-card due date (FabFlow doesn't track one). */
+  atRisk: boolean;
+}
+
+export const listJobCardsByStatus: AgentQuery<
+  { status?: string; projectId?: string },
+  JobCardListEntry[]
+> = {
+  name: "listJobCardsByStatus",
+  description:
+    "List Job Cards across all orders (org-wide), optionally filtered by status (NotStarted/InProgress/Completed/OnHold) and/or project — use this for 'what's on the production schedule' or 'which job cards are still open' instead of checking one project at a time via getProjectStatus. Flags atRisk using the owning project's committed/target date as a proxy, since Job Cards have no due-date field of their own.",
+  permission: "job_cards.view",
+  parameters: {
+    type: "object",
+    properties: {
+      status: {
+        type: "string",
+        description: "Optional: NotStarted, InProgress, Completed, or OnHold.",
+      },
+      projectId: {
+        type: "string",
+        description: "Optional project id (resolve via findProject first).",
+      },
+    },
+    required: [],
+  },
+  execute: ({ status, projectId }) => {
+    const s = useStore.getState();
+    const today = new Date().toISOString().slice(0, 10);
+    let matches = s.jobCards;
+    if (status) matches = matches.filter((jc) => jc.status === status);
+    if (projectId) matches = matches.filter((jc) => jc.projectId === projectId);
+    const data: JobCardListEntry[] = matches.map((jc) => {
+      const project = s.projects.find((p) => p.id === jc.projectId);
+      const targetDate =
+        project?.customerCommittedDeliveryDate || project?.targetCompletionDate;
+      return {
+        id: jc.id,
+        jobNo: jc.jobNo,
+        projectId: jc.projectId,
+        projectLabel: project ? orderLabel(project) : jc.projectId,
+        employeeName: jc.employeeName,
+        jobDescription: jc.jobDescription,
+        status: jc.status,
+        expectedQuantity: jc.expectedQuantity,
+        actualCompletedQty: jc.actualCompletedQty,
+        startTime: jc.startTime,
+        atRisk: Boolean(
+          targetDate && targetDate < today && jc.status !== "Completed",
+        ),
+      };
+    });
+    return {
+      ok: true,
+      message: `${data.length} job card(s) found${data.some((d) => d.atRisk) ? `, ${data.filter((d) => d.atRisk).length} at risk` : ""}.`,
+      data,
+      caveats: [
+        "atRisk compares the OWNING PROJECT's committed/target completion date, not a per-job-card due date — FabFlow doesn't track one.",
+      ],
+    };
+  },
+};
+
+// ── Phase 6 (Master ERP Architecture) — cross-module reasoning ─────────
+// Mirrors ProjectDetail.tsx's own Profit & Costing tab computation
+// exactly (materialCost via last purchase price × usage, labour/
+// transport/extra costs from internal_costings, outsourced process
+// cost, petty company expenses, manual add/reduce adjustments) so the
+// Agent's number always matches what a human sees on that screen. Kept
+// as a separate computation rather than extracting ProjectDetail's
+// render-local logic into a shared hook — that inline logic isn't
+// exported anywhere today, and reaching into a page component's render
+// body from here would be the wrong direction of dependency. If the two
+// ever need to be kept in sync by hand, this comment is the pointer.
+export interface ProjectProfitabilityData {
+  projectId: string;
+  projectLabel: string;
+  totalRevenue: number;
+  materialCost: number;
+  labourCost: number;
+  outsourceCost: number;
+  transportCost: number;
+  otherCost: number;
+  totalCost: number;
+  profit: number;
+  profitPct: number;
+}
+
+export const getProjectProfitability: AgentQuery<
+  { projectId: string },
+  ProjectProfitabilityData
+> = {
+  name: "getProjectProfitability",
+  description:
+    "Revenue vs. cost breakdown and profit for one order/project — combines invoices (revenue), material usage x last purchase price, internal costing (labour/transport/extra costs), outsourced work, and petty company expenses. Same numbers as that project's own Profit & Costing tab.",
+  // Same gate as ProjectDetail.tsx's own Profit & Costing tab, which has
+  // no separate permission of its own — it's part of the project detail
+  // view, gated by projects.view.
+  permission: "projects.view",
+  parameters: {
+    type: "object",
+    properties: {
+      projectId: { type: "string", description: "The project/order id." },
+    },
+    required: ["projectId"],
+  },
+  execute: ({ projectId }, ctx) => {
+    const s = useStore.getState();
+    const project = s.projects.find((p) => p.id === projectId);
+    if (!project) return { ok: false, message: "Project not found." };
+    const caveats: string[] = [];
+
+    const canSeeInvoices = hasPermission(ctx.currentUser, "invoices.view");
+    if (!canSeeInvoices) caveats.push("Revenue excluded (no invoices.view).");
+    const totalRevenue = canSeeInvoices
+      ? s.invoices
+          .filter(
+            (inv) =>
+              inv.projectId === projectId && inv.invoiceType !== "proforma",
+          )
+          .reduce((sum, inv) => sum + (inv.totalAmount || 0), 0)
+      : 0;
+
+    const materialCost = s.materialUsages
+      .filter((u) => u.projectId === projectId)
+      .reduce((sum, usage) => {
+        const item = s.inventoryItems.find(
+          (i) =>
+            i.id === usage.inventoryItemId ||
+            i.name.trim().toLowerCase() ===
+              (usage.materialName || "").trim().toLowerCase(),
+        );
+        return sum + (usage.quantityUsed || 0) * (item?.lastPurchasePrice ?? 0);
+      }, 0);
+
+    const costing = s.internalCostings.find((c) => c.projectId === projectId);
+    const labourCost = costing?.labourCost ?? 0;
+    const transportCost = costing?.transportCost ?? 0;
+    const extraCostTotal = (costing?.extraCosts || []).reduce(
+      (sum, c) => sum + (Number(c.amount) || 0),
+      0,
+    );
+
+    const outsourceCost = s.outsourcedWorks
+      .filter((o) => o.projectId === projectId)
+      .reduce((sum, o) => sum + (o.processCost || 0), 0);
+
+    const pettyExpenseCost = s.pettyExpenses
+      .filter(
+        (e) => e.projectId === projectId && e.expenseMode === "Company Expense",
+      )
+      .reduce((sum, e) => sum + (Number(e.amount) || 0), 0);
+
+    const autoCost =
+      materialCost +
+      labourCost +
+      outsourceCost +
+      transportCost +
+      extraCostTotal +
+      pettyExpenseCost;
+    const addCostTotal = (costing?.manualAdjustments || [])
+      .filter((a) => a.type === "Add Cost")
+      .reduce((sum, a) => sum + (Number(a.amount) || 0), 0);
+    const reduceCostTotal = (costing?.manualAdjustments || [])
+      .filter((a) => a.type === "Reduce Cost")
+      .reduce((sum, a) => sum + (Number(a.amount) || 0), 0);
+    const totalCost = autoCost + addCostTotal - reduceCostTotal;
+    const profit = totalRevenue - totalCost;
+    const profitPct = totalRevenue > 0 ? (profit / totalRevenue) * 100 : 0;
+
+    return {
+      ok: true,
+      message: `${orderLabel(project)}: revenue ₹${totalRevenue.toLocaleString("en-IN")}, cost ₹${totalCost.toLocaleString("en-IN")}, ${profit >= 0 ? "profit" : "loss"} ₹${Math.abs(profit).toLocaleString("en-IN")}.`,
+      data: {
+        projectId,
+        projectLabel: orderLabel(project),
+        totalRevenue,
+        materialCost,
+        labourCost,
+        outsourceCost,
+        transportCost,
+        otherCost: extraCostTotal + pettyExpenseCost,
+        totalCost,
+        profit,
+        profitPct,
+      },
+      caveats: caveats.length > 0 ? caveats : undefined,
+    };
+  },
+};
+
+export interface CustomerRiskEntry {
+  customerId: string;
+  customerName: string;
+  overdueInvoices: Array<{ invNo: string; dueDate: string; balance: number }>;
+  activeQuotations: Array<{
+    qtNo: string;
+    status: string;
+    totalAmount: number;
+  }>;
+}
+
+export const findCustomersWithOverdueBalanceAndActiveQuotation: AgentQuery<
+  Record<string, never>,
+  CustomerRiskEntry[]
+> = {
+  name: "findCustomersWithOverdueBalanceAndActiveQuotation",
+  description:
+    "Cross-module scan: customers who have at least one overdue unpaid invoice AND at least one active (Draft/Sent, not yet Accepted/Rejected) quotation — a customer worth a collections call before quoting them more work. Combines invoices + quotations, neither of which alone answers this.",
+  permission: "customers.view",
+  parameters: { type: "object", properties: {}, required: [] },
+  execute: (_params, ctx) => {
+    const s = useStore.getState();
+    const canSeeInvoices = hasPermission(ctx.currentUser, "invoices.view");
+    const canSeeQuotations = hasPermission(ctx.currentUser, "quotations.view");
+    const caveats: string[] = [];
+    if (!canSeeInvoices) caveats.push("Invoices excluded (no invoices.view).");
+    if (!canSeeQuotations)
+      caveats.push("Quotations excluded (no quotations.view).");
+    if (!canSeeInvoices || !canSeeQuotations) {
+      return {
+        ok: true,
+        message: "0 customer(s) found.",
+        data: [],
+        caveats,
+      };
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    const results: CustomerRiskEntry[] = [];
+    for (const cust of s.customers) {
+      const overdueInvoices = s.invoices
+        .filter(
+          (inv) =>
+            inv.customerId === cust.id &&
+            inv.status !== "Paid" &&
+            inv.dueDate &&
+            inv.dueDate < today,
+        )
+        .map((inv) => ({
+          invNo: inv.invNo,
+          dueDate: inv.dueDate,
+          balance: (inv.totalAmount ?? 0) - (inv.paidAmount ?? 0),
+        }));
+      if (overdueInvoices.length === 0) continue;
+      const activeQuotations = s.quotations
+        .filter(
+          (q) =>
+            q.customerId === cust.id &&
+            (q.status === "Draft" || q.status === "Sent"),
+        )
+        .map((q) => ({
+          qtNo: q.qtNo,
+          status: q.status,
+          totalAmount: q.totalAmount,
+        }));
+      if (activeQuotations.length === 0) continue;
+      results.push({
+        customerId: cust.id,
+        customerName: cust.name,
+        overdueInvoices,
+        activeQuotations,
+      });
+    }
+    return {
+      ok: true,
+      message: `${results.length} customer(s) found.`,
+      data: results,
+      caveats: caveats.length > 0 ? caveats : undefined,
+    };
+  },
+};
+
 export const QUERIES: Record<string, AgentQuery<any, any>> = {
   searchEmails,
   readEmailMessage,
@@ -3004,6 +3298,9 @@ export const QUERIES: Record<string, AgentQuery<any, any>> = {
   findMyAssignedInspections,
   findEligibleEmailsForAlertScan,
   findEmailAlerts,
+  listJobCardsByStatus,
+  getProjectProfitability,
+  findCustomersWithOverdueBalanceAndActiveQuotation,
 };
 
 /** Same shape as agent/actions.ts's runAction, deliberately: permission

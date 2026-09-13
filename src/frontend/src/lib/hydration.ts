@@ -44,6 +44,7 @@ import {
 } from "@/lib/qmsInspectionWorkflowApi";
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
 import { rowToTool, rowToToolAssignmentHistory } from "@/lib/toolsApi";
+import type { QuantityCheckpoint } from "@/qms/lib/quantityInspection";
 import type {
   InspectionMode,
   InspectionSheet,
@@ -3583,7 +3584,8 @@ export async function hydrateJobCards(): Promise<HydrationResult<JobCard[]>> {
 export const PROJECT_QMS_INSPECTION_COLUMNS =
   "id, project_id, library_inspection_id, library_inspection_name, " +
   "required_production_stage_id, mode, status, created_by, " +
-  "created_by_name, created_at, updated_at";
+  "created_by_name, created_at, updated_at, inspection_frequency_qty, " +
+  "quantity_checkpoints";
 
 export interface ProjectQmsInspectionRow {
   id: string;
@@ -3597,6 +3599,12 @@ export interface ProjectQmsInspectionRow {
   created_by_name: string | null;
   created_at: string;
   updated_at: string;
+  // Quantity-based inspection (Master ERP Architecture, Part 3) —
+  // additive; both are absent/empty for every inspection created before
+  // this column existed, which is exactly "no quantity checkpoints,
+  // plain pass/fail" (see qms/lib/quantityInspection.ts's own header).
+  inspection_frequency_qty: number | null;
+  quantity_checkpoints: QuantityCheckpoint[] | null;
 }
 
 export function transformProjectQmsInspectionRow(
@@ -3614,6 +3622,8 @@ export function transformProjectQmsInspectionRow(
     createdByName: row.created_by_name ?? undefined,
     createdAt: new Date(row.created_at).getTime(),
     updatedAt: new Date(row.updated_at).getTime(),
+    inspectionFrequencyQty: row.inspection_frequency_qty ?? undefined,
+    quantityCheckpoints: row.quantity_checkpoints ?? undefined,
   };
 }
 

@@ -176,13 +176,23 @@ export interface UpdateProjectQmsInspectionInput {
    * undefined (omit) to leave unchanged. */
   requiredProductionStageId?: string | null;
   mode?: InspectionMode;
+  /** Quantity-based inspection (Master ERP Architecture, Part 3). Pass
+   * null to remove quantity checkpoints entirely (back to plain
+   * pass/fail); undefined (omit) to leave unchanged. Never touches
+   * status/the characteristic-attempt trigger — see this function's own
+   * header note on that below. */
+  inspectionFrequencyQty?: number | null;
 }
 
-/** Updates only the link (requiredProductionStageId) and/or mode.
- * `status` is never accepted here - it is exclusively server-derived by
- * recompute_qms_inspection_status() after every attempt insert (see
- * database/phase-12/...sql section 3); this function has no parameter for
- * it at all, so it cannot be set incorrectly by a caller mistake. */
+/** Updates the link (requiredProductionStageId), mode, and/or the
+ * quantity-inspection frequency. `status` is never accepted here - it is
+ * exclusively server-derived by recompute_qms_inspection_status() after
+ * every attempt insert (see database/phase-12/...sql section 3); this
+ * function has no parameter for it at all, so it cannot be set
+ * incorrectly by a caller mistake. inspectionFrequencyQty is a
+ * completely separate, additive axis (see
+ * qms/lib/quantityInspection.ts) — setting it never changes status and
+ * never affects getStageInspectionGate()'s existing pass/fail gate. */
 export async function updateProjectQmsInspectionRemote(
   id: string,
   updates: UpdateProjectQmsInspectionInput,
@@ -195,11 +205,90 @@ export async function updateProjectQmsInspectionRemote(
     fields.required_production_stage_id = updates.requiredProductionStageId;
   }
   if (updates.mode !== undefined) fields.mode = updates.mode;
+  if (updates.inspectionFrequencyQty !== undefined) {
+    fields.inspection_frequency_qty = updates.inspectionFrequencyQty;
+  }
 
   const { data, error } = await gate.client
     .from("project_qms_inspections")
     .update(fields)
     .eq("id", id)
+    .select(PROJECT_QMS_INSPECTION_COLUMNS);
+  if (error) return { status: "error", error: error.message };
+  const rows = (data as unknown as ProjectQmsInspectionRow[]) ?? [];
+  if (rows.length === 0) {
+    return {
+      status: "denied",
+      error: "No row was updated (blocked by RLS, or the row does not exist)",
+    };
+  }
+  return {
+    status: "success",
+    data: transformProjectQmsInspectionRow(rows[0]),
+  };
+}
+
+/** Records one completed quantity checkpoint (Master ERP Architecture,
+ * Part 3) — appends to project_qms_inspections.quantity_checkpoints.
+ * Re-reads the row immediately before writing (never trusts a
+ * caller-supplied snapshot) so the common case — one inspector recording
+ * one checkpoint at a time — can't record the same quantity twice.
+ *
+ * ponytail: this is read-then-write, not a single atomic SQL statement —
+ * two genuinely concurrent calls for the SAME inspection (different
+ * quantities) could still race and one write could clobber the other's
+ * new entry (a jsonb column has no built-in atomic "append" the way a
+ * relational child-table INSERT would). Upgrade path if concurrent
+ * recording of the same inspection ever becomes real: a
+ * SECURITY DEFINER RPC doing the read-check-append inside one
+ * transaction, mirroring recompute_qms_inspection_status()'s own
+ * pattern. Not built here since it needs a new function, which needs its
+ * own review, same bar as this migration did.
+ *
+ * This never touches status or the characteristic-attempt trigger; it is
+ * a wholly separate tracking mechanism (see qms/lib/quantityInspection.ts). */
+export async function recordQuantityCheckpointRemote(
+  inspectionId: string,
+  checkpoint: {
+    quantity: number;
+    result: "Pass" | "Fail";
+    performedBy?: string;
+    performedByName?: string;
+    remarks?: string;
+  },
+): Promise<WriteResult<ProjectQmsInspection>> {
+  const gate = await requireSession();
+  if (!gate.ok) return gate.result;
+
+  const { data: currentRow, error: readError } = await gate.client
+    .from("project_qms_inspections")
+    .select(PROJECT_QMS_INSPECTION_COLUMNS)
+    .eq("id", inspectionId)
+    .maybeSingle();
+  if (readError) return { status: "error", error: readError.message };
+  if (!currentRow) {
+    return { status: "denied", error: "Inspection not found." };
+  }
+  const current = transformProjectQmsInspectionRow(
+    currentRow as unknown as ProjectQmsInspectionRow,
+  );
+  const existing = current.quantityCheckpoints ?? [];
+  if (existing.some((c) => c.quantity === checkpoint.quantity)) {
+    return {
+      status: "duplicate",
+      error: `Quantity ${checkpoint.quantity} was already recorded for this inspection.`,
+    };
+  }
+
+  const { data, error } = await gate.client
+    .from("project_qms_inspections")
+    .update({
+      quantity_checkpoints: [
+        ...existing,
+        { ...checkpoint, completedAt: new Date().toISOString() },
+      ],
+    })
+    .eq("id", inspectionId)
     .select(PROJECT_QMS_INSPECTION_COLUMNS);
   if (error) return { status: "error", error: error.message };
   const rows = (data as unknown as ProjectQmsInspectionRow[]) ?? [];

@@ -2,6 +2,7 @@
 // See QMS_ARCHITECTURE.md for the full entity model; entities not needed until
 // later phases (QualityGate, ProductInspectionPlan, InspectionRecord, NCR, CAPA)
 // are intentionally not defined here yet.
+import type { QuantityCheckpoint } from "./lib/quantityInspection";
 
 export type QmsCriticality =
   | "SafetyCritical"
@@ -457,6 +458,13 @@ export interface ProjectQmsInspection {
   createdByName?: string;
   createdAt: number;
   updatedAt: number;
+  // Quantity-based inspection (Master ERP Architecture, Part 3) —
+  // additive, independent of status/the characteristic-attempt trigger
+  // above. See qms/lib/quantityInspection.ts for how these are used.
+  // Undefined/empty on every inspection created before this existed,
+  // which is exactly "no quantity checkpoints, plain pass/fail".
+  inspectionFrequencyQty?: number;
+  quantityCheckpoints?: QuantityCheckpoint[];
 }
 
 /** Snapshot of one characteristic applicable to one inspection instance,

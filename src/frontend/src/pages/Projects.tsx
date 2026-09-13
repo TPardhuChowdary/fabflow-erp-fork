@@ -33,6 +33,7 @@ import { useAuth } from "../AuthContext";
 import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import { CustomerSelect } from "../components/CustomerSelect";
 import { DeadlineIndicator } from "../components/DeadlineIndicator";
+import { QuickAddCustomerDialog } from "../components/QuickAddCustomerDialog";
 import { useUpdateProjectDeadline } from "../hooks/useUpdateProjectDeadline";
 import { compareByDeadlinePriority } from "../lib/deadlinePriority";
 import {
@@ -86,6 +87,10 @@ export function Projects({ onViewProject }: Props) {
   const pEdit = canEdit(currentUser, "projects");
   const pDelete = canDelete(currentUser, "projects");
   const pView = canView(currentUser, "projects");
+  // Master ERP Architecture — "Add Customer" from inside Add Project
+  // still creates a real customer row, so it stays gated on the
+  // customer module's own create permission, not the project one.
+  const pCreateCustomer = canCreate(currentUser, "customers");
   const { updateDeadline } = useUpdateProjectDeadline();
 
   const [search, setSearch] = useState("");
@@ -99,6 +104,7 @@ export function Projects({ onViewProject }: Props) {
     "newest" | "oldest" | "name" | "code" | "customer" | "deadline"
   >("newest");
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [quickAddCustomerOpen, setQuickAddCustomerOpen] = useState(false);
   const [form, setForm] = useState({
     customerId: "",
     projectName: "",
@@ -720,6 +726,11 @@ export function Projects({ onViewProject }: Props) {
                   onChange={(v) => setForm((f) => ({ ...f, customerId: v }))}
                   className="w-full"
                   data-ocid="projects.select"
+                  onAddNew={
+                    pCreateCustomer
+                      ? () => setQuickAddCustomerOpen(true)
+                      : undefined
+                  }
                 />
               </div>
               <div className="space-y-1.5">
@@ -968,6 +979,14 @@ export function Projects({ onViewProject }: Props) {
         title="Delete project?"
         description={`Project "${deleteProjectTarget?.projectName}" will be permanently deleted.`}
         onConfirm={handleConfirmDeleteProject}
+      />
+
+      <QuickAddCustomerDialog
+        open={quickAddCustomerOpen}
+        onOpenChange={setQuickAddCustomerOpen}
+        onCreated={(customer) =>
+          setForm((f) => ({ ...f, customerId: customer.id }))
+        }
       />
     </div>
   );

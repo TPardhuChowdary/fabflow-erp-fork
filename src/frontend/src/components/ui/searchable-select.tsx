@@ -69,6 +69,14 @@ interface SearchableSelectProps {
   createLabel?: (text: string) => string;
   disabled?: boolean;
   renderOption?: (option: SearchableSelectOption) => React.ReactNode;
+  /** Persistent "+ Add new" row pinned below the (filtered) option list,
+   * independent of `creatable` — this stays id-based (onChange still
+   * only ever fires with a real option's `value`); the caller decides
+   * what "new" means (e.g. opening a create dialog) and is responsible
+   * for calling onChange itself once the new entity actually exists.
+   * Omit to keep every existing picker's behavior unchanged. */
+  onCreateNew?: () => void;
+  createNewLabel?: string;
   "data-ocid"?: string;
 }
 
@@ -85,6 +93,8 @@ export function SearchableSelect({
   createLabel,
   disabled,
   renderOption,
+  onCreateNew,
+  createNewLabel = "+ Add new",
   ...rest
 }: SearchableSelectProps) {
   const [open, setOpen] = useState(false);
@@ -188,6 +198,20 @@ export function SearchableSelect({
                 </CommandItem>
               )}
             </CommandGroup>
+            {onCreateNew && (
+              <CommandGroup>
+                <CommandItem
+                  value="__create_new__"
+                  onSelect={() => {
+                    setOpen(false);
+                    onCreateNew();
+                  }}
+                  className="text-xs font-medium text-primary"
+                >
+                  {createNewLabel}
+                </CommandItem>
+              </CommandGroup>
+            )}
           </CommandList>
         </Command>
       </PopoverContent>

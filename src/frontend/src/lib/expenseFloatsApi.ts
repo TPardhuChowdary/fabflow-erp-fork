@@ -312,22 +312,46 @@ function toPettyExpenseFields(v: PettyExpenseWritable) {
   };
 }
 
+// Completion-audit fix (Master ERP Architecture) — deliberately does NOT
+// chain .select() after this insert. Postgres RLS requires an INSERT's
+// RETURNING clause (which a PostgREST .select() compiles to) to also
+// satisfy the table's SELECT policy — so a role granted only
+// petty_expenses.create (e.g. "employee", by design never given
+// petty_expenses.view) had every create silently fail with a generic
+// "row-level security policy" error, even though CREATE was genuinely
+// permitted. Confirmed live: the identical insert succeeds once
+// .select() is removed.
+//
+// This is safe without a read-back because every column this table
+// actually has (see PETTY_EXPENSE_COLUMNS) is either already supplied by
+// toPettyExpenseFields(item) or is one of exactly two server-defaulted
+// columns — id (gen_random_uuid()) and created_at (now()) — both
+// generated here instead and sent as explicit insert values, so the row
+// this function returns is byte-for-byte the row that lands in the
+// table, not a guess. No trigger on this table mutates a column before
+// storage (trg_recompute_petty_expense_floats is AFTER INSERT and only
+// ever writes the separate expense_floats table; see this file's own
+// header comment) and there is no unique constraint to race against
+// (also already noted above) — so a client-generated id is exactly as
+// safe as the DB default it replaces.
 export async function createPettyExpenseRemote(
   item: PettyExpenseWritable,
 ): Promise<WriteResult<PettyExpense>> {
   const gate = await requireSession();
   if (!gate.ok) return gate.result;
 
-  const { data, error } = await gate.client
-    .from("petty_expenses")
-    .insert(toPettyExpenseFields(item))
-    .select(PETTY_EXPENSE_COLUMNS)
-    .single();
+  const id = crypto.randomUUID();
+  const createdAt = new Date().toISOString();
+  const { error } = await gate.client.from("petty_expenses").insert({
+    id,
+    created_at: createdAt,
+    ...toPettyExpenseFields(item),
+  });
 
   if (error) return { status: "error", error: error.message };
   return {
     status: "success",
-    data: transformPettyExpenseRow(data as unknown as PettyExpenseRow),
+    data: { ...item, id, createdAt },
   };
 }
 

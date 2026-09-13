@@ -25,6 +25,26 @@ import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
 import { normalizeBusinessName } from "@/lib/utils";
 import type { Customer } from "@/types";
 
+// Provisional-Customer support (see chat) — a real business workflow:
+// one employee creates a Project quickly against a Customer they only
+// know the name of; another completes GSTIN/address/etc. later. Nothing
+// about creation itself needed to change (`name` was already the only
+// required field, both here and in Customers.tsx's own form) — the real
+// gap was that nothing anywhere DISTINGUISHED a Customer like that from
+// one whose invoicing-relevant details are actually filled in, so nobody
+// downstream could tell at a glance which customers still need
+// completing. This is a pure, derived read of existing fields — no new
+// column, no migration, and it can never disagree with the database
+// (there is nothing to keep in sync). "Complete" here specifically means
+// "usable for GST invoicing/quoting", the two fields FabFlow's own
+// invoice generation actually needs (buyer_gstin/buyer_address on
+// invoices are sourced from these) — not an arbitrary completeness bar.
+export function isCustomerProfileComplete(
+  customer: Pick<Customer, "gstin" | "address">,
+): boolean {
+  return Boolean(customer.gstin?.trim() && customer.address?.trim());
+}
+
 export type WriteStatus = "success" | "denied" | "error" | "unauthenticated";
 
 export interface WriteResult<T> {

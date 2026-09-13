@@ -1,3 +1,4 @@
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -25,6 +26,7 @@ import { RowActions } from "../components/ui/row-actions";
 import {
   createCustomerRemote,
   deleteCustomerRemote,
+  isCustomerProfileComplete,
   updateCustomerRemote,
 } from "../lib/customersApi";
 import { canCreate, canDelete, canEdit, canView } from "../permissions";
@@ -347,21 +349,32 @@ export function Customers({ onViewHistory }: Props) {
                   data-ocid={`customers.list.row.${i + 1}`}
                 >
                   <TableCell className="text-sm font-medium">
-                    {onViewHistory ? (
-                      <button
-                        type="button"
-                        className="hover:underline focus-visible:underline"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onViewHistory(c.id);
-                        }}
-                        data-ocid={`customers.open_button.${i + 1}`}
-                      >
-                        {c.name}
-                      </button>
-                    ) : (
-                      c.name
-                    )}
+                    <div className="flex items-center gap-1.5">
+                      {onViewHistory ? (
+                        <button
+                          type="button"
+                          className="hover:underline focus-visible:underline"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onViewHistory(c.id);
+                          }}
+                          data-ocid={`customers.open_button.${i + 1}`}
+                        >
+                          {c.name}
+                        </button>
+                      ) : (
+                        c.name
+                      )}
+                      {!isCustomerProfileComplete(c) && (
+                        <Badge
+                          variant="outline"
+                          className="text-[10px] bg-warning/10 text-warning border-warning/30"
+                          data-ocid={`customers.list.profile_pending.${i + 1}`}
+                        >
+                          Profile Pending
+                        </Badge>
+                      )}
+                    </div>
                   </TableCell>
                   <TableCell className="text-sm">{c.contactPerson}</TableCell>
                   <TableCell className="text-sm">{c.phone}</TableCell>

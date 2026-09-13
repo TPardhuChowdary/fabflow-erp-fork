@@ -81,6 +81,82 @@ interface ProjectDrawingFilesProps {
 
 type DialogMode = "choice" | "upload" | "existing";
 
+// Upload whitelist — was PDF-only (loadPdf() was the only validation
+// this dialog ever ran). Broadened to the two kinds the Drawing
+// Editor's own Phase 34 "Universal Edit" already renders/edits for a
+// drawing that got here via legacy-Design-File promotion (see
+// ProjectDetail.tsx's handleEditDesignFile) — closing the gap where the
+// Editor could already handle image/DXF drawings but there was no way
+// to get a NEW one into the Repository as anything but a PDF. Each kind
+// gets a real content check, not just a trusted extension:
+//   - pdf: loadPdf() actually parses it (unchanged, pre-existing).
+//   - image: decoded via a real <img> load.
+//   - dxf: no DXF parser exists in this codebase (and adding one is out
+//     of scope for a whitelist fix) — checked for the "SECTION" marker
+//     every real DXF file contains near its start, which at least
+//     rejects a renamed-extension file that isn't DXF-shaped at all.
+// Deliberately NOT extended to DOC/DOCX/XLS/XLSX/ZIP or any executable
+// format — no rendering/editing support exists for those in the
+// Drawing Editor, so adding them would just be dead weight in the
+// Repository with no way to view them there.
+export const DRAWING_UPLOAD_ACCEPT =
+  "application/pdf,image/png,image/jpeg,.dxf";
+
+async function inspectImage(
+  file: File,
+): Promise<{ numPages: number; sourceKind: DrawingDocument["sourceKind"] }> {
+  const url = URL.createObjectURL(file);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error("not a valid image file"));
+      img.src = url;
+    });
+    return { numPages: 1, sourceKind: "image" };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+async function inspectDxf(
+  file: File,
+): Promise<{ numPages: number; sourceKind: DrawingDocument["sourceKind"] }> {
+  const head = await file.slice(0, 2048).text();
+  if (!head.includes("SECTION")) {
+    throw new Error("not a valid DXF file");
+  }
+  return { numPages: 1, sourceKind: "dxf" };
+}
+
+/** Validates and classifies one selected file, dispatching to the right
+ * real content check for its apparent kind — never just trusting the
+ * file extension/MIME string alone. Throws (caught by the per-file loop
+ * in handleFilesChosen) for anything that fails its check or matches
+ * none of the supported kinds. */
+async function inspectDrawingUpload(
+  file: File,
+): Promise<{ numPages: number; sourceKind: DrawingDocument["sourceKind"] }> {
+  const lowerName = file.name.toLowerCase();
+  if (file.type === "application/pdf" || lowerName.endsWith(".pdf")) {
+    const pdf = await loadPdf(file);
+    return { numPages: pdf.numPages, sourceKind: "pdf" };
+  }
+  if (
+    file.type === "image/png" ||
+    file.type === "image/jpeg" ||
+    lowerName.endsWith(".png") ||
+    lowerName.endsWith(".jpg") ||
+    lowerName.endsWith(".jpeg")
+  ) {
+    return inspectImage(file);
+  }
+  if (lowerName.endsWith(".dxf")) {
+    return inspectDxf(file);
+  }
+  throw new Error("unsupported file type — PDF, PNG, JPG, or DXF only");
+}
+
 export function ProjectDrawingFiles({
   projectId,
   drawings,
@@ -176,14 +252,15 @@ export function ProjectDrawingFiles({
     let failed = 0;
     for (const file of Array.from(fileList)) {
       try {
-        const pdf = await loadPdf(file);
+        const { numPages, sourceKind } = await inspectDrawingUpload(file);
         const drawing = await onUpload({
           fileName: file.name,
           pdfBlob: file,
-          numPages: pdf.numPages,
+          numPages,
           uploadedBy: userId,
           uploadedByName: userName,
           projectId,
+          sourceKind,
         });
         onAudit({
           module: "drawing_editor",
@@ -498,14 +575,14 @@ export function ProjectDrawingFiles({
               </DialogHeader>
               <div className="space-y-3 py-2">
                 <p className="text-xs text-muted-foreground">
-                  PDF files only, same as the Drawing Repository. Each file
-                  becomes a new Repository record, linked to this project
+                  PDF, PNG, JPG, or DXF, same as the Drawing Repository. Each
+                  file becomes a new Repository record, linked to this project
                   automatically.
                 </p>
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept="application/pdf"
+                  accept={DRAWING_UPLOAD_ACCEPT}
                   multiple
                   className="hidden"
                   onChange={(e) => void handleFilesChosen(e.target.files)}

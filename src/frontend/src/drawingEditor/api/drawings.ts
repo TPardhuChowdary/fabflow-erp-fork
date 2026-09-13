@@ -392,6 +392,14 @@ export interface UploadDrawingInput {
   ownerType?: "project" | "machine" | "library";
   ownerId?: string;
   category?: DrawingDocument["category"];
+  /** Phase 34's Universal Edit already renders/edits "dxf" and "image"
+   * drawings — this was only ever settable via the legacy-Design-File
+   * promotion path (findOrCreateMasterDrawing below), never on a normal
+   * new upload, which is why ProjectDrawingFiles.tsx's own uploader was
+   * still PDF-only despite the Editor already supporting these kinds.
+   * Optional, defaults to "pdf" (unchanged behavior for every existing
+   * caller that doesn't pass it, e.g. MachineDetail.tsx). */
+  sourceKind?: DrawingDocument["sourceKind"];
 }
 
 export async function uploadDrawing(
@@ -423,6 +431,7 @@ export async function uploadDrawing(
       category: input.category ?? null,
       uploaded_by: input.uploadedBy || null,
       uploaded_by_name: input.uploadedByName,
+      source_kind: input.sourceKind ?? "pdf",
     })
     .select()
     .single();

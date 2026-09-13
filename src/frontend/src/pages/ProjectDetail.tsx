@@ -30,6 +30,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
+import { isCustomerProfileComplete } from "@/lib/customersApi";
 import { printDocument } from "@/lib/documentUtils";
 import { cn } from "@/lib/utils";
 import {
@@ -2166,6 +2167,15 @@ export function ProjectDetail({
             <Badge variant="outline" className="text-xs">
               {customer?.name ?? "Unknown"}
             </Badge>
+            {customer && !isCustomerProfileComplete(customer) && (
+              <Badge
+                variant="outline"
+                className="text-[10px] bg-warning/10 text-warning border-warning/30"
+                data-ocid="project-detail.customer_profile_pending"
+              >
+                Customer Profile Pending
+              </Badge>
+            )}
           </div>
           <div className="flex items-center gap-2 mt-0.5 flex-wrap">
             <h1 className="text-xl font-bold">

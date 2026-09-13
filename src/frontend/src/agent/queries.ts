@@ -39,7 +39,9 @@ import {
 import type { LedgerExportMeta } from "@/lib/ledgerExport";
 import { uploadLedgerExport } from "@/lib/ledgerExportRemote";
 import { getCurrentServiceRate } from "@/lib/machineRevenueApi";
+import { computeStageProductionTotals } from "@/lib/stageProductionTotals";
 import { hasPermission } from "@/permissions";
+import { computeRequiredQuantityPoints } from "@/qms/lib/quantityInspection";
 import { useQmsStore } from "@/qms/store/useQmsStore";
 import { useStore } from "@/store";
 import type {
@@ -134,16 +136,74 @@ function summarizeProduction(projectId: string) {
  * gate records — the two separate QMS systems that already exist. */
 function summarizeQms(projectId: string) {
   const qs = useQmsStore.getState();
+  const s = useStore.getState();
   const sheet = qs.inspectionSheets.find((sh) => sh.projectId === projectId);
   const gateInspections = qs.projectQmsInspections.filter(
     (i) => i.projectId === projectId,
   );
+  // Quantity-based inspection (Master ERP Architecture, Part 3) — this
+  // data existed in the DB (inspection_frequency_qty/quantity_checkpoints,
+  // set via ProductionStageInspectionControl.tsx) but no Agent tool
+  // exposed it at all until this fix; a completion audit's live test
+  // found the Agent honestly reporting it "does not expose" a frequency
+  // that genuinely exists. Mirrors the exact expectedQuantity source
+  // qms/pages/ProjectQmsInspectionsTab.tsx already uses (the linked
+  // stage's targetQty via computeStageProductionTotals) — never a second
+  // definition of "how much has this stage made."
+  const production = s.projectProductions.find(
+    (pp) => pp.projectId === projectId,
+  );
+  const stages = production?.stages ?? [];
+  const projectJobCards = s.jobCards.filter((jc) => jc.projectId === projectId);
+  const quantityInspections = gateInspections
+    .filter((i) => i.inspectionFrequencyQty)
+    .map((i) => {
+      const stage = stages.find(
+        (st) => st.stageId === i.requiredProductionStageId,
+      );
+      const stageCompletionsForStage = qs.stageCompletions.filter(
+        (c) => c.stageId === i.requiredProductionStageId,
+      );
+      const totals =
+        stage && stage.stageType === "inhouse"
+          ? computeStageProductionTotals(
+              stage,
+              projectJobCards,
+              stageCompletionsForStage,
+              stages,
+            )
+          : null;
+      const requiredPoints = stage?.targetQty
+        ? computeRequiredQuantityPoints(
+            stage.targetQty,
+            i.inspectionFrequencyQty,
+          )
+        : [];
+      const completedPoints = (i.quantityCheckpoints ?? []).map(
+        (c) => c.quantity,
+      );
+      return {
+        inspectionName: i.libraryInspectionName,
+        linkedStageName: stage?.stageName ?? null,
+        stageTargetQty: stage?.targetQty ?? null,
+        actualCompletedQty: totals?.workerAccepted ?? null,
+        inspectionFrequencyQty: i.inspectionFrequencyQty,
+        requiredQuantityPoints: requiredPoints,
+        completedQuantityPoints: completedPoints,
+        pendingQuantityPoints: requiredPoints.filter(
+          (p) => !completedPoints.includes(p),
+        ),
+      };
+    });
   return {
     sheetStatus: sheet?.status ?? null,
     sheetNumber: sheet?.inspectionNumber ?? null,
     gateInspectionCount: gateInspections.length,
     gatePendingCount: gateInspections.filter((i) => i.status !== "Passed")
       .length,
+    // [] when no gate inspection has a quantity-based frequency
+    // configured — that's the ordinary case, not a gap.
+    quantityInspections,
   };
 }
 
@@ -1016,6 +1076,7 @@ export const getCustomerOverview: AgentQuery<
             sheetNumber: null,
             gateInspectionCount: 0,
             gatePendingCount: 0,
+            quantityInspections: [],
           },
       assignedEmployees: canSeeEmployees
         ? (p.assignedEmployeeIds || [])
@@ -1118,7 +1179,23 @@ export const getProjectStatus: AgentQuery<
         project: {
           id: project.id,
           label: orderLabel(project),
+          // totalQty is the legacy headline quantity field; orderedQuantity/
+          // plannedQuantity are the newer breakdown fields (Phase 57) —
+          // a project may have either or both set, never guess one from
+          // the other. A completion audit found this tool previously
+          // reported totalQty only, so a project with only
+          // orderedQuantity set looked like it had no quantity at all.
           totalQty: project.totalQty ?? null,
+          orderedQuantity: project.orderedQuantity ?? null,
+          plannedQuantity: project.plannedQuantity ?? null,
+          // Optional project-level dates (Phase 52) — see
+          // AGENT_SYSTEM_PROMPT's own note on these being project-level,
+          // not a per-Job-Card due date. A completion audit found this
+          // tool never returned them even when set, so the Agent could
+          // never actually use the prompt's own guidance about them.
+          targetCompletionDate: project.targetCompletionDate ?? null,
+          customerCommittedDeliveryDate:
+            project.customerCommittedDeliveryDate ?? null,
         },
         production: canSeeProduction
           ? summarizeProduction(project.id)
@@ -1130,6 +1207,7 @@ export const getProjectStatus: AgentQuery<
               sheetNumber: null,
               gateInspectionCount: 0,
               gatePendingCount: 0,
+              quantityInspections: [],
             },
         assignedEmployees: canSeeEmployees
           ? (project.assignedEmployeeIds || [])

@@ -144,5 +144,77 @@ test("a quantity already recorded is detected as a duplicate", () => {
   assert.equal(isDuplicateCheckpoint(undefined, 25), false);
 });
 
+// ── Realistic quantity/frequency matrix (completion-audit follow-up) ──
+// Explicit combinations requested for this audit: quantities 1, 10, 23,
+// 25, 100 x frequencies 5, 10, 25 — including the "freq >= qty" edge
+// (single final point, never duplicated) and the "qty not a clean
+// multiple of freq" edge (23 with 5/10) already partly covered above,
+// re-verified here against the full matrix plus the final-point
+// invariant every combination must satisfy.
+const MATRIX: Array<{ qty: number; freq: number; expected: number[] }> = [
+  { qty: 1, freq: 5, expected: [1] },
+  { qty: 1, freq: 10, expected: [1] },
+  { qty: 1, freq: 25, expected: [1] },
+  { qty: 10, freq: 5, expected: [5, 10] },
+  { qty: 10, freq: 10, expected: [10] },
+  { qty: 10, freq: 25, expected: [10] },
+  { qty: 23, freq: 5, expected: [5, 10, 15, 20, 23] },
+  { qty: 23, freq: 10, expected: [10, 20, 23] },
+  { qty: 23, freq: 25, expected: [23] },
+  { qty: 25, freq: 5, expected: [5, 10, 15, 20, 25] },
+  { qty: 25, freq: 10, expected: [10, 20, 25] },
+  { qty: 25, freq: 25, expected: [25] },
+  {
+    qty: 100,
+    freq: 5,
+    expected: [
+      5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95,
+      100,
+    ],
+  },
+  { qty: 100, freq: 10, expected: [10, 20, 30, 40, 50, 60, 70, 80, 90, 100] },
+  { qty: 100, freq: 25, expected: [25, 50, 75, 100] },
+];
+
+for (const { qty, freq, expected } of MATRIX) {
+  test(`qty=${qty} freq=${freq} -> [${expected.join(",")}]`, () => {
+    const points = computeRequiredQuantityPoints(qty, freq);
+    assert.deepEqual(points, expected);
+    // Final-quantity invariant: the last required point is always the
+    // exact expected quantity, and never appears twice even when freq
+    // divides qty exactly (qty=10/freq=10, qty=25/freq=25, etc.).
+    assert.equal(points[points.length - 1], qty);
+    assert.equal(points.filter((p) => p === qty).length, 1);
+    // freq >= qty always collapses to the single final point.
+    if (freq >= qty) assert.deepEqual(points, [qty]);
+  });
+
+  test(`qty=${qty} freq=${freq}: summary due/complete transitions correctly`, () => {
+    const beforeAny = getQuantityInspectionSummary({
+      expectedQuantity: qty,
+      frequencyQty: freq,
+      actualCompletedQty: 0,
+      checkpoints: [],
+    });
+    assert.equal(beforeAny.due, false);
+    assert.equal(beforeAny.allCompleted, false);
+    assert.equal(beforeAny.finalInspectionPending, true);
+
+    const allDone = getQuantityInspectionSummary({
+      expectedQuantity: qty,
+      frequencyQty: freq,
+      actualCompletedQty: qty,
+      checkpoints: expected.map((q) => ({
+        quantity: q,
+        completedAt: q,
+        result: "Pass" as const,
+      })),
+    });
+    assert.equal(allDone.allCompleted, true);
+    assert.equal(allDone.nextDueQuantity, null);
+    assert.equal(allDone.finalInspectionPending, false);
+  });
+}
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

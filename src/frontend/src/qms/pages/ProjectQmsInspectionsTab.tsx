@@ -19,6 +19,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { computeStageProductionTotals } from "@/lib/stageProductionTotals";
 import { ShieldOff } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -53,6 +54,7 @@ export function ProjectQmsInspectionsTab({ projectId }: Props) {
     projectQmsInspectionCharacteristics,
     projectQmsInspectionAttempts,
     createProjectQmsInspectionWithCharacteristics,
+    stageCompletions,
   } = useQmsStore();
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: load once on mount
@@ -64,13 +66,40 @@ export function ProjectQmsInspectionsTab({ projectId }: Props) {
   // read directly from the main store, purely for display (resolving a
   // linked inspection's stage NAME). Never written to from here.
   const projectProductions = useStore((s) => s.projectProductions);
+  const jobCards = useStore((s) => s.jobCards);
   const production = projectProductions.find(
     (pp) => pp.projectId === projectId,
   );
+  const stages = production?.stages ?? [];
   const stageNameById = new Map(
-    (production?.stages ?? [])
+    stages
       .filter((s) => !!s.stageId)
       .map((s) => [s.stageId as string, s.stageName]),
+  );
+  // Quantity-based inspection (Master ERP Architecture, Part 3) — the
+  // required checkpoint set is computed against the LINKED stage's own
+  // planned quantity (targetQty) and produced-so-far figure (Worker
+  // Accepted), the exact same computeStageProductionTotals() every other
+  // screen already uses (Production.tsx) — never a second definition of
+  // "how much has this stage made."
+  const stageQuantitiesByStageId = new Map(
+    stages
+      .filter((s) => !!s.stageId && s.stageType === "inhouse")
+      .map((s) => {
+        const totals = computeStageProductionTotals(
+          s,
+          jobCards.filter((jc) => jc.projectId === projectId),
+          stageCompletions.filter((c) => c.stageId === s.stageId),
+          stages,
+        );
+        return [
+          s.stageId as string,
+          {
+            expectedQuantity: s.targetQty,
+            actualCompletedQty: totals.workerAccepted,
+          },
+        ] as const;
+      }),
   );
 
   const inspections = projectQmsInspections.filter(
@@ -230,27 +259,35 @@ export function ProjectQmsInspectionsTab({ projectId }: Props) {
         </p>
       ) : (
         <div className="space-y-2">
-          {inspections.map((insp) => (
-            <ProjectQmsInspectionCard
-              key={insp.id}
-              inspection={insp}
-              linkedStageName={
-                insp.requiredProductionStageId
-                  ? (stageNameById.get(insp.requiredProductionStageId) ?? null)
-                  : null
-              }
-              characteristics={projectQmsInspectionCharacteristics.filter(
-                (c) => c.projectQmsInspectionId === insp.id,
-              )}
-              attempts={projectQmsInspectionAttempts.filter(
-                (a) => a.projectQmsInspectionId === insp.id,
-              )}
-              canRecord={canManage}
-              currentUserId={userId}
-              currentUserName={userName}
-              defaultExpanded={insp.id === highlightId}
-            />
-          ))}
+          {inspections.map((insp) => {
+            const stageQty = insp.requiredProductionStageId
+              ? stageQuantitiesByStageId.get(insp.requiredProductionStageId)
+              : undefined;
+            return (
+              <ProjectQmsInspectionCard
+                key={insp.id}
+                inspection={insp}
+                linkedStageName={
+                  insp.requiredProductionStageId
+                    ? (stageNameById.get(insp.requiredProductionStageId) ??
+                      null)
+                    : null
+                }
+                characteristics={projectQmsInspectionCharacteristics.filter(
+                  (c) => c.projectQmsInspectionId === insp.id,
+                )}
+                attempts={projectQmsInspectionAttempts.filter(
+                  (a) => a.projectQmsInspectionId === insp.id,
+                )}
+                canRecord={canManage}
+                currentUserId={userId}
+                currentUserName={userName}
+                defaultExpanded={insp.id === highlightId}
+                stageExpectedQuantity={stageQty?.expectedQuantity}
+                stageActualCompletedQty={stageQty?.actualCompletedQty}
+              />
+            );
+          })}
         </div>
       )}
     </div>

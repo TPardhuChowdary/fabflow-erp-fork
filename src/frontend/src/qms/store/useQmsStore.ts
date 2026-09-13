@@ -276,6 +276,20 @@ interface QmsStoreState {
     id: string,
     updates: UpdateProjectQmsInspectionInput,
   ) => Promise<WriteResult<ProjectQmsInspection>>;
+  /** Quantity-based inspection (Master ERP Architecture, Part 3) —
+   * records one completed checkpoint via qmsInspectionsApi's own
+   * read-then-append (see that function's own ponytail note on the
+   * non-atomic race). Never touches status/attempts. */
+  recordQuantityCheckpoint: (
+    inspectionId: string,
+    checkpoint: {
+      quantity: number;
+      result: "Pass" | "Fail";
+      performedBy?: string;
+      performedByName?: string;
+      remarks?: string;
+    },
+  ) => Promise<WriteResult<ProjectQmsInspection>>;
   createProjectQmsInspectionCharacteristics: (
     inputs: CreateProjectQmsInspectionCharacteristicInput[],
   ) => Promise<WriteResult<ProjectQmsInspectionCharacteristic[]>>;
@@ -719,6 +733,22 @@ export const useQmsStore = create<QmsStoreState>((set, get) => ({
       set((s) => ({
         projectQmsInspections: s.projectQmsInspections.map((i) =>
           i.id === id ? updated : i,
+        ),
+      }));
+    }
+    return result;
+  },
+
+  recordQuantityCheckpoint: async (inspectionId, checkpoint) => {
+    const result = await qmsInspectionsApi.recordQuantityCheckpointRemote(
+      inspectionId,
+      checkpoint,
+    );
+    if (result.status === "success" && result.data) {
+      const updated = result.data;
+      set((s) => ({
+        projectQmsInspections: s.projectQmsInspections.map((i) =>
+          i.id === inspectionId ? updated : i,
         ),
       }));
     }

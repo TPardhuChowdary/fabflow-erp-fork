@@ -16,6 +16,7 @@ import type {
   ProjectQmsInspectionStatus,
 } from "../types";
 import { ProjectQmsCharacteristicPanel } from "./ProjectQmsCharacteristicPanel";
+import { QuantityCheckpointsPanel } from "./QuantityCheckpointsPanel";
 
 const STATUS_BADGE_CLASS: Record<ProjectQmsInspectionStatus, string> = {
   NotStarted: "bg-muted text-muted-foreground border-border",
@@ -39,6 +40,13 @@ interface Props {
   currentUserId: string;
   currentUserName: string;
   defaultExpanded?: boolean;
+  /** Quantity-based inspection (Master ERP Architecture, Part 3) — the
+   * linked production stage's planned quantity and quantity produced so
+   * far, needed to compute/display required checkpoints. Undefined when
+   * this inspection isn't linked to a stage (no quantity to check
+   * against) or the stage has no target set yet. */
+  stageExpectedQuantity?: number;
+  stageActualCompletedQty?: number;
 }
 
 export function ProjectQmsInspectionCard({
@@ -50,6 +58,8 @@ export function ProjectQmsInspectionCard({
   currentUserId,
   currentUserName,
   defaultExpanded,
+  stageExpectedQuantity,
+  stageActualCompletedQty,
 }: Props) {
   const [expanded, setExpanded] = useState(!!defaultExpanded);
   const attemptPhotos = useQmsStore((s) => s.projectQmsInspectionAttemptPhotos);
@@ -140,6 +150,16 @@ export function ProjectQmsInspectionCard({
 
       {expanded && (
         <div className="border-t px-4 py-3 space-y-2">
+          {inspection.inspectionFrequencyQty && (
+            <QuantityCheckpointsPanel
+              inspection={inspection}
+              expectedQuantity={stageExpectedQuantity}
+              actualCompletedQty={stageActualCompletedQty ?? 0}
+              canRecord={canRecord}
+              currentUserId={currentUserId}
+              currentUserName={currentUserName}
+            />
+          )}
           {characteristics.length === 0 ? (
             <p className="text-xs text-muted-foreground">
               No characteristics found for this inspection's Library definition

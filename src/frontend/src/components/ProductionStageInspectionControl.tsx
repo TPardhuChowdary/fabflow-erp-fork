@@ -26,6 +26,7 @@ import { toast } from "sonner";
 import { ProductionGateStatusBadge } from "../qms/components/ProductionGateStatusBadge";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
+import { Input } from "./ui/input";
 import {
   Select,
   SelectContent,
@@ -90,6 +91,15 @@ export function ProductionStageInspectionControl({
   const [showPicker, setShowPicker] = useState(false);
   const [pendingSelection, setPendingSelection] = useState<string>("");
   const [saving, setSaving] = useState(false);
+  // Quantity-based inspection (Master ERP Architecture, Part 3) — the
+  // frequency is configured HERE, per production-stage inspection
+  // requirement, per the approved design. Local editable copy so typing
+  // doesn't fight the store's own value; reset whenever the linked
+  // inspection's real value changes underneath us (e.g. another user
+  // edited it, or `linked` itself changed).
+  const [showFrequencyEdit, setShowFrequencyEdit] = useState(false);
+  const [frequencyInput, setFrequencyInput] = useState("");
+  const [savingFrequency, setSavingFrequency] = useState(false);
 
   const linked = projectInspections.find(
     (i) => i.requiredProductionStageId === stageId,
@@ -173,6 +183,34 @@ export function ProductionStageInspectionControl({
     );
   };
 
+  const handleSaveFrequency = async () => {
+    if (!linked) return;
+    const trimmed = frequencyInput.trim();
+    const parsed = trimmed === "" ? null : Number(trimmed);
+    if (parsed !== null && (!Number.isFinite(parsed) || parsed <= 0)) {
+      toast.error("Frequency must be a positive whole number of pieces");
+      return;
+    }
+    setSavingFrequency(true);
+    try {
+      const result = await updateProjectQmsInspection(linked.id, {
+        inspectionFrequencyQty: parsed,
+      });
+      if (result.status === "success") {
+        toast.success(
+          parsed
+            ? `Will require an inspection every ${parsed} pieces (plus the final piece)`
+            : "Quantity-based checkpoints removed - back to plain pass/fail",
+        );
+        setShowFrequencyEdit(false);
+      } else {
+        toast.error(result.error || "Could not update inspection frequency");
+      }
+    } finally {
+      setSavingFrequency(false);
+    }
+  };
+
   const handleRemoveLink = async () => {
     if (!linked) return;
     setSaving(true);
@@ -251,6 +289,24 @@ export function ProductionStageInspectionControl({
                 type="button"
                 size="sm"
                 variant="ghost"
+                className="h-6 px-2 text-[11px]"
+                disabled={saving}
+                onClick={() => {
+                  setFrequencyInput(
+                    String(linked.inspectionFrequencyQty ?? ""),
+                  );
+                  setShowFrequencyEdit((v) => !v);
+                }}
+                data-ocid={`project-detail.production.inspection_frequency.${stageId}`}
+              >
+                {linked.inspectionFrequencyQty
+                  ? `Every ${linked.inspectionFrequencyQty} pcs`
+                  : "Set Quantity Frequency"}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
                 className="h-6 px-2 text-[11px] text-destructive hover:text-destructive/80"
                 disabled={saving}
                 onClick={handleRemoveLink}
@@ -260,6 +316,41 @@ export function ProductionStageInspectionControl({
             </>
           )}
         </div>
+        {showFrequencyEdit && (
+          <div className="flex items-center gap-2 w-full mt-1">
+            <Input
+              type="number"
+              min={1}
+              step={1}
+              placeholder="e.g. 25 (blank = plain pass/fail)"
+              className="h-7 text-xs w-64"
+              value={frequencyInput}
+              onChange={(e) => setFrequencyInput(e.target.value)}
+              data-ocid={`project-detail.production.inspection_frequency_input.${stageId}`}
+            />
+            <span className="text-[11px] text-muted-foreground shrink-0">
+              pieces
+            </span>
+            <Button
+              type="button"
+              size="sm"
+              className="h-7 text-xs"
+              disabled={savingFrequency}
+              onClick={handleSaveFrequency}
+            >
+              Save
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="h-7 text-xs"
+              onClick={() => setShowFrequencyEdit(false)}
+            >
+              Cancel
+            </Button>
+          </div>
+        )}
         {showPicker && (
           <div className="flex items-center gap-2 w-full mt-1">
             <Select

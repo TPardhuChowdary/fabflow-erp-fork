@@ -132,7 +132,18 @@ const emptyForm = {
   notes: "",
 };
 
-export function JobCards() {
+interface JobCardsProps {
+  /** Universal cross-module linking (Master ERP Architecture, Phase 2)
+   * — same moduleNavContext.highlightId pattern Invoices.tsx already
+   * uses, opening this job card in the existing view dialog. */
+  highlightJobCardId?: string;
+  onViewProject?: (projectId: string) => void;
+}
+
+export function JobCards({
+  highlightJobCardId,
+  onViewProject,
+}: JobCardsProps = {}) {
   const { currentUser } = useAuth();
   const {
     jobCards,
@@ -208,6 +219,12 @@ export function JobCards() {
       if (v) setEvidencePolicy(v);
     });
   }, []);
+
+  useEffect(() => {
+    if (!highlightJobCardId) return;
+    const match = jobCards.find((jc) => jc.id === highlightJobCardId);
+    if (match) setViewCard(match);
+  }, [highlightJobCardId, jobCards]);
 
   async function handleTransition(
     action: (id: string) => Promise<WriteResult<JobCard>>,
@@ -991,7 +1008,20 @@ export function JobCards() {
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <p className="text-xs text-muted-foreground">Project</p>
-                    <p className="font-mono">{projectNo(viewCard.projectId)}</p>
+                    {onViewProject ? (
+                      <button
+                        type="button"
+                        className="font-mono hover:underline text-left"
+                        onClick={() => onViewProject(viewCard.projectId)}
+                        data-ocid="jobcards.view.project_link"
+                      >
+                        {projectNo(viewCard.projectId)}
+                      </button>
+                    ) : (
+                      <p className="font-mono">
+                        {projectNo(viewCard.projectId)}
+                      </p>
+                    )}
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Employee</p>

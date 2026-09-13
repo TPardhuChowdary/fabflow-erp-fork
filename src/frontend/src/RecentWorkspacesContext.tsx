@@ -42,7 +42,11 @@ export type WorkspaceRecordType =
   | "die"
   | "tool"
   | "tender"
-  | "invoice";
+  | "invoice"
+  | "quotation"
+  | "jobCard"
+  | "purchaseOrder"
+  | "inventoryUsage";
 
 export interface RecentWorkspaceEntry {
   key: string;
@@ -139,6 +143,27 @@ function resolveDisplay(
       if (!inv) return null;
       const cust = s.customers.find((c) => c.id === inv.customerId);
       return { label: inv.invNo, secondary: cust?.name ?? "Invoice" };
+    }
+    case "quotation": {
+      const q = s.quotations.find((x) => x.id === id);
+      if (!q) return null;
+      const cust = s.customers.find((c) => c.id === q.customerId);
+      return { label: q.qtNo, secondary: cust?.name ?? "Quotation" };
+    }
+    case "jobCard": {
+      const jc = s.jobCards.find((x) => x.id === id);
+      if (!jc) return null;
+      return { label: jc.jobNo, secondary: jc.employeeName || "Job Card" };
+    }
+    case "purchaseOrder": {
+      const po = s.masterPOs.find((x) => x.id === id);
+      if (!po) return null;
+      return { label: po.poNumber, secondary: "Purchase Order" };
+    }
+    case "inventoryUsage": {
+      const u = s.materialUsages.find((x) => x.id === id);
+      if (!u) return null;
+      return { label: u.materialName, secondary: "Material Usage" };
     }
   }
 }

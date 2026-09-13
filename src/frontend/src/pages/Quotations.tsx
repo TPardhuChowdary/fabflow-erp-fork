@@ -40,7 +40,7 @@ import {
   X,
 } from "lucide-react";
 import { ShieldOff } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { toast } from "sonner";
@@ -148,7 +148,21 @@ const emptyForm = (defaultTerms = "") => ({
   notes: defaultTerms,
 });
 
-export function Quotations() {
+interface QuotationsProps {
+  /** Universal cross-module linking (Master ERP Architecture, Phase 2)
+   * — same moduleNavContext.highlightId pattern Invoices.tsx already
+   * uses, opening this quotation in the existing view dialog. Distinct
+   * from App.tsx's own unrelated selectedQuotation/QuotationPrintView
+   * pair (a print preview fed by CustomerHistory) — this is this
+   * page's own local dialog state below. */
+  highlightQuotationId?: string;
+  onViewProject?: (projectId: string) => void;
+}
+
+export function Quotations({
+  highlightQuotationId,
+  onViewProject,
+}: QuotationsProps = {}) {
   const {
     quotations,
     quotationRevisions,
@@ -263,6 +277,12 @@ export function Quotations() {
   const [selectedQuotation, setSelectedQuotation] = useState<Quotation | null>(
     null,
   );
+
+  useEffect(() => {
+    if (!highlightQuotationId) return;
+    const match = quotations.find((q) => q.id === highlightQuotationId);
+    if (match) setSelectedQuotation(match);
+  }, [highlightQuotationId, quotations]);
   const [showRecordPO, setShowRecordPO] = useState(false);
   const [deleteQuotationTarget, setDeleteQuotationTarget] =
     useState<Quotation | null>(null);
@@ -1807,6 +1827,33 @@ export function Quotations() {
                       </span>
                       <p className="font-medium">{cust?.name ?? "\u2014"}</p>
                     </div>
+                    {selectedQuotation.projectId && (
+                      <div>
+                        <span className="text-muted-foreground text-xs">
+                          Project
+                        </span>
+                        {onViewProject ? (
+                          <button
+                            type="button"
+                            className="block font-medium hover:underline text-left"
+                            onClick={() =>
+                              onViewProject(selectedQuotation.projectId!)
+                            }
+                            data-ocid="quotations.view.project_link"
+                          >
+                            {projects.find(
+                              (p) => p.id === selectedQuotation.projectId,
+                            )?.projectNo ?? selectedQuotation.projectId}
+                          </button>
+                        ) : (
+                          <p className="font-medium">
+                            {projects.find(
+                              (p) => p.id === selectedQuotation.projectId,
+                            )?.projectNo ?? selectedQuotation.projectId}
+                          </p>
+                        )}
+                      </div>
+                    )}
                     <div>
                       <span className="text-muted-foreground text-xs">
                         Valid Until

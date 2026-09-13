@@ -16,7 +16,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Download, Eye, ShieldOff, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
 import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
@@ -30,7 +30,19 @@ import type { MasterPO, ProjectPOStatus } from "../types";
 
 type MasterPOStatus = MasterPO["status"];
 
-export function PurchaseOrders() {
+interface PurchaseOrdersProps {
+  /** Universal cross-module linking (Master ERP Architecture, Phase 2)
+   * — this page has no detail dialog (flat editable table), so this
+   * reuses Inventory.tsx's scroll+highlight-row variant rather than
+   * the Vendor/Invoice open-a-dialog variant. */
+  highlightPoId?: string;
+  onViewProject?: (projectId: string) => void;
+}
+
+export function PurchaseOrders({
+  highlightPoId,
+  onViewProject,
+}: PurchaseOrdersProps = {}) {
   const { currentUser } = useAuth();
   const pView = canView(currentUser, "purchase_orders");
   const pEdit = canEdit(currentUser, "purchase_orders");
@@ -49,6 +61,13 @@ export function PurchaseOrders() {
   );
 
   const [deletePOTarget, setDeletePOTarget] = useState<MasterPO | null>(null);
+
+  useEffect(() => {
+    if (!highlightPoId) return;
+    document
+      .getElementById(`po-${highlightPoId}`)
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [highlightPoId]);
 
   const handleConfirmDeletePO = async () => {
     const po = deletePOTarget;
@@ -206,6 +225,10 @@ export function PurchaseOrders() {
                 return (
                   <TableRow
                     key={po.id}
+                    id={`po-${po.id}`}
+                    className={
+                      highlightPoId === po.id ? "bg-primary/10" : undefined
+                    }
                     data-ocid={`purchase_orders.list.row.${i + 1}`}
                   >
                     <TableCell className="text-xs font-mono font-semibold">
@@ -237,7 +260,16 @@ export function PurchaseOrders() {
                             <Badge
                               key={proj.id}
                               variant="outline"
-                              className="text-[10px] px-1.5 py-0"
+                              className={
+                                onViewProject
+                                  ? "text-[10px] px-1.5 py-0 cursor-pointer hover:bg-muted"
+                                  : "text-[10px] px-1.5 py-0"
+                              }
+                              onClick={
+                                onViewProject
+                                  ? () => onViewProject(proj.id)
+                                  : undefined
+                              }
                             >
                               {proj.projectName}
                             </Badge>

@@ -23,7 +23,7 @@ import {
   X,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { useAuth } from "../AuthContext";
 import type { WorkspaceRecordType } from "../RecentWorkspacesContext";
 import { canEdit } from "../permissions";
@@ -38,12 +38,17 @@ interface MaterialDetailDrawerProps {
   // instead of plain text, via the app's one navigation chokepoint.
   // Optional so this drawer still works standalone/in tests without it.
   onNavigateToRecord?: (type: WorkspaceRecordType, id: string) => void;
+  /** Scrolls to and highlights the matching usage row on mount — set by
+   * App.tsx's navigateToRecord("inventoryUsage", id) via Inventory.tsx
+   * (see that file for how the owning item is resolved). */
+  highlightUsageId?: string;
 }
 
 export function MaterialDetailDrawer({
   item,
   onClose,
   onNavigateToRecord,
+  highlightUsageId,
 }: MaterialDetailDrawerProps) {
   const { inventoryPurchases, materialUsages, projects } = useStore();
   const { currentUser } = useAuth();
@@ -106,6 +111,13 @@ export function MaterialDetailDrawer({
 
     return { purchases, usages, totalPurchased, totalUsed };
   }, [item, inventoryPurchases, materialUsages, projects, usageSortBy]);
+
+  useEffect(() => {
+    if (!highlightUsageId) return;
+    document
+      .getElementById(`inventory-usage-${highlightUsageId}`)
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }, [highlightUsageId]);
 
   const formatDate = (dateStr: string) => {
     if (!dateStr) return "—";
@@ -456,6 +468,12 @@ export function MaterialDetailDrawer({
                           data.usages.map((u, i) => (
                             <TableRow
                               key={u.id}
+                              id={`inventory-usage-${u.id}`}
+                              className={
+                                highlightUsageId === u.id
+                                  ? "bg-primary/10"
+                                  : undefined
+                              }
                               data-ocid={`inventory.detail.usage.item.${i + 1}`}
                             >
                               <TableCell className="text-xs py-2 max-w-[140px] truncate">

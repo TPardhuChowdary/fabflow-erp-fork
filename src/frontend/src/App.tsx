@@ -175,6 +175,11 @@ function AppInner() {
       page !== "inventory" &&
       page !== "machine-detail" &&
       page !== "employee-detail" &&
+      page !== "vendors" &&
+      page !== "invoices" &&
+      page !== "quotations" &&
+      page !== "job-cards" &&
+      page !== "purchase-orders" &&
       moduleNavContext
     ) {
       setModuleNavContext(null);
@@ -251,6 +256,27 @@ function AppInner() {
         // list page with no separate detail route, exactly like Vendors.
         setModuleNavContext({ highlightId: id });
         setPage("invoices");
+        break;
+      case "quotation":
+        setModuleNavContext({ highlightId: id });
+        setPage("quotations");
+        break;
+      case "jobCard":
+        setModuleNavContext({ highlightId: id });
+        setPage("job-cards");
+        break;
+      case "purchaseOrder":
+        // PurchaseOrders.tsx has no detail dialog (flat editable table) —
+        // reuses Inventory.tsx's scroll+highlight-row variant of this
+        // same mechanism instead of opening a dialog.
+        setModuleNavContext({ highlightId: id });
+        setPage("purchase-orders");
+        break;
+      case "inventoryUsage":
+        // A usage row lives inside a specific inventory item's drawer —
+        // Inventory.tsx resolves the owning item and opens it.
+        setModuleNavContext({ tab: "stock", highlightId: id });
+        setPage("inventory");
         break;
     }
     pushRecent(type, id);
@@ -364,6 +390,12 @@ function AppInner() {
             }}
             onViewInvoices={() => setPage("invoices")}
             onViewInvoice={(id) => navigateToRecord("invoice", id)}
+            onViewJobCard={(id) => navigateToRecord("jobCard", id)}
+            onViewQuotation={(id) => navigateToRecord("quotation", id)}
+            onViewInventoryUsage={(id) =>
+              navigateToRecord("inventoryUsage", id)
+            }
+            onViewPurchaseOrder={(id) => navigateToRecord("purchaseOrder", id)}
           />
         );
       case "employees":
@@ -387,7 +419,16 @@ function AppInner() {
             initialTab={
               moduleNavContext?.tab as "stock" | "purchases" | undefined
             }
-            highlightPurchaseId={moduleNavContext?.highlightId}
+            highlightPurchaseId={
+              moduleNavContext?.tab === "purchases"
+                ? moduleNavContext?.highlightId
+                : undefined
+            }
+            highlightUsageId={
+              moduleNavContext?.tab === "stock"
+                ? moduleNavContext?.highlightId
+                : undefined
+            }
             onNavigateToRecord={navigateToRecord}
           />
         );
@@ -395,10 +436,26 @@ function AppInner() {
         if (!canView(currentUser, "settings")) return accessDenied;
         return <Settings />;
       case "quotations":
-        return <Quotations />;
+        return (
+          <Quotations
+            highlightQuotationId={
+              page === "quotations" ? moduleNavContext?.highlightId : undefined
+            }
+            onViewProject={(id) => navigateToRecord("project", id)}
+          />
+        );
       case "purchase-orders":
         if (!canView(currentUser, "purchase_orders")) return accessDenied;
-        return <PurchaseOrders />;
+        return (
+          <PurchaseOrders
+            highlightPoId={
+              page === "purchase-orders"
+                ? moduleNavContext?.highlightId
+                : undefined
+            }
+            onViewProject={(id) => navigateToRecord("project", id)}
+          />
+        );
       case "company-po":
         return <CompanyPOs />;
       case "production":
@@ -407,7 +464,14 @@ function AppInner() {
         );
       case "job-cards":
         if (!canView(currentUser, "job_cards")) return accessDenied;
-        return <JobCards />;
+        return (
+          <JobCards
+            highlightJobCardId={
+              page === "job-cards" ? moduleNavContext?.highlightId : undefined
+            }
+            onViewProject={(id) => navigateToRecord("project", id)}
+          />
+        );
       case "my-jobs":
         if (!canView(currentUser, "job_cards")) return accessDenied;
         return <MyJobs />;

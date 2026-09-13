@@ -167,6 +167,13 @@ interface Props {
    * id)), distinct from onViewInvoices above which just lands on the
    * unfiltered Invoices list. */
   onViewInvoice?: (invoiceId: string) => void;
+  /** Master ERP Architecture, remaining Phase 2 links — opens one exact
+   * job card / quotation / material usage row via App.tsx's
+   * navigateToRecord, same pattern as onViewInvoice above. */
+  onViewJobCard?: (jobCardId: string) => void;
+  onViewQuotation?: (quotationId: string) => void;
+  onViewInventoryUsage?: (usageId: string) => void;
+  onViewPurchaseOrder?: (purchaseOrderId: string) => void;
 }
 
 const fmt = (n: number) => `₹${n.toLocaleString("en-IN")}`;
@@ -443,6 +450,10 @@ export function ProjectDetail({
   onOpenDrawingEditor,
   onViewInvoices,
   onViewInvoice,
+  onViewJobCard,
+  onViewQuotation,
+  onViewInventoryUsage,
+  onViewPurchaseOrder,
 }: Props) {
   const {
     projects,
@@ -487,6 +498,8 @@ export function ProjectDetail({
     updateProjectItem,
     deleteProjectItem,
     masterPOs,
+    jobCards,
+    quotations,
     deliveryChallans,
     addInventoryItem,
     invoices,
@@ -6035,7 +6048,30 @@ export function ProjectDetail({
                           key={u.id}
                           data-ocid={`project-detail.material-usage.item.${i + 1}`}
                         >
-                          <TableCell className="font-medium text-sm">
+                          <TableCell
+                            className={cn(
+                              "font-medium text-sm",
+                              onViewInventoryUsage &&
+                                "cursor-pointer hover:underline",
+                            )}
+                            role={onViewInventoryUsage ? "button" : undefined}
+                            tabIndex={onViewInventoryUsage ? 0 : undefined}
+                            onClick={
+                              onViewInventoryUsage
+                                ? () => onViewInventoryUsage(u.id)
+                                : undefined
+                            }
+                            onKeyDown={
+                              onViewInventoryUsage
+                                ? (e) => {
+                                    if (e.key === "Enter" || e.key === " ") {
+                                      e.preventDefault();
+                                      onViewInventoryUsage(u.id);
+                                    }
+                                  }
+                                : undefined
+                            }
+                          >
                             {u.materialName}
                           </TableCell>
                           <TableCell className="text-sm font-mono">
@@ -7007,6 +7043,191 @@ export function ProjectDetail({
                       )}
                     </CardContent>
                   </Card>
+
+                  {/* Quotations / Job Cards / Purchase Orders — remaining
+                      Phase 2 cross-module links (Master ERP Architecture).
+                      Compact lists, same click-through row pattern as
+                      Invoices above; each module still fully owns its own
+                      create/edit/delete UI in its own page. */}
+                  {(() => {
+                    const projQuotations = quotations.filter(
+                      (q) => q.projectId === projectId,
+                    );
+                    const projJobCards = jobCards.filter(
+                      (jc) => jc.projectId === projectId,
+                    );
+                    const linkedSharedPoIds = new Set(
+                      (project?.pos || []).map((po) => po.sharedPoId),
+                    );
+                    const projPOs = masterPOs.filter((po) =>
+                      linkedSharedPoIds.has(po.sharedPoId),
+                    );
+                    return (
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <Card>
+                          <CardHeader className="pb-2">
+                            <CardTitle className="text-sm text-muted-foreground uppercase tracking-wide">
+                              Quotations
+                            </CardTitle>
+                          </CardHeader>
+                          <CardContent className="space-y-1.5">
+                            {projQuotations.length === 0 ? (
+                              <p className="text-xs text-muted-foreground">
+                                No quotations for this project.
+                              </p>
+                            ) : (
+                              projQuotations.map((q) => (
+                                <div
+                                  key={q.id}
+                                  className={cn(
+                                    "rounded-md border border-border p-2 text-xs",
+                                    onViewQuotation &&
+                                      "cursor-pointer hover:bg-muted/40",
+                                  )}
+                                  role={onViewQuotation ? "button" : undefined}
+                                  tabIndex={onViewQuotation ? 0 : undefined}
+                                  onClick={
+                                    onViewQuotation
+                                      ? () => onViewQuotation(q.id)
+                                      : undefined
+                                  }
+                                  onKeyDown={
+                                    onViewQuotation
+                                      ? (e) => {
+                                          if (
+                                            e.key === "Enter" ||
+                                            e.key === " "
+                                          ) {
+                                            e.preventDefault();
+                                            onViewQuotation(q.id);
+                                          }
+                                        }
+                                      : undefined
+                                  }
+                                  data-ocid={`project-detail.quotations.item.${q.id}`}
+                                >
+                                  <p className="font-mono font-medium">
+                                    {q.qtNo}
+                                  </p>
+                                  <p className="text-muted-foreground">
+                                    {fmt(q.totalAmount)} · {q.status}
+                                  </p>
+                                </div>
+                              ))
+                            )}
+                          </CardContent>
+                        </Card>
+                        <Card>
+                          <CardHeader className="pb-2">
+                            <CardTitle className="text-sm text-muted-foreground uppercase tracking-wide">
+                              Job Cards
+                            </CardTitle>
+                          </CardHeader>
+                          <CardContent className="space-y-1.5">
+                            {projJobCards.length === 0 ? (
+                              <p className="text-xs text-muted-foreground">
+                                No job cards for this project.
+                              </p>
+                            ) : (
+                              projJobCards.map((jc) => (
+                                <div
+                                  key={jc.id}
+                                  className={cn(
+                                    "rounded-md border border-border p-2 text-xs",
+                                    onViewJobCard &&
+                                      "cursor-pointer hover:bg-muted/40",
+                                  )}
+                                  role={onViewJobCard ? "button" : undefined}
+                                  tabIndex={onViewJobCard ? 0 : undefined}
+                                  onClick={
+                                    onViewJobCard
+                                      ? () => onViewJobCard(jc.id)
+                                      : undefined
+                                  }
+                                  onKeyDown={
+                                    onViewJobCard
+                                      ? (e) => {
+                                          if (
+                                            e.key === "Enter" ||
+                                            e.key === " "
+                                          ) {
+                                            e.preventDefault();
+                                            onViewJobCard(jc.id);
+                                          }
+                                        }
+                                      : undefined
+                                  }
+                                  data-ocid={`project-detail.job-cards.item.${jc.id}`}
+                                >
+                                  <p className="font-mono font-medium">
+                                    {jc.jobNo}
+                                  </p>
+                                  <p className="text-muted-foreground">
+                                    {jc.employeeName} · {jc.status}
+                                  </p>
+                                </div>
+                              ))
+                            )}
+                          </CardContent>
+                        </Card>
+                        <Card>
+                          <CardHeader className="pb-2">
+                            <CardTitle className="text-sm text-muted-foreground uppercase tracking-wide">
+                              Purchase Orders
+                            </CardTitle>
+                          </CardHeader>
+                          <CardContent className="space-y-1.5">
+                            {projPOs.length === 0 ? (
+                              <p className="text-xs text-muted-foreground">
+                                No purchase orders linked to this project.
+                              </p>
+                            ) : (
+                              projPOs.map((po) => (
+                                <div
+                                  key={po.id}
+                                  className={cn(
+                                    "rounded-md border border-border p-2 text-xs",
+                                    onViewPurchaseOrder &&
+                                      "cursor-pointer hover:bg-muted/40",
+                                  )}
+                                  role={
+                                    onViewPurchaseOrder ? "button" : undefined
+                                  }
+                                  tabIndex={onViewPurchaseOrder ? 0 : undefined}
+                                  onClick={
+                                    onViewPurchaseOrder
+                                      ? () => onViewPurchaseOrder(po.id)
+                                      : undefined
+                                  }
+                                  onKeyDown={
+                                    onViewPurchaseOrder
+                                      ? (e) => {
+                                          if (
+                                            e.key === "Enter" ||
+                                            e.key === " "
+                                          ) {
+                                            e.preventDefault();
+                                            onViewPurchaseOrder(po.id);
+                                          }
+                                        }
+                                      : undefined
+                                  }
+                                  data-ocid={`project-detail.purchase-orders.item.${po.id}`}
+                                >
+                                  <p className="font-mono font-medium">
+                                    {po.poNumber}
+                                  </p>
+                                  <p className="text-muted-foreground">
+                                    {po.status}
+                                  </p>
+                                </div>
+                              ))
+                            )}
+                          </CardContent>
+                        </Card>
+                      </div>
+                    );
+                  })()}
 
                   {/* Cost Breakdown */}
                   <div>

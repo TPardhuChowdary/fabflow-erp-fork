@@ -9,14 +9,17 @@ import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { cn } from "@/lib/utils";
 import {
+  Boxes,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
+  ClipboardCheck,
   ClipboardList,
   Clock,
   Cog,
   Building2 as CustomerIcon,
   Factory,
+  FileText,
   FolderKanban,
   Hammer,
   LogOut,
@@ -24,6 +27,7 @@ import {
   Receipt,
   Search,
   Settings,
+  ShoppingCart,
   Store,
   UserCircle2,
   Wrench,
@@ -56,6 +60,10 @@ const WORKSPACE_ICON: Record<WorkspaceRecordType, typeof FolderKanban> = {
   tool: Hammer,
   tender: ClipboardList,
   invoice: Receipt,
+  quotation: FileText,
+  jobCard: ClipboardCheck,
+  purchaseOrder: ShoppingCart,
+  inventoryUsage: Boxes,
 };
 
 // Role identity badges — deliberately NOT the success/warning/destructive

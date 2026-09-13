@@ -100,6 +100,11 @@ interface InventoryProps {
   /** Scrolls to and highlights the matching Purchase History row on
    * mount — used by Petty Expense History's "View Inventory Record". */
   highlightPurchaseId?: string;
+  /** Opens the owning item's detail drawer and scrolls to/highlights this
+   * usage row on mount — used by MaterialDetailDrawer's own project link
+   * in reverse (Project -> this usage), via App.tsx's
+   * navigateToRecord("inventoryUsage", id). */
+  highlightUsageId?: string;
   /** Phase 14 (Group 2) — Connected Records: threaded down to
    * MaterialDetailDrawer so its vendor/project mentions become real
    * clickable links via the app's one navigation chokepoint. */
@@ -109,6 +114,7 @@ interface InventoryProps {
 export function Inventory({
   initialTab,
   highlightPurchaseId,
+  highlightUsageId,
   onNavigateToRecord,
 }: InventoryProps = {}) {
   const { currentUser } = useAuth();
@@ -219,6 +225,24 @@ export function Inventory({
       .getElementById(`inventory-purchase-${highlightPurchaseId}`)
       ?.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [highlightPurchaseId]);
+
+  // Project -> Inventory Usage (reverse of MaterialDetailDrawer's own
+  // usage-row project link) — a usage row lives two hops deep (this
+  // page's item -> that item's drawer -> the usage row inside it), so
+  // landing on it means resolving its owning item first and opening the
+  // drawer for it; the drawer itself then scrolls to/highlights the row
+  // (see its own highlightUsageId prop).
+  useEffect(() => {
+    if (!highlightUsageId) return;
+    const usage = materialUsages.find((u) => u.id === highlightUsageId);
+    if (!usage) return;
+    const owningItem = inventoryItems.find(
+      (i) =>
+        i.id === usage.inventoryItemId ||
+        i.name.trim().toLowerCase() === usage.materialName.trim().toLowerCase(),
+    );
+    if (owningItem) setSelectedMaterial(owningItem);
+  }, [highlightUsageId, materialUsages, inventoryItems]);
 
   const togglePurchaseExpand = (id: string) => {
     setExpandedPurchaseIds((prev) => {
@@ -1315,6 +1339,7 @@ export function Inventory({
         item={selectedMaterial}
         onClose={() => setSelectedMaterial(null)}
         onNavigateToRecord={onNavigateToRecord}
+        highlightUsageId={highlightUsageId}
       />
 
       {/* Add Material Dialog */}

@@ -14,8 +14,12 @@
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
 import type {
   CustomCostEntry,
+  FinishingItem,
+  HardwareItem,
   InternalCosting,
   ManualAdjustment,
+  ManufacturingItem,
+  RawMaterialItem,
 } from "@/types";
 
 export type WriteStatus = "success" | "denied" | "error" | "unauthenticated";
@@ -44,6 +48,10 @@ interface InternalCostingRow {
   scrap_loss_cost: number | null;
   extra_costs: CustomCostEntry[] | null;
   manual_adjustments: ManualAdjustment[] | null;
+  raw_materials: RawMaterialItem[] | null;
+  hardware_items: HardwareItem[] | null;
+  manufacturing_items: ManufacturingItem[] | null;
+  finishing_items: FinishingItem[] | null;
 }
 
 function rowToInternalCosting(row: InternalCostingRow): InternalCosting {
@@ -65,6 +73,10 @@ function rowToInternalCosting(row: InternalCostingRow): InternalCosting {
     scrapLossCost: row.scrap_loss_cost ?? undefined,
     extraCosts: row.extra_costs ?? undefined,
     manualAdjustments: row.manual_adjustments ?? undefined,
+    rawMaterials: row.raw_materials ?? undefined,
+    hardwareItems: row.hardware_items ?? undefined,
+    manufacturingItems: row.manufacturing_items ?? undefined,
+    finishingItems: row.finishing_items ?? undefined,
   };
 }
 
@@ -86,6 +98,10 @@ function toInternalCostingFields(v: Omit<InternalCosting, "id">) {
     scrap_loss_cost: v.scrapLossCost ?? null,
     extra_costs: v.extraCosts ?? [],
     manual_adjustments: v.manualAdjustments ?? [],
+    raw_materials: v.rawMaterials ?? [],
+    hardware_items: v.hardwareItems ?? [],
+    manufacturing_items: v.manufacturingItems ?? [],
+    finishing_items: v.finishingItems ?? [],
   };
 }
 
@@ -93,7 +109,8 @@ const INTERNAL_COSTING_COLUMNS =
   "id, project_id, raw_material_cost, cnc_cost, hardware_cost, " +
   "powder_coating_cost, assembly_cost, packing_cost, labour_cost, " +
   "transport_cost, machine_cost, outsource_cost, consumables_cost, " +
-  "electricity_cost, scrap_loss_cost, extra_costs, manual_adjustments";
+  "electricity_cost, scrap_loss_cost, extra_costs, manual_adjustments, " +
+  "raw_materials, hardware_items, manufacturing_items, finishing_items";
 
 async function requireSession() {
   if (!isSupabaseConfigured) {

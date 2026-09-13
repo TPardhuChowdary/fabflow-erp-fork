@@ -1,3 +1,5 @@
+import { CostingLineItemsTable } from "@/components/CostingLineItemsTable";
+import type { CostingLineItemRow } from "@/components/CostingLineItemsTable";
 import { EmployeeSelect } from "@/components/EmployeeSelect";
 import { MachineSelect } from "@/components/MachineSelect";
 import { ProjectDrawingFiles } from "@/components/ProjectDrawingFiles";
@@ -128,10 +130,13 @@ import type {
   CostBasis,
   CustomCostEntry,
   DesignFile,
+  FinishingItem,
+  HardwareItem,
   InternalCosting,
   InventoryItem,
   Invoice,
   ManualAdjustment,
+  ManufacturingItem,
   MaterialPurchase,
   MaterialUsage,
   Project,
@@ -144,6 +149,7 @@ import type {
   ProjectProductionStage,
   ProjectStageStatus,
   PurchaseAttachment,
+  RawMaterialItem,
   StageTransaction,
 } from "../types";
 
@@ -837,6 +843,10 @@ export function ProjectDetail({
     labourCost: existingCosting?.labourCost ?? 0,
     transportCost: existingCosting?.transportCost ?? 0,
     extraCosts: existingCosting?.extraCosts ?? [],
+    rawMaterials: existingCosting?.rawMaterials ?? [],
+    hardwareItems: existingCosting?.hardwareItems ?? [],
+    manufacturingItems: existingCosting?.manufacturingItems ?? [],
+    finishingItems: existingCosting?.finishingItems ?? [],
   });
 
   useEffect(() => {
@@ -851,6 +861,10 @@ export function ProjectDetail({
         labourCost: existingCosting.labourCost ?? 0,
         transportCost: existingCosting.transportCost ?? 0,
         extraCosts: existingCosting.extraCosts ?? [],
+        rawMaterials: existingCosting.rawMaterials ?? [],
+        hardwareItems: existingCosting.hardwareItems ?? [],
+        manufacturingItems: existingCosting.manufacturingItems ?? [],
+        finishingItems: existingCosting.finishingItems ?? [],
       });
     }
   }, [existingCosting]);
@@ -1561,6 +1575,28 @@ export function ProjectDetail({
     (s, c) => s + (Number(c.amount) || 0),
     0,
   );
+  // Line-item totals (Phase 1, Master ERP Architecture) — additive
+  // alongside the legacy single-number *Cost fields above, exactly like
+  // extraCosts already is: a project can use the quick single-number
+  // entry, the detailed line items, or both, and everything folds into
+  // one Total Manufacturing Cost below rather than the two ever being
+  // presented as competing/exclusive entry modes.
+  const rawMaterialsTotal = (costing.rawMaterials || []).reduce(
+    (s, r) => s + (Number(r.amount) || 0),
+    0,
+  );
+  const hardwareItemsTotal = (costing.hardwareItems || []).reduce(
+    (s, h) => s + (Number(h.amount) || 0),
+    0,
+  );
+  const manufacturingItemsTotal = (costing.manufacturingItems || []).reduce(
+    (s, m) => s + (Number(m.amount) || 0),
+    0,
+  );
+  const finishingItemsTotal = (costing.finishingItems || []).reduce(
+    (s, f) => s + (Number(f.amount) || 0),
+    0,
+  );
   const totalCosting =
     (costing.rawMaterialCost || 0) +
     (costing.cncCost || 0) +
@@ -1570,7 +1606,11 @@ export function ProjectDetail({
     (costing.packingCost || 0) +
     (costing.labourCost || 0) +
     (costing.transportCost || 0) +
-    extraCostsTotal;
+    extraCostsTotal +
+    rawMaterialsTotal +
+    hardwareItemsTotal +
+    manufacturingItemsTotal +
+    finishingItemsTotal;
 
   const handleDownloadFile = (f: DesignFile) => {
     const a = document.createElement("a");
@@ -1670,6 +1710,10 @@ export function ProjectDetail({
       labourCost: costing.labourCost ?? 0,
       transportCost: costing.transportCost ?? 0,
       extraCosts: costing.extraCosts ?? [],
+      rawMaterials: costing.rawMaterials ?? [],
+      hardwareItems: costing.hardwareItems ?? [],
+      manufacturingItems: costing.manufacturingItems ?? [],
+      finishingItems: costing.finishingItems ?? [],
     });
     if (!ok) {
       toast.error("Could not save costing — please try again");
@@ -3707,6 +3751,106 @@ export function ProjectDetail({
                   below (with quantity × rate), leave Labour Cost / Machine Cost
                   above at ₹0 to avoid counting them twice.
                 </p>
+
+                {/* Line items (Master ERP Architecture, Phase 1) — additive
+                    alongside the single-number fields above; a project can
+                    use either or both. Same reasoning applies here as the
+                    note above: itemizing a category below and also filling
+                    in its single-number field counts it twice. */}
+                <CostingLineItemsTable
+                  title="Raw Materials"
+                  addLabel="Add Raw Material"
+                  fields={[
+                    { key: "material", label: "Material", required: true },
+                    {
+                      key: "size",
+                      label: "Size",
+                      placeholder: "1000×2000×2mm",
+                    },
+                  ]}
+                  rows={
+                    (costing.rawMaterials ||
+                      []) as unknown as CostingLineItemRow[]
+                  }
+                  onChange={(rows) =>
+                    setCosting((c) => ({
+                      ...c,
+                      rawMaterials: rows as unknown as RawMaterialItem[],
+                    }))
+                  }
+                  disabled={!pEdit}
+                  dataOcidPrefix="project-detail.costing.raw_materials"
+                />
+                <CostingLineItemsTable
+                  title="Hardware"
+                  addLabel="Add Hardware"
+                  fields={[
+                    { key: "item", label: "Item", required: true },
+                    { key: "specification", label: "Specification" },
+                  ]}
+                  rows={
+                    (costing.hardwareItems ||
+                      []) as unknown as CostingLineItemRow[]
+                  }
+                  onChange={(rows) =>
+                    setCosting((c) => ({
+                      ...c,
+                      hardwareItems: rows as unknown as HardwareItem[],
+                    }))
+                  }
+                  disabled={!pEdit}
+                  dataOcidPrefix="project-detail.costing.hardware"
+                />
+                <CostingLineItemsTable
+                  title="Manufacturing / Processing"
+                  addLabel="Add Manufacturing Cost"
+                  fields={[
+                    {
+                      key: "process",
+                      label: "Process",
+                      placeholder: "Cutting, Bending, Welding, …",
+                      required: true,
+                    },
+                  ]}
+                  rows={
+                    (costing.manufacturingItems ||
+                      []) as unknown as CostingLineItemRow[]
+                  }
+                  onChange={(rows) =>
+                    setCosting((c) => ({
+                      ...c,
+                      manufacturingItems:
+                        rows as unknown as ManufacturingItem[],
+                    }))
+                  }
+                  disabled={!pEdit}
+                  dataOcidPrefix="project-detail.costing.manufacturing"
+                />
+                <CostingLineItemsTable
+                  title="Finishing"
+                  addLabel="Add Finishing Cost"
+                  fields={[
+                    {
+                      key: "process",
+                      label: "Process",
+                      placeholder: "Powder Coating, Galvanizing, Painting, …",
+                      required: true,
+                    },
+                  ]}
+                  rows={
+                    (costing.finishingItems ||
+                      []) as unknown as CostingLineItemRow[]
+                  }
+                  onChange={(rows) =>
+                    setCosting((c) => ({
+                      ...c,
+                      finishingItems: rows as unknown as FinishingItem[],
+                    }))
+                  }
+                  disabled={!pEdit}
+                  dataOcidPrefix="project-detail.costing.finishing"
+                />
+
                 {/* Custom Costs Section */}
                 <div className="space-y-3 pt-2">
                   <div className="flex items-center justify-between">

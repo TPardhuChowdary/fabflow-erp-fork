@@ -958,6 +958,48 @@ export interface ManualAdjustment {
   type: "Add Cost" | "Reduce Cost";
 }
 
+// Internal Costing line items (Master ERP Architecture audit, Phase 1) —
+// repeatable rows per category, same amount = quantity * rate convention
+// CustomCostEntry already established above. Each category is its own
+// array rather than one generic shape (like CustomCostEntry) because the
+// audit specifically asked for category-appropriate fields (material +
+// size for Raw Materials, item + specification for Hardware, a bare
+// process name for Manufacturing/Finishing) rather than one-size-fits-all
+// fields most rows would leave blank.
+export interface RawMaterialItem {
+  id: string;
+  material: string;
+  size?: string;
+  quantity: number;
+  rate: number;
+  amount: number;
+}
+
+export interface HardwareItem {
+  id: string;
+  item: string;
+  specification?: string;
+  quantity: number;
+  rate: number;
+  amount: number;
+}
+
+export interface ManufacturingItem {
+  id: string;
+  process: string;
+  quantity: number;
+  rate: number;
+  amount: number;
+}
+
+export interface FinishingItem {
+  id: string;
+  process: string;
+  quantity: number;
+  rate: number;
+  amount: number;
+}
+
 export interface InternalCosting {
   id: string;
   projectId: string;
@@ -977,6 +1019,14 @@ export interface InternalCosting {
   scrapLossCost?: number;
   extraCosts?: CustomCostEntry[];
   manualAdjustments?: ManualAdjustment[];
+  // Line items (Phase 1 of the Master ERP Architecture implementation) —
+  // additive alongside the legacy single-number *Cost fields above,
+  // which stay untouched for existing costings. See
+  // supabase/migrations/20260913090000_internal_costing_line_items.sql.
+  rawMaterials?: RawMaterialItem[];
+  hardwareItems?: HardwareItem[];
+  manufacturingItems?: ManufacturingItem[];
+  finishingItems?: FinishingItem[];
 }
 
 export interface MaterialPurchase {

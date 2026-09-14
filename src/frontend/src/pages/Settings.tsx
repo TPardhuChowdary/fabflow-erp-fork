@@ -1572,7 +1572,6 @@ function BackupRestore() {
       inventoryPurchases: store.inventoryPurchases || [],
       bomItems: store.bomItems || [],
       bomRequisitions: store.bomRequisitions || [],
-      qualityInspections: store.qualityInspections || [],
       designFiles: store.designFiles || [],
       internalCostings: store.internalCostings || [],
       attendanceRecords: store.attendanceRecords || [],

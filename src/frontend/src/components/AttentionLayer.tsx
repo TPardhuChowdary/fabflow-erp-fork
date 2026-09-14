@@ -283,7 +283,14 @@ export function AttentionLayer({ onNavigate }: Props) {
         )
         .slice(0, 3)
         .join(", "),
-      navigate: "quality",
+      // Was "quality" — the deleted legacy Quality.tsx page, which had no
+      // knowledge of QMS characteristics at all and could never actually
+      // show the issue this alert describes. This data comes from the
+      // current QMS (projectQmsInspectionCharacteristics above); route to
+      // the current QMS's own landing page instead, same as every other
+      // alert here targets a real area page rather than one specific
+      // record (see "blocked-stages" -> "production" above).
+      navigate: "qms-dashboard",
     });
   }
 

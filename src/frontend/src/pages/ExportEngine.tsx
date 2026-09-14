@@ -108,14 +108,6 @@ const SECTION_MANIFEST: SectionDef[] = [
     hasFiles: false,
   },
   {
-    id: "qc_reports",
-    label: "Quality Inspection",
-    description: "QC inspection results per stage",
-    group: "Quality & Dispatch",
-    applicableTo: ["project"],
-    hasFiles: false,
-  },
-  {
     id: "delivery_challans",
     label: "Delivery Challans",
     description: "Dispatch records with quantities",
@@ -182,7 +174,6 @@ const DEFAULT_SECTIONS: ExportSectionId[] = [
   "quotations",
   "purchase_orders",
   "production_history",
-  "qc_reports",
   "delivery_challans",
   "invoices",
   "payment_history",
@@ -303,7 +294,6 @@ export function ExportEngine({ context, onBack }: Props) {
       materialUsages,
       projectProductions,
       outsourcedWorks,
-      qualityInspections,
       deliveryChallans,
       invoices,
       payments,
@@ -342,7 +332,6 @@ export function ExportEngine({ context, onBack }: Props) {
       const projectOutsourced = outsourcedWorks.filter(
         (o) => o.projectId === ctxId,
       );
-      const projectQC = qualityInspections.filter((q) => q.projectId === ctxId);
       const projectChallans = deliveryChallans.filter(
         (dc) =>
           dc.projectId === ctxId ||
@@ -371,7 +360,6 @@ export function ExportEngine({ context, onBack }: Props) {
         materialUsages: projectMatUsages,
         production: projectProduction,
         outsourcedWorks: projectOutsourced,
-        qualityInspections: projectQC,
         deliveryChallans: projectChallans,
         invoices: projectInvoices,
         payments: projectPayments,
@@ -536,34 +524,6 @@ export function ExportEngine({ context, onBack }: Props) {
         <div class="section-header"><h2>Production History</h2></div>
         <table><thead><tr><th>Stage</th><th>Status</th><th>Sent Qty</th><th>Received Qty</th><th>Notes</th></tr></thead>
         <tbody>${rows}</tbody></table>
-      </div>`;
-  }
-
-  function buildQCSection(data: ReturnType<typeof gatherData>): string {
-    const qcs = (data as any).qualityInspections || [];
-    const rows = qcs
-      .map(
-        (q: any) => `
-      <tr>
-        <td>${q.stage}</td>
-        <td><span class="badge ${q.qcStatus === "Pass" ? "badge-green" : q.qcStatus === "Fail" ? "badge-red" : "badge-orange"}">${q.qcStatus}</span></td>
-        <td>${q.approvedQty ?? "—"}</td>
-        <td>${q.rejectedQty ?? "—"}</td>
-        <td>${q.remarks || q.qcNotes || "—"}</td>
-      </tr>`,
-      )
-      .join("");
-    return `
-      <div class="section">
-        <div class="section-header"><h2>Quality Inspection</h2></div>
-        ${
-          qcs.length === 0
-            ? '<p class="no-data">No QC records found.</p>'
-            : `
-          <table><thead><tr><th>Stage</th><th>Status</th><th>Approved Qty</th><th>Rejected Qty</th><th>Remarks</th></tr></thead>
-          <tbody>${rows}</tbody></table>
-        `
-        }
       </div>`;
   }
 
@@ -1064,7 +1024,6 @@ export function ExportEngine({ context, onBack }: Props) {
       "material_usage",
       "production_history",
       "outsourced_work",
-      "qc_reports",
       "delivery_challans",
       "invoices",
       "payment_history",
@@ -1100,9 +1059,6 @@ export function ExportEngine({ context, onBack }: Props) {
           break;
         case "outsourced_work":
           sections.push(buildOutsourcedSection(data));
-          break;
-        case "qc_reports":
-          sections.push(buildQCSection(data));
           break;
         case "delivery_challans":
           sections.push(buildChallansSection(data));

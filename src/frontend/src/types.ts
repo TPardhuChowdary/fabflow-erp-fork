@@ -539,19 +539,6 @@ export interface Vendor {
   createdAt: number;
 }
 
-export interface QualityInspection {
-  id: string;
-  projectId: string;
-  stage: string;
-  qcStatus: QCStatus;
-  qcNotes: string;
-  updatedAt: number;
-  // Enhanced quality fields (additive)
-  approvedQty?: number;
-  rejectedQty?: number;
-  remarks?: string;
-}
-
 export type Page =
   | "dashboard"
   | "customers"
@@ -561,7 +548,6 @@ export type Page =
   | "job-cards"
   | "my-jobs"
   | "material-requisitions"
-  | "quality"
   | "delivery-challans"
   | "invoices"
   | "eway-bills"
@@ -2129,7 +2115,6 @@ export type ExportSectionId =
   | "material_usage"
   | "production_history"
   | "outsourced_work"
-  | "qc_reports"
   | "delivery_challans"
   | "invoices"
   | "payment_history"

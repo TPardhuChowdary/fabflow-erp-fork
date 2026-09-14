@@ -63,11 +63,6 @@ export const MODULE_PERMISSIONS: Record<
     category: "Production",
     actions: ["view", "create", "edit", "delete", "upload"],
   },
-  quality_inspection: {
-    label: "Quality Inspection",
-    category: "Quality & Logistics",
-    actions: ["view", "create", "edit", "approve"],
-  },
   delivery_challans: {
     label: "Delivery Challans",
     category: "Quality & Logistics",
@@ -339,7 +334,6 @@ export const ROLE_DEFAULTS: Record<string, Record<string, boolean>> = {
   quality: buildPerms([
     "projects.view",
     "production.view",
-    "quality_inspection.*",
     "delivery_challans.view",
     "quality_characteristics.*",
     "inspection_sheets.view",

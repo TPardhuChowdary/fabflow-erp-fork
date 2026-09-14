@@ -47,7 +47,6 @@ import { Production } from "./pages/Production";
 import { ProjectDetail } from "./pages/ProjectDetail";
 import { Projects } from "./pages/Projects";
 import { PurchaseOrders } from "./pages/PurchaseOrders";
-import { Quality } from "./pages/Quality";
 import { Quotations } from "./pages/Quotations";
 import { ScrapManagement } from "./pages/ScrapManagement";
 import { Settings } from "./pages/Settings";
@@ -478,8 +477,6 @@ function AppInner() {
       case "material-requisitions":
         if (!canView(currentUser, "material_requisitions")) return accessDenied;
         return <MaterialRequisitions />;
-      case "quality":
-        return <Quality />;
       case "delivery-challans":
         return <DeliveryChallans />;
       case "invoices":

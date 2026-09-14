@@ -87,6 +87,8 @@ import type {
   EmploymentType,
   ExpenseFloat,
   ExpenseFloatStatus,
+  FinishingItem,
+  HardwareItem,
   InternalCosting,
   InvLineItem,
   InventoryItem,
@@ -104,6 +106,7 @@ import type {
   MachineServiceUsage,
   MachineSparePart,
   ManualAdjustment,
+  ManufacturingItem,
   MasterPO,
   MaterialPurchase,
   MaterialUsage,
@@ -129,6 +132,7 @@ import type {
   QuotationPurchaseOrder,
   QuotationRevision,
   QuotationStatus,
+  RawMaterialItem,
   SalaryPayment,
   ScrapRecord,
   ScrapStatus,
@@ -2314,13 +2318,25 @@ export interface InternalCostingRow {
   scrap_loss_cost: number | null;
   extra_costs: CustomCostEntry[] | null;
   manual_adjustments: ManualAdjustment[] | null;
+  // Repeatable line items (Master ERP Architecture, Phase 1 / internal
+  // costing line items) — were missing from this app-boot hydration path
+  // entirely, so a full page reload silently dropped every saved Raw
+  // Material/Hardware/Manufacturing/Finishing row even though it was
+  // correctly persisted in Supabase (internalCostingApi.ts's own
+  // upsert-response mapping already included these; only this
+  // separate reload-time read path did not).
+  raw_materials: RawMaterialItem[] | null;
+  hardware_items: HardwareItem[] | null;
+  manufacturing_items: ManufacturingItem[] | null;
+  finishing_items: FinishingItem[] | null;
 }
 
 const INTERNAL_COSTING_COLUMNS =
   "id, project_id, raw_material_cost, cnc_cost, hardware_cost, " +
   "powder_coating_cost, assembly_cost, packing_cost, labour_cost, " +
   "transport_cost, machine_cost, outsource_cost, consumables_cost, " +
-  "electricity_cost, scrap_loss_cost, extra_costs, manual_adjustments";
+  "electricity_cost, scrap_loss_cost, extra_costs, manual_adjustments, " +
+  "raw_materials, hardware_items, manufacturing_items, finishing_items";
 
 export function transformInternalCostingRow(
   row: InternalCostingRow,
@@ -2343,6 +2359,10 @@ export function transformInternalCostingRow(
     scrapLossCost: row.scrap_loss_cost ?? undefined,
     extraCosts: row.extra_costs ?? undefined,
     manualAdjustments: row.manual_adjustments ?? undefined,
+    rawMaterials: row.raw_materials ?? undefined,
+    hardwareItems: row.hardware_items ?? undefined,
+    manufacturingItems: row.manufacturing_items ?? undefined,
+    finishingItems: row.finishing_items ?? undefined,
   };
 }
 

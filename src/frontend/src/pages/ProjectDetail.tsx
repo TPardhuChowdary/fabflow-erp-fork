@@ -1,4 +1,7 @@
-import { CostingLineItemsTable } from "@/components/CostingLineItemsTable";
+import {
+  CostingLineItemsTable,
+  isLineItemRowMeaningful,
+} from "@/components/CostingLineItemsTable";
 import type { CostingLineItemRow } from "@/components/CostingLineItemsTable";
 import { EmployeeSelect } from "@/components/EmployeeSelect";
 import { MachineSelect } from "@/components/MachineSelect";
@@ -1723,16 +1726,39 @@ export function ProjectDetail({
       toast.error("Access restricted: edit permission required");
       return;
     }
+    // Drop only fully-blank draft rows (every field untouched) — a row
+    // with just Size, or just Quantity+Rate, or any other single field
+    // filled in is meaningful and must be kept. isLineItemRowMeaningful
+    // uses the same field list each CostingLineItemsTable instance above
+    // renders, so this matches exactly what the user sees on screen.
     const ok = await upsertInternalCosting({
       projectId,
       ...costing,
       labourCost: costing.labourCost ?? 0,
       transportCost: costing.transportCost ?? 0,
       extraCosts: costing.extraCosts ?? [],
-      rawMaterials: costing.rawMaterials ?? [],
-      hardwareItems: costing.hardwareItems ?? [],
-      manufacturingItems: costing.manufacturingItems ?? [],
-      finishingItems: costing.finishingItems ?? [],
+      rawMaterials: (costing.rawMaterials ?? []).filter((r) =>
+        isLineItemRowMeaningful(r as unknown as CostingLineItemRow, [
+          { key: "material", label: "Material" },
+          { key: "size", label: "Size" },
+        ]),
+      ),
+      hardwareItems: (costing.hardwareItems ?? []).filter((r) =>
+        isLineItemRowMeaningful(r as unknown as CostingLineItemRow, [
+          { key: "item", label: "Item" },
+          { key: "specification", label: "Specification" },
+        ]),
+      ),
+      manufacturingItems: (costing.manufacturingItems ?? []).filter((r) =>
+        isLineItemRowMeaningful(r as unknown as CostingLineItemRow, [
+          { key: "process", label: "Process" },
+        ]),
+      ),
+      finishingItems: (costing.finishingItems ?? []).filter((r) =>
+        isLineItemRowMeaningful(r as unknown as CostingLineItemRow, [
+          { key: "process", label: "Process" },
+        ]),
+      ),
     });
     if (!ok) {
       toast.error("Could not save costing — please try again");
@@ -3747,22 +3773,145 @@ export function ProjectDetail({
                       ["transportCost", "Transport Cost"],
                     ] as [keyof typeof costing, string][]
                   ).map(([field, label]) => (
-                    <div key={field} className="space-y-1.5">
-                      <Label htmlFor={`costing-${field}`}>{label} (₹)</Label>
-                      <Input
-                        id={`costing-${field}`}
-                        type="number"
-                        min={0}
-                        value={(costing[field] as number) ?? 0}
-                        onChange={(e) =>
-                          setCosting((c) => ({
-                            ...c,
-                            [field]: Number(e.target.value),
-                          }))
-                        }
-                        data-ocid="project-detail.costing.input"
-                      />
-                    </div>
+                    // Line items (Master ERP Architecture, Phase 1) live
+                    // directly under the one legacy cost field each category
+                    // is additive alongside — not in a separate section
+                    // further down — so each Fragment renders the field's
+                    // own input plus (for the 4 categories that have one) its
+                    // itemized-rows block right underneath it. Both fold into
+                    // the same Total Manufacturing Cost below, so filling in
+                    // both the number above and its rows for one category
+                    // counts that category twice — leave the number at ₹0
+                    // once you're itemizing it below.
+                    <Fragment key={field}>
+                      <div className="space-y-1.5">
+                        <Label htmlFor={`costing-${field}`}>{label} (₹)</Label>
+                        <Input
+                          id={`costing-${field}`}
+                          type="number"
+                          min={0}
+                          value={(costing[field] as number) ?? 0}
+                          onChange={(e) =>
+                            setCosting((c) => ({
+                              ...c,
+                              [field]: Number(e.target.value),
+                            }))
+                          }
+                          data-ocid="project-detail.costing.input"
+                        />
+                      </div>
+                      {field === "rawMaterialCost" && (
+                        <div className="sm:col-span-2">
+                          <CostingLineItemsTable
+                            title="Raw Materials"
+                            addLabel="Add Raw Material"
+                            fields={[
+                              { key: "material", label: "Material" },
+                              {
+                                key: "size",
+                                label: "Size",
+                                placeholder: "1000×2000×2mm",
+                              },
+                            ]}
+                            rows={
+                              (costing.rawMaterials ||
+                                []) as unknown as CostingLineItemRow[]
+                            }
+                            onChange={(rows) =>
+                              setCosting((c) => ({
+                                ...c,
+                                rawMaterials:
+                                  rows as unknown as RawMaterialItem[],
+                              }))
+                            }
+                            disabled={!pEdit}
+                            dataOcidPrefix="project-detail.costing.raw_materials"
+                          />
+                        </div>
+                      )}
+                      {field === "hardwareCost" && (
+                        <div className="sm:col-span-2">
+                          <CostingLineItemsTable
+                            title="Hardware"
+                            addLabel="Add Hardware"
+                            fields={[
+                              { key: "item", label: "Item" },
+                              { key: "specification", label: "Specification" },
+                            ]}
+                            rows={
+                              (costing.hardwareItems ||
+                                []) as unknown as CostingLineItemRow[]
+                            }
+                            onChange={(rows) =>
+                              setCosting((c) => ({
+                                ...c,
+                                hardwareItems:
+                                  rows as unknown as HardwareItem[],
+                              }))
+                            }
+                            disabled={!pEdit}
+                            dataOcidPrefix="project-detail.costing.hardware"
+                          />
+                        </div>
+                      )}
+                      {field === "machineCost" && (
+                        <div className="sm:col-span-2">
+                          <CostingLineItemsTable
+                            title="Manufacturing / Processing"
+                            addLabel="Add Manufacturing Cost"
+                            fields={[
+                              {
+                                key: "process",
+                                label: "Process",
+                                placeholder: "Cutting, Bending, Welding, …",
+                              },
+                            ]}
+                            rows={
+                              (costing.manufacturingItems ||
+                                []) as unknown as CostingLineItemRow[]
+                            }
+                            onChange={(rows) =>
+                              setCosting((c) => ({
+                                ...c,
+                                manufacturingItems:
+                                  rows as unknown as ManufacturingItem[],
+                              }))
+                            }
+                            disabled={!pEdit}
+                            dataOcidPrefix="project-detail.costing.manufacturing"
+                          />
+                        </div>
+                      )}
+                      {field === "powderCoatingCost" && (
+                        <div className="sm:col-span-2">
+                          <CostingLineItemsTable
+                            title="Finishing"
+                            addLabel="Add Finishing Cost"
+                            fields={[
+                              {
+                                key: "process",
+                                label: "Process",
+                                placeholder:
+                                  "Powder Coating, Galvanizing, Painting, …",
+                              },
+                            ]}
+                            rows={
+                              (costing.finishingItems ||
+                                []) as unknown as CostingLineItemRow[]
+                            }
+                            onChange={(rows) =>
+                              setCosting((c) => ({
+                                ...c,
+                                finishingItems:
+                                  rows as unknown as FinishingItem[],
+                              }))
+                            }
+                            disabled={!pEdit}
+                            dataOcidPrefix="project-detail.costing.finishing"
+                          />
+                        </div>
+                      )}
+                    </Fragment>
                   ))}
                 </div>
                 <p className="text-xs text-muted-foreground -mt-2">
@@ -3770,105 +3919,6 @@ export function ProjectDetail({
                   below (with quantity × rate), leave Labour Cost / Machine Cost
                   above at ₹0 to avoid counting them twice.
                 </p>
-
-                {/* Line items (Master ERP Architecture, Phase 1) — additive
-                    alongside the single-number fields above; a project can
-                    use either or both. Same reasoning applies here as the
-                    note above: itemizing a category below and also filling
-                    in its single-number field counts it twice. */}
-                <CostingLineItemsTable
-                  title="Raw Materials"
-                  addLabel="Add Raw Material"
-                  fields={[
-                    { key: "material", label: "Material", required: true },
-                    {
-                      key: "size",
-                      label: "Size",
-                      placeholder: "1000×2000×2mm",
-                    },
-                  ]}
-                  rows={
-                    (costing.rawMaterials ||
-                      []) as unknown as CostingLineItemRow[]
-                  }
-                  onChange={(rows) =>
-                    setCosting((c) => ({
-                      ...c,
-                      rawMaterials: rows as unknown as RawMaterialItem[],
-                    }))
-                  }
-                  disabled={!pEdit}
-                  dataOcidPrefix="project-detail.costing.raw_materials"
-                />
-                <CostingLineItemsTable
-                  title="Hardware"
-                  addLabel="Add Hardware"
-                  fields={[
-                    { key: "item", label: "Item", required: true },
-                    { key: "specification", label: "Specification" },
-                  ]}
-                  rows={
-                    (costing.hardwareItems ||
-                      []) as unknown as CostingLineItemRow[]
-                  }
-                  onChange={(rows) =>
-                    setCosting((c) => ({
-                      ...c,
-                      hardwareItems: rows as unknown as HardwareItem[],
-                    }))
-                  }
-                  disabled={!pEdit}
-                  dataOcidPrefix="project-detail.costing.hardware"
-                />
-                <CostingLineItemsTable
-                  title="Manufacturing / Processing"
-                  addLabel="Add Manufacturing Cost"
-                  fields={[
-                    {
-                      key: "process",
-                      label: "Process",
-                      placeholder: "Cutting, Bending, Welding, …",
-                      required: true,
-                    },
-                  ]}
-                  rows={
-                    (costing.manufacturingItems ||
-                      []) as unknown as CostingLineItemRow[]
-                  }
-                  onChange={(rows) =>
-                    setCosting((c) => ({
-                      ...c,
-                      manufacturingItems:
-                        rows as unknown as ManufacturingItem[],
-                    }))
-                  }
-                  disabled={!pEdit}
-                  dataOcidPrefix="project-detail.costing.manufacturing"
-                />
-                <CostingLineItemsTable
-                  title="Finishing"
-                  addLabel="Add Finishing Cost"
-                  fields={[
-                    {
-                      key: "process",
-                      label: "Process",
-                      placeholder: "Powder Coating, Galvanizing, Painting, …",
-                      required: true,
-                    },
-                  ]}
-                  rows={
-                    (costing.finishingItems ||
-                      []) as unknown as CostingLineItemRow[]
-                  }
-                  onChange={(rows) =>
-                    setCosting((c) => ({
-                      ...c,
-                      finishingItems: rows as unknown as FinishingItem[],
-                    }))
-                  }
-                  disabled={!pEdit}
-                  dataOcidPrefix="project-detail.costing.finishing"
-                />
 
                 {/* Custom Costs Section */}
                 <div className="space-y-3 pt-2">

@@ -36,9 +36,23 @@ export interface CostingLineItemField {
   key: string;
   label: string;
   placeholder?: string;
-  /** Only the first field is required to add a row (e.g. a Raw Material
-   * row needs a material name; "size" is optional context). */
-  required?: boolean;
+}
+
+/** A row is worth keeping the moment ANY user-editable cell has a value —
+ * no single field (not even the label field, e.g. Material) is mandatory.
+ * A row where the user has typed nothing at all (every label field blank,
+ * quantity/rate both at their untouched-default 0) is a draft and must be
+ * dropped before persisting. Exported so ProjectDetail.tsx's
+ * handleSaveCosting can filter each of the four line-item arrays with the
+ * exact same rule this table itself uses. */
+export function isLineItemRowMeaningful(
+  row: CostingLineItemRow,
+  fields: CostingLineItemField[],
+): boolean {
+  const hasLabelValue = fields.some(
+    (f) => String(row[f.key] ?? "").trim() !== "",
+  );
+  return hasLabelValue || Number(row.quantity) > 0 || Number(row.rate) > 0;
 }
 
 interface CostingLineItemsTableProps {
@@ -63,9 +77,12 @@ export function CostingLineItemsTable({
   const total = rows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
 
   const addRow = () => {
+    // quantity starts at 0, not 1 — a nonzero default would make a
+    // completely untouched row look "meaningful" to isLineItemRowMeaningful
+    // above and wrongly survive the empty-row save filter.
     const blank: CostingLineItemRow = {
       id: crypto.randomUUID(),
-      quantity: 1,
+      quantity: 0,
       rate: 0,
       amount: 0,
     };

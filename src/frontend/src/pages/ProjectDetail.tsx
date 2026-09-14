@@ -1,8 +1,12 @@
 import {
   CostingLineItemsTable,
+  createBlankLineItemRow,
   isLineItemRowMeaningful,
 } from "@/components/CostingLineItemsTable";
-import type { CostingLineItemRow } from "@/components/CostingLineItemsTable";
+import type {
+  CostingLineItemField,
+  CostingLineItemRow,
+} from "@/components/CostingLineItemsTable";
 import { EmployeeSelect } from "@/components/EmployeeSelect";
 import { MachineSelect } from "@/components/MachineSelect";
 import { ProjectDrawingFiles } from "@/components/ProjectDrawingFiles";
@@ -180,6 +184,35 @@ interface Props {
 }
 
 const fmt = (n: number) => `₹${n.toLocaleString("en-IN")}`;
+
+// Internal Costing — field configs for the 4 legacy cost fields that have
+// a real repeatable line-item array behind them. Same field lists used in
+// three places: the small "+" beside each field's label (creates a blank
+// row via createBlankLineItemRow), the CostingLineItemsTable that renders
+// the rows, and handleSaveCosting's isLineItemRowMeaningful filter — one
+// constant per category keeps all three in sync.
+const RAW_MATERIAL_FIELDS: CostingLineItemField[] = [
+  { key: "material", label: "Material" },
+  { key: "size", label: "Size", placeholder: "1000×2000×2mm" },
+];
+const HARDWARE_FIELDS: CostingLineItemField[] = [
+  { key: "item", label: "Item" },
+  { key: "specification", label: "Specification" },
+];
+const MANUFACTURING_FIELDS: CostingLineItemField[] = [
+  {
+    key: "process",
+    label: "Process",
+    placeholder: "Cutting, Bending, Welding, …",
+  },
+];
+const FINISHING_FIELDS: CostingLineItemField[] = [
+  {
+    key: "process",
+    label: "Process",
+    placeholder: "Powder Coating, Galvanizing, Painting, …",
+  },
+];
 
 // Phase 57 (Group 2, Master Monster Prompt) — same labels as
 // Projects.tsx's WORK_TYPES, defined locally here too rather than
@@ -1738,26 +1771,28 @@ export function ProjectDetail({
       transportCost: costing.transportCost ?? 0,
       extraCosts: costing.extraCosts ?? [],
       rawMaterials: (costing.rawMaterials ?? []).filter((r) =>
-        isLineItemRowMeaningful(r as unknown as CostingLineItemRow, [
-          { key: "material", label: "Material" },
-          { key: "size", label: "Size" },
-        ]),
+        isLineItemRowMeaningful(
+          r as unknown as CostingLineItemRow,
+          RAW_MATERIAL_FIELDS,
+        ),
       ),
       hardwareItems: (costing.hardwareItems ?? []).filter((r) =>
-        isLineItemRowMeaningful(r as unknown as CostingLineItemRow, [
-          { key: "item", label: "Item" },
-          { key: "specification", label: "Specification" },
-        ]),
+        isLineItemRowMeaningful(
+          r as unknown as CostingLineItemRow,
+          HARDWARE_FIELDS,
+        ),
       ),
       manufacturingItems: (costing.manufacturingItems ?? []).filter((r) =>
-        isLineItemRowMeaningful(r as unknown as CostingLineItemRow, [
-          { key: "process", label: "Process" },
-        ]),
+        isLineItemRowMeaningful(
+          r as unknown as CostingLineItemRow,
+          MANUFACTURING_FIELDS,
+        ),
       ),
       finishingItems: (costing.finishingItems ?? []).filter((r) =>
-        isLineItemRowMeaningful(r as unknown as CostingLineItemRow, [
-          { key: "process", label: "Process" },
-        ]),
+        isLineItemRowMeaningful(
+          r as unknown as CostingLineItemRow,
+          FINISHING_FIELDS,
+        ),
       ),
     });
     if (!ok) {
@@ -3772,152 +3807,170 @@ export function ProjectDetail({
                       ["scrapLossCost", "Scrap / Material Loss"],
                       ["transportCost", "Transport Cost"],
                     ] as [keyof typeof costing, string][]
-                  ).map(([field, label]) => (
-                    // Line items (Master ERP Architecture, Phase 1) live
-                    // directly under the one legacy cost field each category
-                    // is additive alongside — not in a separate section
-                    // further down — so each Fragment renders the field's
-                    // own input plus (for the 4 categories that have one) its
-                    // itemized-rows block right underneath it. Both fold into
-                    // the same Total Manufacturing Cost below, so filling in
-                    // both the number above and its rows for one category
-                    // counts that category twice — leave the number at ₹0
-                    // once you're itemizing it below.
-                    <Fragment key={field}>
-                      <div className="space-y-1.5">
-                        <Label htmlFor={`costing-${field}`}>{label} (₹)</Label>
-                        <Input
-                          id={`costing-${field}`}
-                          type="number"
-                          min={0}
-                          value={(costing[field] as number) ?? 0}
-                          onChange={(e) =>
-                            setCosting((c) => ({
-                              ...c,
-                              [field]: Number(e.target.value),
-                            }))
-                          }
-                          data-ocid="project-detail.costing.input"
-                        />
-                      </div>
-                      {field === "rawMaterialCost" && (
-                        <div className="sm:col-span-2">
-                          <CostingLineItemsTable
-                            title="Raw Materials"
-                            addLabel="Add Raw Material"
-                            fields={[
-                              { key: "material", label: "Material" },
-                              {
-                                key: "size",
-                                label: "Size",
-                                placeholder: "1000×2000×2mm",
-                              },
-                            ]}
-                            rows={
-                              (costing.rawMaterials ||
-                                []) as unknown as CostingLineItemRow[]
-                            }
-                            onChange={(rows) =>
+                  ).map(([field, label]) => {
+                    // Only these 4 legacy fields have a real repeatable
+                    // line-item array behind them — every other field still
+                    // gets the small "+" for visual consistency, but it's
+                    // disabled rather than inventing a line-item type that
+                    // doesn't exist for that category.
+                    const lineItems =
+                      field === "rawMaterialCost"
+                        ? {
+                            fields: RAW_MATERIAL_FIELDS,
+                            rows: (costing.rawMaterials ||
+                              []) as unknown as CostingLineItemRow[],
+                            onAdd: () =>
+                              setCosting((c) => ({
+                                ...c,
+                                rawMaterials: [
+                                  ...(c.rawMaterials ?? []),
+                                  createBlankLineItemRow(
+                                    RAW_MATERIAL_FIELDS,
+                                  ) as unknown as RawMaterialItem,
+                                ],
+                              })),
+                            onChange: (rows: CostingLineItemRow[]) =>
                               setCosting((c) => ({
                                 ...c,
                                 rawMaterials:
                                   rows as unknown as RawMaterialItem[],
-                              }))
+                              })),
+                            dataOcidPrefix:
+                              "project-detail.costing.raw_materials",
+                          }
+                        : field === "hardwareCost"
+                          ? {
+                              fields: HARDWARE_FIELDS,
+                              rows: (costing.hardwareItems ||
+                                []) as unknown as CostingLineItemRow[],
+                              onAdd: () =>
+                                setCosting((c) => ({
+                                  ...c,
+                                  hardwareItems: [
+                                    ...(c.hardwareItems ?? []),
+                                    createBlankLineItemRow(
+                                      HARDWARE_FIELDS,
+                                    ) as unknown as HardwareItem,
+                                  ],
+                                })),
+                              onChange: (rows: CostingLineItemRow[]) =>
+                                setCosting((c) => ({
+                                  ...c,
+                                  hardwareItems:
+                                    rows as unknown as HardwareItem[],
+                                })),
+                              dataOcidPrefix: "project-detail.costing.hardware",
                             }
-                            disabled={!pEdit}
-                            dataOcidPrefix="project-detail.costing.raw_materials"
-                          />
-                        </div>
-                      )}
-                      {field === "hardwareCost" && (
-                        <div className="sm:col-span-2">
-                          <CostingLineItemsTable
-                            title="Hardware"
-                            addLabel="Add Hardware"
-                            fields={[
-                              { key: "item", label: "Item" },
-                              { key: "specification", label: "Specification" },
-                            ]}
-                            rows={
-                              (costing.hardwareItems ||
-                                []) as unknown as CostingLineItemRow[]
-                            }
-                            onChange={(rows) =>
+                          : field === "machineCost"
+                            ? {
+                                fields: MANUFACTURING_FIELDS,
+                                rows: (costing.manufacturingItems ||
+                                  []) as unknown as CostingLineItemRow[],
+                                onAdd: () =>
+                                  setCosting((c) => ({
+                                    ...c,
+                                    manufacturingItems: [
+                                      ...(c.manufacturingItems ?? []),
+                                      createBlankLineItemRow(
+                                        MANUFACTURING_FIELDS,
+                                      ) as unknown as ManufacturingItem,
+                                    ],
+                                  })),
+                                onChange: (rows: CostingLineItemRow[]) =>
+                                  setCosting((c) => ({
+                                    ...c,
+                                    manufacturingItems:
+                                      rows as unknown as ManufacturingItem[],
+                                  })),
+                                dataOcidPrefix:
+                                  "project-detail.costing.manufacturing",
+                              }
+                            : field === "powderCoatingCost"
+                              ? {
+                                  fields: FINISHING_FIELDS,
+                                  rows: (costing.finishingItems ||
+                                    []) as unknown as CostingLineItemRow[],
+                                  onAdd: () =>
+                                    setCosting((c) => ({
+                                      ...c,
+                                      finishingItems: [
+                                        ...(c.finishingItems ?? []),
+                                        createBlankLineItemRow(
+                                          FINISHING_FIELDS,
+                                        ) as unknown as FinishingItem,
+                                      ],
+                                    })),
+                                  onChange: (rows: CostingLineItemRow[]) =>
+                                    setCosting((c) => ({
+                                      ...c,
+                                      finishingItems:
+                                        rows as unknown as FinishingItem[],
+                                    })),
+                                  dataOcidPrefix:
+                                    "project-detail.costing.finishing",
+                                }
+                              : null;
+
+                    return (
+                      <Fragment key={field}>
+                        <div className="space-y-1.5">
+                          <div className="flex items-center justify-between gap-2">
+                            <Label htmlFor={`costing-${field}`}>
+                              {label} (₹)
+                            </Label>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon"
+                              className="h-5 w-5 shrink-0"
+                              disabled={!pEdit || !lineItems}
+                              onClick={lineItems?.onAdd}
+                              title={
+                                lineItems
+                                  ? `Add a detailed ${label} row`
+                                  : "No itemized breakdown for this cost category"
+                              }
+                              data-ocid={`project-detail.costing.${field}.add_item`}
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                            </Button>
+                          </div>
+                          <Input
+                            id={`costing-${field}`}
+                            type="number"
+                            min={0}
+                            value={(costing[field] as number) ?? 0}
+                            onChange={(e) =>
                               setCosting((c) => ({
                                 ...c,
-                                hardwareItems:
-                                  rows as unknown as HardwareItem[],
+                                [field]: Number(e.target.value),
                               }))
                             }
-                            disabled={!pEdit}
-                            dataOcidPrefix="project-detail.costing.hardware"
+                            data-ocid="project-detail.costing.input"
                           />
                         </div>
-                      )}
-                      {field === "machineCost" && (
-                        <div className="sm:col-span-2">
-                          <CostingLineItemsTable
-                            title="Manufacturing / Processing"
-                            addLabel="Add Manufacturing Cost"
-                            fields={[
-                              {
-                                key: "process",
-                                label: "Process",
-                                placeholder: "Cutting, Bending, Welding, …",
-                              },
-                            ]}
-                            rows={
-                              (costing.manufacturingItems ||
-                                []) as unknown as CostingLineItemRow[]
-                            }
-                            onChange={(rows) =>
-                              setCosting((c) => ({
-                                ...c,
-                                manufacturingItems:
-                                  rows as unknown as ManufacturingItem[],
-                              }))
-                            }
-                            disabled={!pEdit}
-                            dataOcidPrefix="project-detail.costing.manufacturing"
-                          />
-                        </div>
-                      )}
-                      {field === "powderCoatingCost" && (
-                        <div className="sm:col-span-2">
-                          <CostingLineItemsTable
-                            title="Finishing"
-                            addLabel="Add Finishing Cost"
-                            fields={[
-                              {
-                                key: "process",
-                                label: "Process",
-                                placeholder:
-                                  "Powder Coating, Galvanizing, Painting, …",
-                              },
-                            ]}
-                            rows={
-                              (costing.finishingItems ||
-                                []) as unknown as CostingLineItemRow[]
-                            }
-                            onChange={(rows) =>
-                              setCosting((c) => ({
-                                ...c,
-                                finishingItems:
-                                  rows as unknown as FinishingItem[],
-                              }))
-                            }
-                            disabled={!pEdit}
-                            dataOcidPrefix="project-detail.costing.finishing"
-                          />
-                        </div>
-                      )}
-                    </Fragment>
-                  ))}
+                        {lineItems && lineItems.rows.length > 0 && (
+                          <div className="sm:col-span-2">
+                            <CostingLineItemsTable
+                              fields={lineItems.fields}
+                              rows={lineItems.rows}
+                              onChange={lineItems.onChange}
+                              disabled={!pEdit}
+                              dataOcidPrefix={lineItems.dataOcidPrefix}
+                            />
+                          </div>
+                        )}
+                      </Fragment>
+                    );
+                  })}
                 </div>
                 <p className="text-xs text-muted-foreground -mt-2">
-                  If you itemize machine or labour costs as Extra Cost lines
-                  below (with quantity × rate), leave Labour Cost / Machine Cost
-                  above at ₹0 to avoid counting them twice.
+                  Itemizing a category's rows above (via its small "+") adds to
+                  that category's total below alongside its own ₹ field — leave
+                  the ₹ field at 0 once you're itemizing it via rows to avoid
+                  counting it twice. Same applies if you itemize machine or
+                  labour costs as Extra Cost lines below instead: leave Labour
+                  Cost / Machine Cost above at ₹0.
                 </p>
 
                 {/* Custom Costs Section */}

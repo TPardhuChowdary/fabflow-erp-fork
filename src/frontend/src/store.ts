@@ -19,6 +19,7 @@ import { persist } from "zustand/middleware";
 // regular (non-repeat-order) save path already uses — no new API, no
 // schema change, no behavior change beyond "also persisted."
 import { createBomItemRemote } from "./lib/bomItemsApi";
+import type { CompanyProfileSettings } from "./lib/companySettingsApi";
 import { hydrateBomRequisitions } from "./lib/hydration";
 import { upsertInternalCostingRemote } from "./lib/internalCostingApi";
 import { updateMachineRemote } from "./lib/machinesApi";
@@ -101,7 +102,6 @@ import type {
   ProjectProductionStage,
   ProjectStageStatus,
   PurchaseOrder,
-  QualityInspection,
   Quotation,
   QuotationPurchaseOrder,
   QuotationRevision,
@@ -1137,7 +1137,28 @@ interface Store {
 
   // Settings
   settings: AppSettings;
+  // Local cache write only — never the authoritative save. The Company
+  // Profile subset (see CompanyProfileSettings, companySettingsApi.ts)
+  // must reach Supabase first (Settings.tsx calls
+  // updateCompanySettingsRemote() and only calls this afterward, on
+  // success); the remaining AppSettings fields (Twilio/Gmail
+  // credentials, AI assistant/voice preferences) still save here
+  // directly, same as before — they were never part of this fix's scope.
   updateSettings: (s: AppSettings) => void;
+  // Populated once by hydrateCompanySettings() on login/app start,
+  // merging the Company Profile fields on top of whatever `settings`
+  // already holds (so Twilio/Gmail/AI-assistant/voice fields, which stay
+  // local-only, are never clobbered by a fetch that only ever returns
+  // the Company Profile subset).
+  setCompanySettingsFromServer: (s: CompanyProfileSettings | undefined) => void;
+  settingsHydration: {
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated";
+    error?: string;
+  };
+  setSettingsHydrationStatus: (
+    status: "idle" | "loading" | "success" | "error" | "unauthenticated",
+    error?: string,
+  ) => void;
 
   // Payables
   payables: Payable[];
@@ -1169,11 +1190,6 @@ interface Store {
   addJobCard: (jc: JobCard) => void;
   updateJobCard: (jc: JobCard) => void;
   deleteJobCard: (id: string) => void;
-
-  // Quality Inspections
-  qualityInspections: QualityInspection[];
-  addQualityInspection: (q: QualityInspection) => void;
-  updateQualityInspection: (q: QualityInspection) => void;
 
   // Project Items
   projectItems: ProjectItem[];
@@ -1846,11 +1862,64 @@ const PERSIST_EXCLUDED_KEYS = [
   "authUsers",
 ] as const satisfies readonly (keyof Store)[];
 
+// Company Settings fix — `settings` itself stays a persisted top-level
+// key (unlike the array above): Twilio/Gmail credentials and the AI
+// assistant/voice preferences it also holds are genuinely local-only,
+// never backed by Supabase, and excluding the whole key would silently
+// lose them on every refresh. Only the Company Profile subset (company
+// identity, bank details, document footer text — same field list as
+// CompanyProfileSettings in companySettingsApi.ts) is business data now
+// authoritatively stored in company_settings; stripped here so this
+// browser stops writing a second, staler copy of it to localStorage.
+const COMPANY_PROFILE_SETTINGS_KEYS = [
+  "companyName",
+  "companyAddress",
+  "companyGstin",
+  "companyStateName",
+  "companyStateCode",
+  "companyPhone",
+  "companyEmail",
+  "companyWebsite",
+  "companyLogo",
+  "bankName",
+  "accountName",
+  "accountNumber",
+  "ifscCode",
+  "bankBranch",
+  "companyTerms",
+  "companyDeclaration",
+  "quotationTerms",
+  "companyPOTerms",
+] as const satisfies readonly (keyof AppSettings)[];
+
+// Legacy Quality system removal — fields that used to be real Store keys
+// and no longer are. Deliberately a SEPARATE list from
+// PERSIST_EXCLUDED_KEYS above (which is typed to `keyof Store` on
+// purpose, so a future genuine business-data field gets caught by that
+// type check): these were removed from Store entirely, not merely kept
+// out of persistence, so `keyof Store` can no longer name them. Without
+// this, a browser's pre-existing stale localStorage blob would keep
+// resurrecting `qualityInspections` forever — merge()'s own `...ps`
+// spread below copies every key straight from the raw (untyped) parsed
+// JSON, including ones the live Store shape no longer has, and the next
+// partialize() write would then persist it right back out. Confirmed
+// live: still present in a real browser's localStorage after removing
+// the field from Store and logging in fresh, until this strip was added.
+const REMOVED_LEGACY_STORE_KEYS = ["qualityInspections"] as const;
+
 function stripPersistExcludedKeys(obj: Record<string, unknown>) {
-  const excluded: ReadonlySet<string> = new Set(PERSIST_EXCLUDED_KEYS);
+  const excluded: ReadonlySet<string> = new Set<string>([
+    ...PERSIST_EXCLUDED_KEYS,
+    ...REMOVED_LEGACY_STORE_KEYS,
+  ]);
   const out: Record<string, unknown> = {};
   for (const k of Object.keys(obj)) {
     if (!excluded.has(k)) out[k] = obj[k];
+  }
+  if (out.settings && typeof out.settings === "object") {
+    const settings = { ...(out.settings as Record<string, unknown>) };
+    for (const k of COMPANY_PROFILE_SETTINGS_KEYS) delete settings[k];
+    out.settings = settings;
   }
   return out;
 }
@@ -1964,9 +2033,6 @@ export const useStore = create<Store>()(
 
       // Project Items initial state
       projectItems: [],
-
-      // Quality Inspections initial state
-      qualityInspections: [],
 
       // Petty Expenses
       pettyExpenses: [],
@@ -3151,6 +3217,15 @@ export const useStore = create<Store>()(
 
       // Settings actions
       updateSettings: (s) => set(() => ({ settings: s })),
+      setCompanySettingsFromServer: (companyProfile) =>
+        set((s) => ({
+          settings: companyProfile
+            ? { ...s.settings, ...companyProfile }
+            : s.settings,
+        })),
+      settingsHydration: { status: "idle" },
+      setSettingsHydrationStatus: (status, error) =>
+        set({ settingsHydration: { status, error } }),
 
       // Payables actions
       addPayable: (p) => set((s) => ({ payables: [...s.payables, p] })),
@@ -3221,15 +3296,6 @@ export const useStore = create<Store>()(
         })),
       deleteJobCard: (id) =>
         set((s) => ({ jobCards: s.jobCards.filter((x) => x.id !== id) })),
-
-      addQualityInspection: (q) =>
-        set((s) => ({ qualityInspections: [...s.qualityInspections, q] })),
-      updateQualityInspection: (q) =>
-        set((s) => ({
-          qualityInspections: s.qualityInspections.map((x) =>
-            x.id === q.id ? q : x,
-          ),
-        })),
 
       // Project Items actions — Monster-2, remote-first (same discipline
       // as upsertInternalCosting above): the real server-confirmed row is
@@ -4450,8 +4516,6 @@ export const useStore = create<Store>()(
               (data.inventoryPurchases as InventoryPurchase[]) || [],
             bomItems: (data.bomItems as BomItem[]) || [],
             bomRequisitions: (data.bomRequisitions as BomRequisition[]) || [],
-            qualityInspections:
-              (data.qualityInspections as QualityInspection[]) || [],
             designFiles: (data.designFiles as DesignFile[]) || [],
             internalCostings:
               (data.internalCostings as InternalCosting[]) || [],
@@ -4498,9 +4562,19 @@ export const useStore = create<Store>()(
       // array never re-applies it to live state on this or any later boot,
       // even before Supabase hydration finishes. Going forward, partialize
       // never writes those keys back, so there's nothing left to migrate.
-      version: 1,
+      //
+      // v2 (Company Settings fix) — stripPersistExcludedKeys now also
+      // strips the Company Profile subset out of the nested `settings`
+      // object (see COMPANY_PROFILE_SETTINGS_KEYS above); bumping again
+      // so a v1 blob's stale company name/GSTIN/bank details/etc. get
+      // scrubbed once here too, the same one-time-migration shape as v1.
+      //
+      // v3 (legacy Quality system removal) — stripPersistExcludedKeys now
+      // also strips REMOVED_LEGACY_STORE_KEYS; bumping again so a v2
+      // blob's stale `qualityInspections` gets scrubbed once here too.
+      version: 3,
       migrate: (persistedState, version) => {
-        if (version >= 1 || !persistedState) return persistedState;
+        if (version >= 3 || !persistedState) return persistedState;
         return stripPersistExcludedKeys(
           persistedState as Record<string, unknown>,
         );
@@ -4573,8 +4647,6 @@ export const useStore = create<Store>()(
           bomItems: ps.bomItems || currentState.bomItems || [],
           bomRequisitions:
             ps.bomRequisitions || currentState.bomRequisitions || [],
-          qualityInspections:
-            ps.qualityInspections || currentState.qualityInspections || [],
           masterPOs: ps.masterPOs || currentState.masterPOs || [],
           purchaseOrders:
             ps.purchaseOrders || currentState.purchaseOrders || [],

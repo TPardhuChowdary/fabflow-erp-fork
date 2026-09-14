@@ -18,6 +18,8 @@
 //     with a "loading"/"error"/"unauthenticated" result; only a "success"
 //     result carries data meant to replace local state.
 
+import { getCompanySettingsRemote } from "@/lib/companySettingsApi";
+import type { CompanyProfileSettings } from "@/lib/companySettingsApi";
 import { rowToDie } from "@/lib/diesApi";
 import type {
   BillableServiceRow,
@@ -4052,4 +4054,23 @@ export async function hydrateProjectProductionStages(): Promise<
   }
 
   return { status: "success", data: Array.from(productionsByProject.values()) };
+}
+
+// company_settings (Company Profile) — the one single-object domain in
+// this file; every other hydrate*() here returns an array because
+// useHydrationEffect()'s generic helper expects one. Company Settings is
+// naturally a single row per organization, so it gets its own small
+// effect in useSupabaseHydration.ts instead of forcing an array wrapper
+// on it. Reuses getCompanySettingsRemote() (companySettingsApi.ts)
+// rather than re-querying company_settings here — same table, same
+// setting_key, one read path.
+export async function hydrateCompanySettings(): Promise<
+  HydrationResult<CompanyProfileSettings | undefined>
+> {
+  const result = await getCompanySettingsRemote();
+  if (result.status === "success") {
+    return { status: "success", data: result.data };
+  }
+  if (result.status === "unauthenticated") return { status: "unauthenticated" };
+  return { status: "error", error: result.error };
 }

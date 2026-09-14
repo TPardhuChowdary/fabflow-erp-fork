@@ -33,6 +33,7 @@ import {
   hydrateBomRequisitions,
   hydrateCompanyDocuments,
   hydrateCompanyPOs,
+  hydrateCompanySettings,
   hydrateCustomers,
   hydrateDeliveryChallans,
   hydrateDies,
@@ -608,4 +609,45 @@ export function useSupabaseHydration() {
     useQmsStore((s) => s.setStageCompletionsFromServer),
     authKey,
   );
+
+  // Company Settings fix — the one single-object domain, so it can't go
+  // through useHydrationEffect() above (typed for array domains only).
+  // "authenticated user -> determine organization -> fetch company
+  // settings -> populate client state" per the fix's own spec: no
+  // separate organization lookup is needed here because RLS already
+  // scopes company_settings_select/insert/update to
+  // current_organization_id() server-side — this effect just asks "what
+  // does MY org's company_profile row say" and merges whatever comes
+  // back into settings (setCompanySettingsFromServer only ever
+  // overwrites the Company Profile subset, never the Twilio/Gmail/AI/
+  // voice fields that stay local-only).
+  const setSettingsHydrationStatus = useStore(
+    (s) => s.setSettingsHydrationStatus,
+  );
+  const setCompanySettingsFromServer = useStore(
+    (s) => s.setCompanySettingsFromServer,
+  );
+  // biome-ignore lint/correctness/useExhaustiveDependencies: setters are stable per call site; authKey is the only real trigger
+  useEffect(() => {
+    if (authKey === "pending") return;
+    if (authKey === "anon") {
+      setSettingsHydrationStatus("idle");
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setSettingsHydrationStatus("loading");
+      const result = await hydrateCompanySettings();
+      if (cancelled) return;
+      if (result.status === "success") {
+        setCompanySettingsFromServer(result.data);
+        setSettingsHydrationStatus("success");
+      } else {
+        setSettingsHydrationStatus(result.status, result.error);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authKey]);
 }

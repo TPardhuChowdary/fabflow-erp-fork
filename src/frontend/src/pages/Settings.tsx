@@ -104,6 +104,7 @@ import {
   getMyRecoveryEmailStatus,
   requestRecoveryEmailVerification,
 } from "../lib/accountRecoveryApi";
+import { updateCompanySettingsRemote } from "../lib/companySettingsApi";
 import {
   type MachineMigrationItemResult,
   type MachineMigrationReport,
@@ -320,10 +321,12 @@ function LegacyGmailSmtpDisclosure({
 export function Settings() {
   const { currentUser } = useAuth();
   const { settings, updateSettings } = useStore();
+  const settingsHydrationStatus = useStore((s) => s.settingsHydration.status);
   const { themeId, setThemeId, mode, setMode, resolvedMode, themes } =
     useTheme();
 
   const [showCompanyPreview, setShowCompanyPreview] = useState(false);
+  const [savingCompany, setSavingCompany] = useState(false);
 
   const [companyForm, setCompanyForm] = useState({
     companyName: settings.companyName || "",
@@ -345,6 +348,41 @@ export function Settings() {
     quotationTerms: settings.quotationTerms || "",
     companyPOTerms: settings.companyPOTerms || "",
   });
+
+  // Company Settings fix — companyForm above only snapshots `settings`
+  // on this component's first render, but the real Company Profile data
+  // now arrives asynchronously from Supabase (useSupabaseHydration.ts's
+  // company-settings effect), typically finishing after that first
+  // render. Re-sync once hydration actually succeeds so the form shows
+  // the org's real saved values rather than blank defaults. Keyed on
+  // settingsHydrationStatus (not `settings` itself) so this fires
+  // exactly once per successful hydration — not on every unrelated
+  // settings save elsewhere on this page, which would otherwise wipe
+  // out unsaved Company Profile edits mid-typing.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally re-syncs only on the hydration-status transition, not on every `settings` change (see comment above)
+  useEffect(() => {
+    if (settingsHydrationStatus !== "success") return;
+    setCompanyForm({
+      companyName: settings.companyName || "",
+      companyAddress: settings.companyAddress || "",
+      companyGstin: settings.companyGstin || "",
+      companyStateName: settings.companyStateName || "",
+      companyStateCode: settings.companyStateCode || "",
+      companyPhone: settings.companyPhone || "",
+      companyEmail: settings.companyEmail || "",
+      companyWebsite: settings.companyWebsite || "",
+      companyLogo: settings.companyLogo || "",
+      bankName: settings.bankName || "",
+      accountName: settings.accountName || "",
+      accountNumber: settings.accountNumber || "",
+      ifscCode: settings.ifscCode || "",
+      bankBranch: settings.bankBranch || "",
+      companyTerms: settings.companyTerms || "",
+      companyDeclaration: settings.companyDeclaration || "",
+      quotationTerms: settings.quotationTerms || "",
+      companyPOTerms: settings.companyPOTerms || "",
+    });
+  }, [settingsHydrationStatus]);
 
   const [whatsappForm, setWhatsappForm] = useState({
     twilioAccountSid: settings.twilioAccountSid,
@@ -398,6 +436,12 @@ export function Settings() {
   }
 
   const companyConfigured = companyForm.companyName.trim() !== "";
+  // Company Settings fix — the same permission RLS itself enforces
+  // (company_settings_insert/_update both require has_permission
+  // ('settings','edit')); this is a UI convenience so an unauthorized
+  // user sees a disabled button instead of a failed save, not a
+  // replacement for the server-side check.
+  const pCompanyEdit = hasPermission(currentUser, "settings.edit");
 
   const whatsappConfigured =
     whatsappForm.twilioAccountSid.trim() !== "" &&
@@ -408,9 +452,38 @@ export function Settings() {
     emailForm.gmailSenderEmail.trim() !== "" &&
     emailForm.gmailAppPassword.trim() !== "";
 
-  const handleSaveCompany = () => {
-    updateSettings({ ...settings, ...companyForm });
-    toast.success("Company profile saved");
+  // Company Settings fix — Supabase is now the authoritative write.
+  // updateSettings() (Zustand/localStorage) only ever runs AFTER
+  // updateCompanySettingsRemote() succeeds, so a failed save can no
+  // longer look like it worked: the user's in-progress companyForm
+  // input is left exactly as they typed it (nothing is reset) and an
+  // error toast explains what happened, matching the existing app-wide
+  // error-toast convention every other Save button here already uses.
+  const handleSaveCompany = async () => {
+    if (!pCompanyEdit) {
+      toast.error("You do not have permission to edit company settings.");
+      return;
+    }
+    setSavingCompany(true);
+    try {
+      const result = await updateCompanySettingsRemote(companyForm);
+      if (result.status !== "success") {
+        toast.error(
+          result.status === "denied"
+            ? (result.error ??
+                "You do not have permission to edit company settings.")
+            : result.status === "unauthenticated"
+              ? "Sign in required to save company settings."
+              : (result.error ??
+                "Could not save company settings — please try again."),
+        );
+        return;
+      }
+      updateSettings({ ...settings, ...companyForm });
+      toast.success("Company profile saved");
+    } finally {
+      setSavingCompany(false);
+    }
   };
 
   const handleSaveAiAssistant = () => {
@@ -776,9 +849,15 @@ export function Settings() {
             <Button
               size="sm"
               onClick={handleSaveCompany}
+              disabled={!pCompanyEdit || savingCompany}
+              title={
+                pCompanyEdit
+                  ? undefined
+                  : "You do not have permission to edit company settings"
+              }
               data-ocid="settings.company.save_button"
             >
-              Save Company Profile
+              {savingCompany ? "Saving..." : "Save Company Profile"}
             </Button>
           </div>
         </CardContent>

@@ -984,9 +984,35 @@ export interface HardwareItem {
   amount: number;
 }
 
+// The legacy single-number Internal Costing fields a ManufacturingItem row
+// can itemize. manufacturing_items is the one shared/generic jsonb array
+// for all of them (see ManufacturingItem.category below) rather than a
+// separate array per category — extending the existing jsonb shape with
+// one more key needed no migration, since Postgres jsonb enforces no
+// column-level shape.
+export type ManufacturingCostCategory =
+  | "cncCost"
+  | "assemblyCost"
+  | "packingCost"
+  | "labourCost"
+  | "machineCost"
+  | "outsourceCost"
+  | "consumablesCost"
+  | "electricityCost"
+  | "scrapLossCost"
+  | "transportCost";
+
 export interface ManufacturingItem {
   id: string;
+  /** Which of the 10 ManufacturingCostCategory fields this row itemizes.
+   * Optional for backward compatibility: rows saved before this field
+   * existed have no category — callers treat a missing category as
+   * "machineCost", the one category this array exclusively held before. */
+  category?: ManufacturingCostCategory;
   process: string;
+  /** Added alongside category — matches the Hardware/Raw Material rows'
+   * existing two-label-field shape (e.g. item+specification). */
+  specification?: string;
   quantity: number;
   rate: number;
   amount: number;

@@ -199,13 +199,35 @@ const HARDWARE_FIELDS: CostingLineItemField[] = [
   { key: "item", label: "Item" },
   { key: "specification", label: "Specification" },
 ];
+// Shared by all 10 categories that itemize into the one generic
+// manufacturingItems array (see ManufacturingCostCategory in types.ts) —
+// "process" is the storage key (unchanged, for backward compat with rows
+// saved before this generic model existed); "Description" is just its
+// display label here, matching the Description/Specification shape the
+// audit's own mockup used for every non-Raw-Material/Hardware category.
 const MANUFACTURING_FIELDS: CostingLineItemField[] = [
-  {
-    key: "process",
-    label: "Process",
-    placeholder: "Cutting, Bending, Welding, …",
-  },
+  { key: "process", label: "Description" },
+  { key: "specification", label: "Specification" },
 ];
+// Every legacy cost field whose line items live in manufacturingItems,
+// distinguished from each other only by the `category` tag on each row —
+// one generic jsonb array standing in for what would otherwise be 10
+// separate ones. "machineCost" is also the default a row with no
+// `category` (saved before this field existed) is treated as.
+const MANUFACTURING_CATEGORIES = new Set<keyof InternalCosting>([
+  "cncCost",
+  "assemblyCost",
+  "packingCost",
+  "labourCost",
+  "machineCost",
+  "outsourceCost",
+  "consumablesCost",
+  "electricityCost",
+  "scrapLossCost",
+  "transportCost",
+]);
+const manufacturingCategoryOf = (item: ManufacturingItem) =>
+  item.category ?? "machineCost";
 const FINISHING_FIELDS: CostingLineItemField[] = [
   {
     key: "process",
@@ -897,6 +919,17 @@ export function ProjectDetail({
     packingCost: existingCosting?.packingCost ?? 0,
     labourCost: existingCosting?.labourCost ?? 0,
     transportCost: existingCosting?.transportCost ?? 0,
+    // These 5 were missing from both this initial state and the
+    // useEffect sync below — a pre-existing bug, confirmed live: each
+    // field saved correctly to Supabase (handleSaveCosting's `...costing`
+    // spread already includes them) but always displayed as 0 after a
+    // reload since local state never actually picked the saved value
+    // back up.
+    machineCost: existingCosting?.machineCost ?? 0,
+    outsourceCost: existingCosting?.outsourceCost ?? 0,
+    consumablesCost: existingCosting?.consumablesCost ?? 0,
+    electricityCost: existingCosting?.electricityCost ?? 0,
+    scrapLossCost: existingCosting?.scrapLossCost ?? 0,
     extraCosts: existingCosting?.extraCosts ?? [],
     rawMaterials: existingCosting?.rawMaterials ?? [],
     hardwareItems: existingCosting?.hardwareItems ?? [],
@@ -915,6 +948,11 @@ export function ProjectDetail({
         packingCost: existingCosting.packingCost,
         labourCost: existingCosting.labourCost ?? 0,
         transportCost: existingCosting.transportCost ?? 0,
+        machineCost: existingCosting.machineCost ?? 0,
+        outsourceCost: existingCosting.outsourceCost ?? 0,
+        consumablesCost: existingCosting.consumablesCost ?? 0,
+        electricityCost: existingCosting.electricityCost ?? 0,
+        scrapLossCost: existingCosting.scrapLossCost ?? 0,
         extraCosts: existingCosting.extraCosts ?? [],
         rawMaterials: existingCosting.rawMaterials ?? [],
         hardwareItems: existingCosting.hardwareItems ?? [],
@@ -1133,26 +1171,28 @@ export function ProjectDetail({
 
   const [expandedStage, setExpandedStage] = useState<number | null>(0);
 
-  // Phase 8 — Project Workspace hub (FINAL_UX_IMPLEMENTATION_BLUEPRINT.md
-  // §10): every section below now renders in one scroll instead of one-
-  // tab-at-a-time. `activeTab` is kept (renamed in spirit, not in code, to
-  // avoid touching every reference) purely to drive the anchor-chip row's
-  // "last clicked" highlight — real navigation is scrollIntoView, not a
-  // Radix Tabs mount/unmount switch anymore.
+  // Real section/view switch (not scroll-to-anchor): exactly one of the 14
+  // <section id="section-{activeTab}"> blocks below is ever mounted at a
+  // time, each wrapped in `{activeTab === "<id>" && (...)}` — clicking a
+  // different nav chip un-mounts the old section's JSX entirely and mounts
+  // the new one, so scrolling the now-short page can never reach another
+  // module's content. All per-section form state (costing, bomForm,
+  // matForm, usageForm, outForm, etc.) is declared here at the top level
+  // of this same component, not inside any section's own subtree, so
+  // switching which section is mounted never resets it — unsaved input
+  // (e.g. a half-filled Internal Costing row) survives a round trip to
+  // another tab and back, same as it always has.
   const [activeTab, setActiveTab] = useState("overview");
   const scrollToSection = (id: string) => {
     setActiveTab(id);
-    // "smooth" confirmed live to never actually complete for this nested
-    // overflow-y-auto container (main-content) — it starts, then silently
-    // stalls. "instant" is synchronous and doesn't have that problem; the
-    // blueprint doesn't require the jump itself to be animated (only the
-    // Command Palette has an explicit zero-animation rule, but nothing
-    // here rules out instant for this one either, and it's the reliable
-    // choice). Section elements don't move based on activeTab, so no
-    // deferral is needed — same tick as the click is correct.
+    // The newly-mounted section starts at the top of #main-content's
+    // document flow (right after the sticky nav); previous scroll depth
+    // has no meaningful relationship to the new section's content, so
+    // reset to the top rather than leaving an arbitrary mid-scroll
+    // position pointing at whatever now happens to be there.
     document
-      .getElementById(`section-${id}`)
-      ?.scrollIntoView({ behavior: "instant", block: "start" });
+      .getElementById("main-content")
+      ?.scrollTo({ top: 0, behavior: "instant" });
   };
 
   // Phase 32 (Task #176) - supervisor/admin override dialog for a blocked
@@ -1661,6 +1701,16 @@ export function ProjectDetail({
     (costing.packingCost || 0) +
     (costing.labourCost || 0) +
     (costing.transportCost || 0) +
+    // machineCost/outsourceCost/consumablesCost/electricityCost/
+    // scrapLossCost were missing from this sum entirely (a pre-existing
+    // bug, confirmed live: setting Outsourced Work Cost's own ₹ field did
+    // not move Total Internal Cost at all) — all 13 legacy fields must
+    // contribute, same as the other 8 already did.
+    (costing.machineCost || 0) +
+    (costing.outsourceCost || 0) +
+    (costing.consumablesCost || 0) +
+    (costing.electricityCost || 0) +
+    (costing.scrapLossCost || 0) +
     extraCostsTotal +
     rawMaterialsTotal +
     hardwareItemsTotal +
@@ -2415,7 +2465,10 @@ export function ProjectDetail({
             mechanism changed, from "hide the other 13 sections" to
             "scroll to this one." Sticky so it stays reachable while
             scrolling a long project. */}
-        <div className="sticky top-0 z-10 -mx-4 md:-mx-6 px-4 md:px-6 py-2 bg-background/95 backdrop-blur border-b border-border space-y-1 overflow-x-auto">
+        <div
+          id="project-section-nav"
+          className="sticky top-0 z-10 -mx-4 md:-mx-6 px-4 md:px-6 py-2 bg-background/95 backdrop-blur border-b border-border space-y-1 overflow-x-auto"
+        >
           <SectionChipGroup label="Planning">
             <SectionChip
               id="overview"
@@ -2515,80 +2568,142 @@ export function ProjectDetail({
         </div>
         <div className="space-y-6 mt-4">
           {/* Tab 1 — Overview */}
-          <section id="section-overview" className="mt-4 scroll-mt-24">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Project Overview</CardTitle>
-              </CardHeader>
-              <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
-                <div>
-                  <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                    Project No
-                  </p>
-                  <p className="font-mono font-semibold mt-0.5">
-                    {project.projectNo}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                    Customer
-                  </p>
-                  <p className="font-medium mt-0.5">{customer?.name ?? "—"}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                    Project Name
-                  </p>
-                  <p className="font-medium mt-0.5">{project.projectName}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                    Created Date
-                  </p>
-                  <p className="mt-0.5">
-                    {new Date(project.createdAt).toLocaleDateString("en-IN")}
-                  </p>
-                </div>
-                <div className="sm:col-span-2">
-                  <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                    Work Description
-                  </p>
-                  <p className="mt-0.5">{project.workDescription || "—"}</p>
-                </div>
-                {project.projectType === "REPEAT_ORDER" && (
+          {activeTab === "overview" && (
+            <section id="section-overview" className="mt-4 scroll-mt-24">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Project Overview</CardTitle>
+                </CardHeader>
+                <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                      Project No
+                    </p>
+                    <p className="font-mono font-semibold mt-0.5">
+                      {project.projectNo}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                      Customer
+                    </p>
+                    <p className="font-medium mt-0.5">
+                      {customer?.name ?? "—"}
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                      Project Name
+                    </p>
+                    <p className="font-medium mt-0.5">{project.projectName}</p>
+                  </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                      Created Date
+                    </p>
+                    <p className="mt-0.5">
+                      {new Date(project.createdAt).toLocaleDateString("en-IN")}
+                    </p>
+                  </div>
                   <div className="sm:col-span-2">
                     <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                      Repeat Order
+                      Work Description
                     </p>
-                    <div className="mt-0.5 flex items-center gap-2 flex-wrap">
-                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-info/10 border border-info/30 text-info text-xs font-medium">
-                        <span className="font-mono">
-                          {project.internalOrderCode}
-                        </span>
-                        <span>·</span>
-                        <span>
-                          Internal tracking code — not shown to customer
-                        </span>
-                      </span>
-                      {project.originalProjectName && (
-                        <span className="text-xs text-muted-foreground">
-                          Customer sees:{" "}
-                          <strong>{project.originalProjectName}</strong>
-                        </span>
-                      )}
-                    </div>
+                    <p className="mt-0.5">{project.workDescription || "—"}</p>
                   </div>
-                )}
-                <div className="sm:col-span-2">
-                  {(() => {
-                    if (project.totalQty == null) {
+                  {project.projectType === "REPEAT_ORDER" && (
+                    <div className="sm:col-span-2">
+                      <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                        Repeat Order
+                      </p>
+                      <div className="mt-0.5 flex items-center gap-2 flex-wrap">
+                        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-info/10 border border-info/30 text-info text-xs font-medium">
+                          <span className="font-mono">
+                            {project.internalOrderCode}
+                          </span>
+                          <span>·</span>
+                          <span>
+                            Internal tracking code — not shown to customer
+                          </span>
+                        </span>
+                        {project.originalProjectName && (
+                          <span className="text-xs text-muted-foreground">
+                            Customer sees:{" "}
+                            <strong>{project.originalProjectName}</strong>
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  <div className="sm:col-span-2">
+                    {(() => {
+                      if (project.totalQty == null) {
+                        return (
+                          <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-warning/15 border border-warning/30 text-warning text-xs font-medium">
+                            ⚠ Quantity not set
+                          </div>
+                        );
+                      }
+                      const dispatchedQty = (deliveryChallans || []).reduce(
+                        (sum, dc) =>
+                          sum +
+                          ((dc.projectEntries || []).find(
+                            (e) => e.projectId === project.id,
+                          )?.dispatchQty || 0),
+                        0,
+                      );
+                      const remainingQty = project.totalQty - dispatchedQty;
                       return (
-                        <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-warning/15 border border-warning/30 text-warning text-xs font-medium">
-                          ⚠ Quantity not set
+                        <div className="flex gap-3 flex-wrap">
+                          <div className="flex-1 min-w-[80px] rounded-md bg-muted/50 border border-border p-2 text-center">
+                            <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                              Total Qty
+                            </p>
+                            <p className="text-base font-bold mt-0.5">
+                              {project.totalQty}
+                            </p>
+                          </div>
+                          <div className="flex-1 min-w-[80px] rounded-md bg-muted/50 border border-border p-2 text-center">
+                            <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                              Dispatched
+                            </p>
+                            <p className="text-base font-bold mt-0.5">
+                              {dispatchedQty}
+                            </p>
+                          </div>
+                          <div className="flex-1 min-w-[80px] rounded-md bg-muted/50 border border-border p-2 text-center">
+                            <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                              Remaining
+                            </p>
+                            <p
+                              className={`text-base font-bold mt-0.5 ${remainingQty <= 0 ? "text-destructive" : "text-success"}`}
+                            >
+                              {remainingQty}
+                            </p>
+                          </div>
                         </div>
                       );
-                    }
-                    const dispatchedQty = (deliveryChallans || []).reduce(
+                    })()}
+                  </div>
+                  {/* Production Summary */}
+                  {(() => {
+                    const prodRecord = projectProductions.find(
+                      (pp) => pp.projectId === project.id,
+                    );
+                    const pStages = prodRecord?.stages || [];
+                    const {
+                      acceptedQtyTotal: approvedQtyTotal,
+                      rejectedQtyTotal,
+                    } = getQualityQtyTotals(project.id);
+                    const producedQty = pStages
+                      .filter((s) => s.status === "Completed" && !s.isRework)
+                      .reduce((sum, s) => sum + (s.receivedQty || 0), 0);
+                    const reworkCount = pStages.filter(
+                      (s) => s.isRework,
+                    ).length;
+                    const dispatchedQtySummary = (
+                      deliveryChallans || []
+                    ).reduce(
                       (sum, dc) =>
                         sum +
                         ((dc.projectEntries || []).find(
@@ -2596,112 +2711,57 @@ export function ProjectDetail({
                         )?.dispatchQty || 0),
                       0,
                     );
-                    const remainingQty = project.totalQty - dispatchedQty;
                     return (
-                      <div className="flex gap-3 flex-wrap">
-                        <div className="flex-1 min-w-[80px] rounded-md bg-muted/50 border border-border p-2 text-center">
-                          <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                            Total Qty
-                          </p>
-                          <p className="text-base font-bold mt-0.5">
-                            {project.totalQty}
-                          </p>
-                        </div>
-                        <div className="flex-1 min-w-[80px] rounded-md bg-muted/50 border border-border p-2 text-center">
-                          <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                            Dispatched
-                          </p>
-                          <p className="text-base font-bold mt-0.5">
-                            {dispatchedQty}
-                          </p>
-                        </div>
-                        <div className="flex-1 min-w-[80px] rounded-md bg-muted/50 border border-border p-2 text-center">
-                          <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                            Remaining
-                          </p>
-                          <p
-                            className={`text-base font-bold mt-0.5 ${remainingQty <= 0 ? "text-destructive" : "text-success"}`}
-                          >
-                            {remainingQty}
-                          </p>
+                      <div className="sm:col-span-2 pt-2 border-t border-border">
+                        <p className="text-xs text-muted-foreground uppercase tracking-wide font-semibold mb-2">
+                          Production Summary
+                        </p>
+                        <div className="flex gap-2 flex-wrap">
+                          <div className="flex-1 min-w-[70px] rounded-md bg-info/10 border border-info/30 p-2 text-center">
+                            <p className="text-[10px] text-info uppercase tracking-wide">
+                              Produced
+                            </p>
+                            <p className="text-base font-bold text-info mt-0.5">
+                              {producedQty}
+                            </p>
+                          </div>
+                          <div className="flex-1 min-w-[70px] rounded-md bg-success/10 border border-success/30 p-2 text-center">
+                            <p className="text-[10px] text-success uppercase tracking-wide">
+                              Approved
+                            </p>
+                            <p className="text-base font-bold text-success mt-0.5">
+                              {approvedQtyTotal}
+                            </p>
+                          </div>
+                          <div className="flex-1 min-w-[70px] rounded-md bg-destructive/10 border border-destructive/30 p-2 text-center">
+                            <p className="text-[10px] text-destructive uppercase tracking-wide">
+                              Rejected
+                            </p>
+                            <p className="text-base font-bold text-destructive mt-0.5">
+                              {rejectedQtyTotal}
+                            </p>
+                          </div>
+                          <div className="flex-1 min-w-[70px] rounded-md bg-warning/15 border border-warning/30 p-2 text-center">
+                            <p className="text-[10px] text-warning uppercase tracking-wide">
+                              Rework
+                            </p>
+                            <p className="text-base font-bold text-warning mt-0.5">
+                              {reworkCount}
+                            </p>
+                          </div>
+                          <div className="flex-1 min-w-[70px] rounded-md bg-muted/50 border border-border p-2 text-center">
+                            <p className="text-[10px] text-muted-foreground uppercase tracking-wide">
+                              Dispatched
+                            </p>
+                            <p className="text-base font-bold mt-0.5">
+                              {dispatchedQtySummary}
+                            </p>
+                          </div>
                         </div>
                       </div>
                     );
                   })()}
-                </div>
-                {/* Production Summary */}
-                {(() => {
-                  const prodRecord = projectProductions.find(
-                    (pp) => pp.projectId === project.id,
-                  );
-                  const pStages = prodRecord?.stages || [];
-                  const {
-                    acceptedQtyTotal: approvedQtyTotal,
-                    rejectedQtyTotal,
-                  } = getQualityQtyTotals(project.id);
-                  const producedQty = pStages
-                    .filter((s) => s.status === "Completed" && !s.isRework)
-                    .reduce((sum, s) => sum + (s.receivedQty || 0), 0);
-                  const reworkCount = pStages.filter((s) => s.isRework).length;
-                  const dispatchedQtySummary = (deliveryChallans || []).reduce(
-                    (sum, dc) =>
-                      sum +
-                      ((dc.projectEntries || []).find(
-                        (e) => e.projectId === project.id,
-                      )?.dispatchQty || 0),
-                    0,
-                  );
-                  return (
-                    <div className="sm:col-span-2 pt-2 border-t border-border">
-                      <p className="text-xs text-muted-foreground uppercase tracking-wide font-semibold mb-2">
-                        Production Summary
-                      </p>
-                      <div className="flex gap-2 flex-wrap">
-                        <div className="flex-1 min-w-[70px] rounded-md bg-info/10 border border-info/30 p-2 text-center">
-                          <p className="text-[10px] text-info uppercase tracking-wide">
-                            Produced
-                          </p>
-                          <p className="text-base font-bold text-info mt-0.5">
-                            {producedQty}
-                          </p>
-                        </div>
-                        <div className="flex-1 min-w-[70px] rounded-md bg-success/10 border border-success/30 p-2 text-center">
-                          <p className="text-[10px] text-success uppercase tracking-wide">
-                            Approved
-                          </p>
-                          <p className="text-base font-bold text-success mt-0.5">
-                            {approvedQtyTotal}
-                          </p>
-                        </div>
-                        <div className="flex-1 min-w-[70px] rounded-md bg-destructive/10 border border-destructive/30 p-2 text-center">
-                          <p className="text-[10px] text-destructive uppercase tracking-wide">
-                            Rejected
-                          </p>
-                          <p className="text-base font-bold text-destructive mt-0.5">
-                            {rejectedQtyTotal}
-                          </p>
-                        </div>
-                        <div className="flex-1 min-w-[70px] rounded-md bg-warning/15 border border-warning/30 p-2 text-center">
-                          <p className="text-[10px] text-warning uppercase tracking-wide">
-                            Rework
-                          </p>
-                          <p className="text-base font-bold text-warning mt-0.5">
-                            {reworkCount}
-                          </p>
-                        </div>
-                        <div className="flex-1 min-w-[70px] rounded-md bg-muted/50 border border-border p-2 text-center">
-                          <p className="text-[10px] text-muted-foreground uppercase tracking-wide">
-                            Dispatched
-                          </p>
-                          <p className="text-base font-bold mt-0.5">
-                            {dispatchedQtySummary}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })()}
-                {/* Model 3 Workspace comparison (see chat) — the one
+                  {/* Model 3 Workspace comparison (see chat) — the one
                     genuine "at a glance" gap: financial/invoice state was
                     otherwise only visible after scrolling past Design/BOM/
                     Items/Costing/Materials/Production to reach the Profit
@@ -2711,325 +2771,406 @@ export function ProjectDetail({
                     not a second computation of it. Jumps to the existing
                     "profit" section rather than duplicating the list or
                     the payment action here. */}
-                {allProjectInvoices.length > 0 && (
-                  <div className="sm:col-span-2 pt-2 border-t border-border">
-                    <p className="text-xs text-muted-foreground uppercase tracking-wide font-semibold mb-2">
-                      Invoices
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => scrollToSection("profit")}
-                      className="w-full flex items-center justify-between gap-3 rounded-md border border-border bg-muted/30 hover:bg-muted/60 transition-colors p-2.5 text-left"
-                    >
-                      <span className="text-sm">
-                        <span className="font-semibold">
-                          {allProjectInvoices.length}
-                        </span>{" "}
-                        invoice{allProjectInvoices.length !== 1 ? "s" : ""}
-                        {projectInvoiceBalanceDue > 0 ? (
-                          <>
-                            {" "}
-                            —{" "}
-                            <span className="text-warning font-semibold">
-                              ₹
-                              {projectInvoiceBalanceDue.toLocaleString(
-                                "en-IN",
-                                { minimumFractionDigits: 2 },
-                              )}{" "}
-                              due
-                            </span>
-                          </>
-                        ) : (
-                          <span className="text-success font-medium">
-                            {" "}
-                            — fully paid
-                          </span>
-                        )}
-                      </span>
-                      <span className="text-xs text-muted-foreground shrink-0">
-                        View →
-                      </span>
-                    </button>
-                  </div>
-                )}
-                {customer && (
-                  <>
-                    <div>
-                      <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                        Contact Person
+                  {allProjectInvoices.length > 0 && (
+                    <div className="sm:col-span-2 pt-2 border-t border-border">
+                      <p className="text-xs text-muted-foreground uppercase tracking-wide font-semibold mb-2">
+                        Invoices
                       </p>
-                      <p className="mt-0.5">{customer.contactPerson || "—"}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                        Phone
-                      </p>
-                      <p className="mt-0.5">{customer.phone || "—"}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                        Address
-                      </p>
-                      <p className="mt-0.5">{customer.address || "—"}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                        GSTIN
-                      </p>
-                      <p className="font-mono mt-0.5">
-                        {customer.gstin || "—"}
-                      </p>
-                    </div>
-                  </>
-                )}
-                <div className="sm:col-span-2 pt-2 border-t border-border space-y-3">
-                  <div className="flex items-center justify-between">
-                    <p className="text-xs text-muted-foreground uppercase tracking-wide font-semibold">
-                      Purchase Orders
-                    </p>
-                    <p className="text-[11px] text-muted-foreground">
-                      Recorded from the Quotations module
-                    </p>
-                  </div>
-
-                  {(project.pos || []).length === 0 ? (
-                    <p
-                      className="text-[11px] text-muted-foreground"
-                      data-ocid="project-detail.po.empty_state"
-                    >
-                      No purchase orders added yet
-                    </p>
-                  ) : (
-                    <div className="table-wrapper">
-                      <table
-                        className="w-full text-xs border-collapse"
-                        style={{ minWidth: "400px" }}
+                      <button
+                        type="button"
+                        onClick={() => scrollToSection("profit")}
+                        className="w-full flex items-center justify-between gap-3 rounded-md border border-border bg-muted/30 hover:bg-muted/60 transition-colors p-2.5 text-left"
                       >
-                        <thead>
-                          <tr className="border-b border-border bg-muted/30">
-                            <th className="text-left py-1.5 px-2 font-medium text-muted-foreground">
-                              PO Number
-                            </th>
-                            <th className="text-left py-1.5 px-2 font-medium text-muted-foreground">
-                              Date
-                            </th>
-                            <th className="text-right py-1.5 px-2 font-medium text-muted-foreground">
-                              Qty
-                            </th>
-                            <th className="text-left py-1.5 px-2 font-medium text-muted-foreground">
-                              Status
-                            </th>
-                            <th className="text-left py-1.5 px-2 font-medium text-muted-foreground">
-                              File
-                            </th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {(project.pos || []).map((po, idx) => (
-                            <tr
-                              key={po.id}
-                              className="border-b border-border/50 hover:bg-muted/20"
-                              data-ocid={`project-detail.po.item.${idx + 1}`}
-                            >
-                              <td className="py-1.5 px-2 font-medium">
-                                {po.poNumber}
-                              </td>
-                              <td className="py-1.5 px-2 text-muted-foreground">
-                                {po.poDate || "—"}
-                              </td>
-                              <td className="py-1.5 px-2 text-right">
-                                {po.quantity}
-                              </td>
-                              <td className="py-1.5 px-2">
-                                {!isRestrictedRole ? (
-                                  <Select
-                                    value={po.status}
-                                    onValueChange={(v) =>
-                                      handleUpdatePOStatus(
-                                        po,
-                                        v as ProjectPOStatus,
-                                      )
-                                    }
-                                  >
-                                    <SelectTrigger className="h-6 text-xs w-28 border-0 bg-transparent p-0 shadow-none focus:ring-0">
-                                      <span
-                                        className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                                          po.status === "Open"
-                                            ? "bg-info/10 text-info"
-                                            : po.status === "In Progress"
-                                              ? "bg-warning/15 text-warning"
-                                              : "bg-success/10 text-success"
-                                        }`}
-                                      >
-                                        {po.status}
-                                      </span>
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      <SelectItem
-                                        value="Open"
-                                        className="text-xs"
-                                      >
-                                        Open
-                                      </SelectItem>
-                                      <SelectItem
-                                        value="In Progress"
-                                        className="text-xs"
-                                      >
-                                        In Progress
-                                      </SelectItem>
-                                      <SelectItem
-                                        value="Completed"
-                                        className="text-xs"
-                                      >
-                                        Completed
-                                      </SelectItem>
-                                    </SelectContent>
-                                  </Select>
-                                ) : (
-                                  <span
-                                    className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                                      po.status === "Open"
-                                        ? "bg-info/10 text-info"
-                                        : po.status === "In Progress"
-                                          ? "bg-warning/15 text-warning"
-                                          : "bg-success/10 text-success"
-                                    }`}
-                                  >
-                                    {po.status}
-                                  </span>
-                                )}
-                              </td>
-                              <td className="py-1.5 px-2">
-                                {(() => {
-                                  const masterPO = po.sharedPoId
-                                    ? (masterPOs || []).find(
-                                        (m) => m.sharedPoId === po.sharedPoId,
-                                      )
-                                    : null;
-                                  const files = masterPO?.files || [];
-                                  if (files.length === 0)
-                                    return (
-                                      <span className="text-muted-foreground">
-                                        —
-                                      </span>
-                                    );
-                                  return (
-                                    <div className="flex flex-col gap-1">
-                                      {files.map((f, fi) => {
-                                        const isImage =
-                                          f.type === "image" ||
-                                          /\.(png|jpg|jpeg|gif|webp)$/i.test(
-                                            f.name || "",
-                                          );
-                                        const handleView = () => {
-                                          if (!f?.ref) {
-                                            alert("File not available");
-                                            return;
-                                          }
-                                          const byteString = atob(
-                                            f.ref.split(",")[1],
-                                          );
-                                          const mimeType =
-                                            f.type === "pdf"
-                                              ? "application/pdf"
-                                              : "image/jpeg";
-                                          const ab = new ArrayBuffer(
-                                            byteString.length,
-                                          );
-                                          const ia = new Uint8Array(ab);
-                                          for (
-                                            let i = 0;
-                                            i < byteString.length;
-                                            i++
-                                          )
-                                            ia[i] = byteString.charCodeAt(i);
-                                          const blob = new Blob([ab], {
-                                            type: mimeType,
-                                          });
-                                          const url = URL.createObjectURL(blob);
-                                          window.open(url, "_blank");
-                                        };
-                                        const handleDownload = () => {
-                                          const a = document.createElement("a");
-                                          a.href = f.ref;
-                                          a.download =
-                                            f.name || `po-file-${fi + 1}`;
-                                          a.click();
-                                        };
-                                        return (
-                                          <div
-                                            key={`${fi}-${f.name || fi}`}
-                                            className="flex items-center gap-1"
-                                          >
-                                            {isImage ? (
-                                              <img
-                                                src={f.ref}
-                                                alt={f.name}
-                                                className="max-h-6 rounded border cursor-pointer object-cover"
-                                                onClick={handleView}
-                                                onKeyDown={handleView}
-                                              />
-                                            ) : (
-                                              <FileText className="w-3 h-3 text-info" />
-                                            )}
-                                            <button
-                                              type="button"
-                                              onClick={handleView}
-                                              className="text-info underline text-[10px] hover:text-info/80"
-                                            >
-                                              View
-                                            </button>
-                                            <button
-                                              type="button"
-                                              onClick={handleDownload}
-                                              className="text-success underline text-[10px] hover:text-success/80"
-                                            >
-                                              Download
-                                            </button>
-                                          </div>
-                                        );
-                                      })}
-                                    </div>
-                                  );
-                                })()}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
+                        <span className="text-sm">
+                          <span className="font-semibold">
+                            {allProjectInvoices.length}
+                          </span>{" "}
+                          invoice{allProjectInvoices.length !== 1 ? "s" : ""}
+                          {projectInvoiceBalanceDue > 0 ? (
+                            <>
+                              {" "}
+                              —{" "}
+                              <span className="text-warning font-semibold">
+                                ₹
+                                {projectInvoiceBalanceDue.toLocaleString(
+                                  "en-IN",
+                                  { minimumFractionDigits: 2 },
+                                )}{" "}
+                                due
+                              </span>
+                            </>
+                          ) : (
+                            <span className="text-success font-medium">
+                              {" "}
+                              — fully paid
+                            </span>
+                          )}
+                        </span>
+                        <span className="text-xs text-muted-foreground shrink-0">
+                          View →
+                        </span>
+                      </button>
                     </div>
                   )}
-                </div>
-                {isAdmin && (
-                  <div className="sm:col-span-2 pt-2 border-t border-border">
-                    <p className="text-xs text-muted-foreground uppercase tracking-wide mb-2">
-                      Assigned Employees
-                    </p>
-                    <div className="flex flex-wrap gap-2">
-                      {employees
-                        .filter(
+                  {customer && (
+                    <>
+                      <div>
+                        <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                          Contact Person
+                        </p>
+                        <p className="mt-0.5">
+                          {customer.contactPerson || "—"}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                          Phone
+                        </p>
+                        <p className="mt-0.5">{customer.phone || "—"}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                          Address
+                        </p>
+                        <p className="mt-0.5">{customer.address || "—"}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                          GSTIN
+                        </p>
+                        <p className="font-mono mt-0.5">
+                          {customer.gstin || "—"}
+                        </p>
+                      </div>
+                    </>
+                  )}
+                  <div className="sm:col-span-2 pt-2 border-t border-border space-y-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs text-muted-foreground uppercase tracking-wide font-semibold">
+                        Purchase Orders
+                      </p>
+                      <p className="text-[11px] text-muted-foreground">
+                        Recorded from the Quotations module
+                      </p>
+                    </div>
+
+                    {(project.pos || []).length === 0 ? (
+                      <p
+                        className="text-[11px] text-muted-foreground"
+                        data-ocid="project-detail.po.empty_state"
+                      >
+                        No purchase orders added yet
+                      </p>
+                    ) : (
+                      <div className="table-wrapper">
+                        <table
+                          className="w-full text-xs border-collapse"
+                          style={{ minWidth: "400px" }}
+                        >
+                          <thead>
+                            <tr className="border-b border-border bg-muted/30">
+                              <th className="text-left py-1.5 px-2 font-medium text-muted-foreground">
+                                PO Number
+                              </th>
+                              <th className="text-left py-1.5 px-2 font-medium text-muted-foreground">
+                                Date
+                              </th>
+                              <th className="text-right py-1.5 px-2 font-medium text-muted-foreground">
+                                Qty
+                              </th>
+                              <th className="text-left py-1.5 px-2 font-medium text-muted-foreground">
+                                Status
+                              </th>
+                              <th className="text-left py-1.5 px-2 font-medium text-muted-foreground">
+                                File
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(project.pos || []).map((po, idx) => (
+                              <tr
+                                key={po.id}
+                                className="border-b border-border/50 hover:bg-muted/20"
+                                data-ocid={`project-detail.po.item.${idx + 1}`}
+                              >
+                                <td className="py-1.5 px-2 font-medium">
+                                  {po.poNumber}
+                                </td>
+                                <td className="py-1.5 px-2 text-muted-foreground">
+                                  {po.poDate || "—"}
+                                </td>
+                                <td className="py-1.5 px-2 text-right">
+                                  {po.quantity}
+                                </td>
+                                <td className="py-1.5 px-2">
+                                  {!isRestrictedRole ? (
+                                    <Select
+                                      value={po.status}
+                                      onValueChange={(v) =>
+                                        handleUpdatePOStatus(
+                                          po,
+                                          v as ProjectPOStatus,
+                                        )
+                                      }
+                                    >
+                                      <SelectTrigger className="h-6 text-xs w-28 border-0 bg-transparent p-0 shadow-none focus:ring-0">
+                                        <span
+                                          className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                            po.status === "Open"
+                                              ? "bg-info/10 text-info"
+                                              : po.status === "In Progress"
+                                                ? "bg-warning/15 text-warning"
+                                                : "bg-success/10 text-success"
+                                          }`}
+                                        >
+                                          {po.status}
+                                        </span>
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem
+                                          value="Open"
+                                          className="text-xs"
+                                        >
+                                          Open
+                                        </SelectItem>
+                                        <SelectItem
+                                          value="In Progress"
+                                          className="text-xs"
+                                        >
+                                          In Progress
+                                        </SelectItem>
+                                        <SelectItem
+                                          value="Completed"
+                                          className="text-xs"
+                                        >
+                                          Completed
+                                        </SelectItem>
+                                      </SelectContent>
+                                    </Select>
+                                  ) : (
+                                    <span
+                                      className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                        po.status === "Open"
+                                          ? "bg-info/10 text-info"
+                                          : po.status === "In Progress"
+                                            ? "bg-warning/15 text-warning"
+                                            : "bg-success/10 text-success"
+                                      }`}
+                                    >
+                                      {po.status}
+                                    </span>
+                                  )}
+                                </td>
+                                <td className="py-1.5 px-2">
+                                  {(() => {
+                                    const masterPO = po.sharedPoId
+                                      ? (masterPOs || []).find(
+                                          (m) => m.sharedPoId === po.sharedPoId,
+                                        )
+                                      : null;
+                                    const files = masterPO?.files || [];
+                                    if (files.length === 0)
+                                      return (
+                                        <span className="text-muted-foreground">
+                                          —
+                                        </span>
+                                      );
+                                    return (
+                                      <div className="flex flex-col gap-1">
+                                        {files.map((f, fi) => {
+                                          const isImage =
+                                            f.type === "image" ||
+                                            /\.(png|jpg|jpeg|gif|webp)$/i.test(
+                                              f.name || "",
+                                            );
+                                          const handleView = () => {
+                                            if (!f?.ref) {
+                                              alert("File not available");
+                                              return;
+                                            }
+                                            const byteString = atob(
+                                              f.ref.split(",")[1],
+                                            );
+                                            const mimeType =
+                                              f.type === "pdf"
+                                                ? "application/pdf"
+                                                : "image/jpeg";
+                                            const ab = new ArrayBuffer(
+                                              byteString.length,
+                                            );
+                                            const ia = new Uint8Array(ab);
+                                            for (
+                                              let i = 0;
+                                              i < byteString.length;
+                                              i++
+                                            )
+                                              ia[i] = byteString.charCodeAt(i);
+                                            const blob = new Blob([ab], {
+                                              type: mimeType,
+                                            });
+                                            const url =
+                                              URL.createObjectURL(blob);
+                                            window.open(url, "_blank");
+                                          };
+                                          const handleDownload = () => {
+                                            const a =
+                                              document.createElement("a");
+                                            a.href = f.ref;
+                                            a.download =
+                                              f.name || `po-file-${fi + 1}`;
+                                            a.click();
+                                          };
+                                          return (
+                                            <div
+                                              key={`${fi}-${f.name || fi}`}
+                                              className="flex items-center gap-1"
+                                            >
+                                              {isImage ? (
+                                                <img
+                                                  src={f.ref}
+                                                  alt={f.name}
+                                                  className="max-h-6 rounded border cursor-pointer object-cover"
+                                                  onClick={handleView}
+                                                  onKeyDown={handleView}
+                                                />
+                                              ) : (
+                                                <FileText className="w-3 h-3 text-info" />
+                                              )}
+                                              <button
+                                                type="button"
+                                                onClick={handleView}
+                                                className="text-info underline text-[10px] hover:text-info/80"
+                                              >
+                                                View
+                                              </button>
+                                              <button
+                                                type="button"
+                                                onClick={handleDownload}
+                                                className="text-success underline text-[10px] hover:text-success/80"
+                                              >
+                                                Download
+                                              </button>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    );
+                                  })()}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                  {isAdmin && (
+                    <div className="sm:col-span-2 pt-2 border-t border-border">
+                      <p className="text-xs text-muted-foreground uppercase tracking-wide mb-2">
+                        Assigned Employees
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {employees
+                          .filter(
+                            (e) => e.role === "Designer" || e.role === "Worker",
+                          )
+                          .map((emp) => {
+                            const isAssigned =
+                              project.assignedEmployeeIds?.includes(emp.id) ??
+                              false;
+                            return (
+                              <button
+                                key={emp.id}
+                                type="button"
+                                onClick={async () => {
+                                  // Diff-based single-pair write, never a
+                                  // wholesale replace of the join table (see
+                                  // lib/projectEmployeesApi.ts).
+                                  const result = isAssigned
+                                    ? await removeProjectEmployeeRemote(
+                                        project.id,
+                                        emp.id,
+                                      )
+                                    : await addProjectEmployeeRemote(
+                                        project.id,
+                                        emp.id,
+                                      );
+                                  if (result.status === "unauthenticated") {
+                                    toast.error(
+                                      "Not signed in to the server - assignment was not saved",
+                                    );
+                                    return;
+                                  }
+                                  if (
+                                    result.status === "denied" ||
+                                    result.status === "error"
+                                  ) {
+                                    toast.error(
+                                      result.error ??
+                                        "Could not save employee assignment",
+                                    );
+                                    return;
+                                  }
+                                  const current =
+                                    project.assignedEmployeeIds ?? [];
+                                  const updated = isAssigned
+                                    ? current.filter((id) => id !== emp.id)
+                                    : [...current, emp.id];
+                                  updateProject({
+                                    ...project,
+                                    assignedEmployeeIds: updated,
+                                  });
+                                }}
+                                className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                                  isAssigned
+                                    ? "bg-primary text-primary-foreground border-primary"
+                                    : "bg-background text-muted-foreground border-border hover:border-primary hover:text-primary"
+                                }`}
+                                data-ocid="project-detail.assign.toggle"
+                              >
+                                {emp.name} ({emp.role})
+                              </button>
+                            );
+                          })}
+                        {employees.filter(
                           (e) => e.role === "Designer" || e.role === "Worker",
-                        )
-                        .map((emp) => {
+                        ).length === 0 && (
+                          <p className="text-xs text-muted-foreground">
+                            No designers or workers available
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  {isAdmin && (
+                    <div className="sm:col-span-2 pt-2 border-t border-border">
+                      <p className="text-xs text-muted-foreground uppercase tracking-wide mb-2">
+                        Assigned Machinery
+                      </p>
+                      <p className="text-[11px] text-muted-foreground mb-2">
+                        Planning only — assigning a machine here does not create
+                        usage or revenue.
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {machines.map((m) => {
                           const isAssigned =
-                            project.assignedEmployeeIds?.includes(emp.id) ??
-                            false;
+                            project.assignedMachineIds?.includes(m.id) ?? false;
                           return (
                             <button
-                              key={emp.id}
+                              key={m.id}
                               type="button"
                               onClick={async () => {
                                 // Diff-based single-pair write, never a
                                 // wholesale replace of the join table (see
-                                // lib/projectEmployeesApi.ts).
+                                // lib/projectMachineryApi.ts).
                                 const result = isAssigned
-                                  ? await removeProjectEmployeeRemote(
+                                  ? await removeProjectMachineRemote(
                                       project.id,
-                                      emp.id,
+                                      m.id,
                                     )
-                                  : await addProjectEmployeeRemote(
+                                  : await addProjectMachineRemote(
                                       project.id,
-                                      emp.id,
+                                      m.id,
                                     );
                                 if (result.status === "unauthenticated") {
                                   toast.error(
@@ -3043,18 +3184,18 @@ export function ProjectDetail({
                                 ) {
                                   toast.error(
                                     result.error ??
-                                      "Could not save employee assignment",
+                                      "Could not save machine assignment",
                                   );
                                   return;
                                 }
                                 const current =
-                                  project.assignedEmployeeIds ?? [];
+                                  project.assignedMachineIds ?? [];
                                 const updated = isAssigned
-                                  ? current.filter((id) => id !== emp.id)
-                                  : [...current, emp.id];
+                                  ? current.filter((id) => id !== m.id)
+                                  : [...current, m.id];
                                 updateProject({
                                   ...project,
-                                  assignedEmployeeIds: updated,
+                                  assignedMachineIds: updated,
                                 });
                               }}
                               className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
@@ -3062,446 +3203,375 @@ export function ProjectDetail({
                                   ? "bg-primary text-primary-foreground border-primary"
                                   : "bg-background text-muted-foreground border-border hover:border-primary hover:text-primary"
                               }`}
-                              data-ocid="project-detail.assign.toggle"
+                              data-ocid="project-detail.assign-machine.toggle"
                             >
-                              {emp.name} ({emp.role})
+                              {m.name} ({m.machineCode})
                             </button>
                           );
                         })}
-                      {employees.filter(
-                        (e) => e.role === "Designer" || e.role === "Worker",
-                      ).length === 0 && (
-                        <p className="text-xs text-muted-foreground">
-                          No designers or workers available
-                        </p>
-                      )}
+                        {machines.length === 0 && (
+                          <p className="text-xs text-muted-foreground">
+                            No machines registered
+                          </p>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                )}
-                {isAdmin && (
-                  <div className="sm:col-span-2 pt-2 border-t border-border">
-                    <p className="text-xs text-muted-foreground uppercase tracking-wide mb-2">
-                      Assigned Machinery
-                    </p>
-                    <p className="text-[11px] text-muted-foreground mb-2">
-                      Planning only — assigning a machine here does not create
-                      usage or revenue.
-                    </p>
-                    <div className="flex flex-wrap gap-2">
-                      {machines.map((m) => {
-                        const isAssigned =
-                          project.assignedMachineIds?.includes(m.id) ?? false;
-                        return (
-                          <button
-                            key={m.id}
-                            type="button"
-                            onClick={async () => {
-                              // Diff-based single-pair write, never a
-                              // wholesale replace of the join table (see
-                              // lib/projectMachineryApi.ts).
-                              const result = isAssigned
-                                ? await removeProjectMachineRemote(
-                                    project.id,
-                                    m.id,
-                                  )
-                                : await addProjectMachineRemote(
-                                    project.id,
-                                    m.id,
+                  )}
+                  {isAdmin && (
+                    <div className="sm:col-span-2 pt-2 border-t border-border">
+                      <p className="text-xs text-muted-foreground uppercase tracking-wide mb-2">
+                        Assigned Dies/Tooling
+                      </p>
+                      <p className="text-[11px] text-muted-foreground mb-2">
+                        Dies are reusable — assigning here is a planning
+                        reference only, not ownership.
+                      </p>
+                      <div className="flex flex-wrap gap-2">
+                        {dies.map((d) => {
+                          const isAssigned =
+                            project.assignedDieIds?.includes(d.id) ?? false;
+                          return (
+                            <button
+                              key={d.id}
+                              type="button"
+                              onClick={async () => {
+                                // Diff-based single-pair write, never a
+                                // wholesale replace of the join table (see
+                                // lib/projectDiesApi.ts).
+                                const result = isAssigned
+                                  ? await removeProjectDieRemote(
+                                      project.id,
+                                      d.id,
+                                    )
+                                  : await addProjectDieRemote(project.id, d.id);
+                                if (result.status === "unauthenticated") {
+                                  toast.error(
+                                    "Not signed in to the server - assignment was not saved",
                                   );
-                              if (result.status === "unauthenticated") {
-                                toast.error(
-                                  "Not signed in to the server - assignment was not saved",
-                                );
-                                return;
-                              }
-                              if (
-                                result.status === "denied" ||
-                                result.status === "error"
-                              ) {
-                                toast.error(
-                                  result.error ??
-                                    "Could not save machine assignment",
-                                );
-                                return;
-                              }
-                              const current = project.assignedMachineIds ?? [];
-                              const updated = isAssigned
-                                ? current.filter((id) => id !== m.id)
-                                : [...current, m.id];
-                              updateProject({
-                                ...project,
-                                assignedMachineIds: updated,
-                              });
-                            }}
-                            className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
-                              isAssigned
-                                ? "bg-primary text-primary-foreground border-primary"
-                                : "bg-background text-muted-foreground border-border hover:border-primary hover:text-primary"
-                            }`}
-                            data-ocid="project-detail.assign-machine.toggle"
-                          >
-                            {m.name} ({m.machineCode})
-                          </button>
-                        );
-                      })}
-                      {machines.length === 0 && (
-                        <p className="text-xs text-muted-foreground">
-                          No machines registered
-                        </p>
-                      )}
+                                  return;
+                                }
+                                if (
+                                  result.status === "denied" ||
+                                  result.status === "error"
+                                ) {
+                                  toast.error(
+                                    result.error ??
+                                      "Could not save die assignment",
+                                  );
+                                  return;
+                                }
+                                const current = project.assignedDieIds ?? [];
+                                const updated = isAssigned
+                                  ? current.filter((id) => id !== d.id)
+                                  : [...current, d.id];
+                                updateProject({
+                                  ...project,
+                                  assignedDieIds: updated,
+                                });
+                              }}
+                              className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                                isAssigned
+                                  ? "bg-primary text-primary-foreground border-primary"
+                                  : "bg-background text-muted-foreground border-border hover:border-primary hover:text-primary"
+                              }`}
+                              data-ocid="project-detail.assign-die.toggle"
+                            >
+                              {d.name} ({d.dieCode})
+                            </button>
+                          );
+                        })}
+                        {dies.length === 0 && (
+                          <p className="text-xs text-muted-foreground">
+                            No dies registered
+                          </p>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                )}
-                {isAdmin && (
-                  <div className="sm:col-span-2 pt-2 border-t border-border">
-                    <p className="text-xs text-muted-foreground uppercase tracking-wide mb-2">
-                      Assigned Dies/Tooling
-                    </p>
-                    <p className="text-[11px] text-muted-foreground mb-2">
-                      Dies are reusable — assigning here is a planning reference
-                      only, not ownership.
-                    </p>
-                    <div className="flex flex-wrap gap-2">
-                      {dies.map((d) => {
-                        const isAssigned =
-                          project.assignedDieIds?.includes(d.id) ?? false;
-                        return (
-                          <button
-                            key={d.id}
-                            type="button"
-                            onClick={async () => {
-                              // Diff-based single-pair write, never a
-                              // wholesale replace of the join table (see
-                              // lib/projectDiesApi.ts).
-                              const result = isAssigned
-                                ? await removeProjectDieRemote(project.id, d.id)
-                                : await addProjectDieRemote(project.id, d.id);
-                              if (result.status === "unauthenticated") {
-                                toast.error(
-                                  "Not signed in to the server - assignment was not saved",
-                                );
-                                return;
-                              }
-                              if (
-                                result.status === "denied" ||
-                                result.status === "error"
-                              ) {
-                                toast.error(
-                                  result.error ??
-                                    "Could not save die assignment",
-                                );
-                                return;
-                              }
-                              const current = project.assignedDieIds ?? [];
-                              const updated = isAssigned
-                                ? current.filter((id) => id !== d.id)
-                                : [...current, d.id];
-                              updateProject({
-                                ...project,
-                                assignedDieIds: updated,
-                              });
-                            }}
-                            className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
-                              isAssigned
-                                ? "bg-primary text-primary-foreground border-primary"
-                                : "bg-background text-muted-foreground border-border hover:border-primary hover:text-primary"
-                            }`}
-                            data-ocid="project-detail.assign-die.toggle"
-                          >
-                            {d.name} ({d.dieCode})
-                          </button>
-                        );
-                      })}
-                      {dies.length === 0 && (
-                        <p className="text-xs text-muted-foreground">
-                          No dies registered
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
+                  )}
+                </CardContent>
+              </Card>
 
-            {revView && projectServiceRevenue.length > 0 && (
-              <Card data-ocid="project-detail.service_revenue.card">
-                <CardContent className="pt-6">
-                  <p className="text-xs text-muted-foreground uppercase tracking-wide mb-1">
-                    Machine / Service Revenue
-                  </p>
-                  <p className="text-[11px] text-muted-foreground mb-3">
-                    Revenue only — separate from Profit &amp; Costing. Labeled
-                    by billable service, never by machine asset.
-                  </p>
-                  <div className="space-y-2">
-                    {projectServiceRevenue.map((r) => (
-                      <div
-                        key={r.serviceName}
-                        className="flex items-center justify-between text-sm border-b border-border/60 pb-1.5 last:border-0"
-                      >
-                        <span>
-                          {r.serviceName} — {r.totalQty} {r.unit || ""}
-                        </span>
-                        <span className="font-medium text-success">
+              {revView && projectServiceRevenue.length > 0 && (
+                <Card data-ocid="project-detail.service_revenue.card">
+                  <CardContent className="pt-6">
+                    <p className="text-xs text-muted-foreground uppercase tracking-wide mb-1">
+                      Machine / Service Revenue
+                    </p>
+                    <p className="text-[11px] text-muted-foreground mb-3">
+                      Revenue only — separate from Profit &amp; Costing. Labeled
+                      by billable service, never by machine asset.
+                    </p>
+                    <div className="space-y-2">
+                      {projectServiceRevenue.map((r) => (
+                        <div
+                          key={r.serviceName}
+                          className="flex items-center justify-between text-sm border-b border-border/60 pb-1.5 last:border-0"
+                        >
+                          <span>
+                            {r.serviceName} — {r.totalQty} {r.unit || ""}
+                          </span>
+                          <span className="font-medium text-success">
+                            ₹
+                            {r.totalRevenue.toLocaleString("en-IN", {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })}
+                          </span>
+                        </div>
+                      ))}
+                      <div className="flex items-center justify-between text-sm font-semibold pt-1">
+                        <span>Total</span>
+                        <span className="text-success">
                           ₹
-                          {r.totalRevenue.toLocaleString("en-IN", {
+                          {projectServiceRevenueTotal.toLocaleString("en-IN", {
                             minimumFractionDigits: 2,
                             maximumFractionDigits: 2,
                           })}
                         </span>
                       </div>
-                    ))}
-                    <div className="flex items-center justify-between text-sm font-semibold pt-1">
-                      <span>Total</span>
-                      <span className="text-success">
-                        ₹
-                        {projectServiceRevenueTotal.toLocaleString("en-IN", {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}
-                      </span>
                     </div>
-                  </div>
-                </CardContent>
-              </Card>
-            )}
+                  </CardContent>
+                </Card>
+              )}
 
-            {/* Phase 10 (Group 2) — Project Lifecycle Dates. Quotation/
+              {/* Phase 10 (Group 2) — Project Lifecycle Dates. Quotation/
                 design/planning does NOT mean production has started -
                 Actual Production Start is a separate field the user sets
                 explicitly, never auto-derived from anything else here. */}
-            <Card className="mt-4">
-              <CardHeader>
-                <CardTitle className="text-base flex items-center gap-2">
-                  <CalendarClock className="w-4 h-4 text-primary" />
-                  Project Dates
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {(
-                  [
-                    ["plannedStartDate", "Planned Start Date"],
+              <Card className="mt-4">
+                <CardHeader>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <CalendarClock className="w-4 h-4 text-primary" />
+                    Project Dates
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {(
                     [
-                      "actualProductionStartDate",
-                      "Actual Production Start Date",
-                    ],
-                    ["targetCompletionDate", "Target Completion Date"],
-                    [
-                      "customerCommittedDeliveryDate",
-                      "Customer Committed Delivery Date",
-                    ],
-                    ["actualCompletionDate", "Actual Completion Date"],
-                  ] as [keyof typeof projectDates, string][]
-                ).map(([field, label]) => (
-                  <div key={field} className="space-y-1.5">
-                    <Label htmlFor={`project-date-${field}`}>{label}</Label>
-                    <Input
-                      id={`project-date-${field}`}
-                      type="date"
-                      value={projectDates[field]}
-                      disabled={!pEdit}
-                      onChange={(e) =>
-                        setProjectDates((d) => ({
-                          ...d,
-                          [field]: e.target.value,
-                        }))
-                      }
-                      data-ocid="project-detail.dates.input"
-                    />
+                      ["plannedStartDate", "Planned Start Date"],
+                      [
+                        "actualProductionStartDate",
+                        "Actual Production Start Date",
+                      ],
+                      ["targetCompletionDate", "Target Completion Date"],
+                      [
+                        "customerCommittedDeliveryDate",
+                        "Customer Committed Delivery Date",
+                      ],
+                      ["actualCompletionDate", "Actual Completion Date"],
+                    ] as [keyof typeof projectDates, string][]
+                  ).map(([field, label]) => (
+                    <div key={field} className="space-y-1.5">
+                      <Label htmlFor={`project-date-${field}`}>{label}</Label>
+                      <Input
+                        id={`project-date-${field}`}
+                        type="date"
+                        value={projectDates[field]}
+                        disabled={!pEdit}
+                        onChange={(e) =>
+                          setProjectDates((d) => ({
+                            ...d,
+                            [field]: e.target.value,
+                          }))
+                        }
+                        data-ocid="project-detail.dates.input"
+                      />
+                    </div>
+                  ))}
+                </CardContent>
+                {pEdit && (
+                  <div className="px-6 pb-6 flex justify-end">
+                    <Button
+                      onClick={handleSaveProjectDates}
+                      disabled={isSavingDates}
+                      data-ocid="project-detail.dates.save_button"
+                    >
+                      <Save className="w-4 h-4 mr-1.5" />
+                      {isSavingDates ? "Saving…" : "Save Dates"}
+                    </Button>
                   </div>
-                ))}
-              </CardContent>
-              {pEdit && (
-                <div className="px-6 pb-6 flex justify-end">
-                  <Button
-                    onClick={handleSaveProjectDates}
-                    disabled={isSavingDates}
-                    data-ocid="project-detail.dates.save_button"
-                  >
-                    <Save className="w-4 h-4 mr-1.5" />
-                    {isSavingDates ? "Saving…" : "Save Dates"}
-                  </Button>
-                </div>
-              )}
-            </Card>
+                )}
+              </Card>
 
-            {/* Phase 57 (Group 2, Master Monster Prompt) — Classification
+              {/* Phase 57 (Group 2, Master Monster Prompt) — Classification
                 & Quantities. Work Type and Lifecycle Stage are kept as
                 two separate controls (never merged into one field) so
                 they can't be confused with each other - a Production
                 work-type project never needs a lifecycle stage set at
                 all. Moving lifecycleStage forward is an update to this
                 same project row, never a new project. */}
-            <Card className="mt-4">
-              <CardHeader>
-                <CardTitle className="text-base flex items-center gap-2">
-                  <FolderKanban className="w-4 h-4 text-primary" />
-                  Classification &amp; Quantities
-                </CardTitle>
-                <p className="text-xs text-muted-foreground">
-                  What kind of work this is, who owns the material, and how much
-                  was ordered vs. actually produced. Overproduction is
-                  calculated automatically and can't be edited.
-                </p>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="pc-worktype">Work Type</Label>
-                    <Select
-                      value={classification.workType}
-                      disabled={!pEdit}
-                      onValueChange={(v) =>
-                        setClassification((c) => ({
-                          ...c,
-                          workType: v as NonNullable<Project["workType"]>,
-                        }))
-                      }
-                    >
-                      <SelectTrigger id="pc-worktype">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {WORK_TYPE_OPTIONS.map((t) => (
-                          <SelectItem key={t.value} value={t.value}>
-                            {t.label}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="pc-lifecycle">
-                      Lifecycle Stage{" "}
-                      <span className="text-muted-foreground font-normal">
-                        (sample track only)
-                      </span>
-                    </Label>
-                    <Select
-                      value={classification.lifecycleStage || "none"}
-                      disabled={!pEdit}
-                      onValueChange={(v) =>
-                        setClassification((c) => ({
-                          ...c,
-                          lifecycleStage: v === "none" ? "" : v,
-                        }))
-                      }
-                    >
-                      <SelectTrigger id="pc-lifecycle">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="none">Not applicable</SelectItem>
-                        <SelectItem value="sample">Sample</SelectItem>
-                        <SelectItem value="production_ready">
-                          Production Ready
-                        </SelectItem>
-                        <SelectItem value="production">Production</SelectItem>
-                        <SelectItem value="completed">Completed</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="pc-ownership">Material Ownership</Label>
-                    <Select
-                      value={classification.materialOwnership}
-                      disabled={!pEdit}
-                      onValueChange={(v) =>
-                        setClassification((c) => ({
-                          ...c,
-                          materialOwnership: v as NonNullable<
-                            Project["materialOwnership"]
-                          >,
-                        }))
-                      }
-                    >
-                      <SelectTrigger id="pc-ownership">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="company">Company</SelectItem>
-                        <SelectItem value="customer">Customer</SelectItem>
-                        <SelectItem value="mixed">Mixed</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
-
-                {classification.materialOwnership !== "company" && (
-                  <div className="rounded-md border bg-muted/30 p-3 space-y-1.5">
-                    <Label htmlFor="pc-received">Received from Customer</Label>
-                    <Input
-                      id="pc-received"
-                      type="number"
-                      min={0}
-                      disabled={!pEdit}
-                      placeholder="e.g. 100 chairs, or 10 (kg of powder)"
-                      value={classification.receivedQuantity}
-                      onChange={(e) =>
-                        setClassification((c) => ({
-                          ...c,
-                          receivedQuantity: e.target.value,
-                        }))
-                      }
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      Customer-owned goods/material entering FabFlow for
-                      processing. Kept separate from company inventory - this
-                      quantity is never added to Inventory stock.
-                    </p>
-                  </div>
-                )}
-
-                <div>
-                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">
-                    Quantity Breakdown
+              <Card className="mt-4">
+                <CardHeader>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <FolderKanban className="w-4 h-4 text-primary" />
+                    Classification &amp; Quantities
+                  </CardTitle>
+                  <p className="text-xs text-muted-foreground">
+                    What kind of work this is, who owns the material, and how
+                    much was ordered vs. actually produced. Overproduction is
+                    calculated automatically and can't be edited.
                   </p>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    {(
-                      [
-                        ["orderedQuantity", "Ordered"],
-                        ["plannedQuantity", "Planned"],
-                        ["producedQuantity", "Produced"],
-                        ["acceptedQuantity", "Accepted"],
-                        ["rejectedQuantity", "Rejected"],
-                        ["reworkQuantity", "Rework"],
-                        ["returnedQuantity", "Returned"],
-                        ["remainingQuantity", "Remaining"],
-                      ] as [
-                        Exclude<
-                          keyof typeof classification,
-                          | "workType"
-                          | "lifecycleStage"
-                          | "materialOwnership"
-                          | "receivedQuantity"
-                        >,
-                        string,
-                      ][]
-                    ).map(([field, label]) => (
-                      <div key={field} className="space-y-1.5">
-                        <Label htmlFor={`pc-${field}`} className="text-xs">
-                          {label}
-                        </Label>
-                        <Input
-                          id={`pc-${field}`}
-                          type="number"
-                          min={0}
-                          disabled={!pEdit}
-                          value={classification[field]}
-                          onChange={(e) =>
-                            setClassification((c) => ({
-                              ...c,
-                              [field]: e.target.value,
-                            }))
-                          }
-                          data-ocid={`project-detail.classification.${field}`}
-                        />
-                      </div>
-                    ))}
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                     <div className="space-y-1.5">
-                      <Label className="text-xs">Overproduction</Label>
-                      <div className="h-9 flex items-center px-3 rounded-md border bg-muted/30 text-sm font-medium tabular-nums">
-                        {/* Only meaningful once an ordered quantity
+                      <Label htmlFor="pc-worktype">Work Type</Label>
+                      <Select
+                        value={classification.workType}
+                        disabled={!pEdit}
+                        onValueChange={(v) =>
+                          setClassification((c) => ({
+                            ...c,
+                            workType: v as NonNullable<Project["workType"]>,
+                          }))
+                        }
+                      >
+                        <SelectTrigger id="pc-worktype">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {WORK_TYPE_OPTIONS.map((t) => (
+                            <SelectItem key={t.value} value={t.value}>
+                              {t.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="pc-lifecycle">
+                        Lifecycle Stage{" "}
+                        <span className="text-muted-foreground font-normal">
+                          (sample track only)
+                        </span>
+                      </Label>
+                      <Select
+                        value={classification.lifecycleStage || "none"}
+                        disabled={!pEdit}
+                        onValueChange={(v) =>
+                          setClassification((c) => ({
+                            ...c,
+                            lifecycleStage: v === "none" ? "" : v,
+                          }))
+                        }
+                      >
+                        <SelectTrigger id="pc-lifecycle">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="none">Not applicable</SelectItem>
+                          <SelectItem value="sample">Sample</SelectItem>
+                          <SelectItem value="production_ready">
+                            Production Ready
+                          </SelectItem>
+                          <SelectItem value="production">Production</SelectItem>
+                          <SelectItem value="completed">Completed</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="pc-ownership">Material Ownership</Label>
+                      <Select
+                        value={classification.materialOwnership}
+                        disabled={!pEdit}
+                        onValueChange={(v) =>
+                          setClassification((c) => ({
+                            ...c,
+                            materialOwnership: v as NonNullable<
+                              Project["materialOwnership"]
+                            >,
+                          }))
+                        }
+                      >
+                        <SelectTrigger id="pc-ownership">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="company">Company</SelectItem>
+                          <SelectItem value="customer">Customer</SelectItem>
+                          <SelectItem value="mixed">Mixed</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+
+                  {classification.materialOwnership !== "company" && (
+                    <div className="rounded-md border bg-muted/30 p-3 space-y-1.5">
+                      <Label htmlFor="pc-received">
+                        Received from Customer
+                      </Label>
+                      <Input
+                        id="pc-received"
+                        type="number"
+                        min={0}
+                        disabled={!pEdit}
+                        placeholder="e.g. 100 chairs, or 10 (kg of powder)"
+                        value={classification.receivedQuantity}
+                        onChange={(e) =>
+                          setClassification((c) => ({
+                            ...c,
+                            receivedQuantity: e.target.value,
+                          }))
+                        }
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Customer-owned goods/material entering FabFlow for
+                        processing. Kept separate from company inventory - this
+                        quantity is never added to Inventory stock.
+                      </p>
+                    </div>
+                  )}
+
+                  <div>
+                    <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">
+                      Quantity Breakdown
+                    </p>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      {(
+                        [
+                          ["orderedQuantity", "Ordered"],
+                          ["plannedQuantity", "Planned"],
+                          ["producedQuantity", "Produced"],
+                          ["acceptedQuantity", "Accepted"],
+                          ["rejectedQuantity", "Rejected"],
+                          ["reworkQuantity", "Rework"],
+                          ["returnedQuantity", "Returned"],
+                          ["remainingQuantity", "Remaining"],
+                        ] as [
+                          Exclude<
+                            keyof typeof classification,
+                            | "workType"
+                            | "lifecycleStage"
+                            | "materialOwnership"
+                            | "receivedQuantity"
+                          >,
+                          string,
+                        ][]
+                      ).map(([field, label]) => (
+                        <div key={field} className="space-y-1.5">
+                          <Label htmlFor={`pc-${field}`} className="text-xs">
+                            {label}
+                          </Label>
+                          <Input
+                            id={`pc-${field}`}
+                            type="number"
+                            min={0}
+                            disabled={!pEdit}
+                            value={classification[field]}
+                            onChange={(e) =>
+                              setClassification((c) => ({
+                                ...c,
+                                [field]: e.target.value,
+                              }))
+                            }
+                            data-ocid={`project-detail.classification.${field}`}
+                          />
+                        </div>
+                      ))}
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">Overproduction</Label>
+                        <div className="h-9 flex items-center px-3 rounded-md border bg-muted/30 text-sm font-medium tabular-nums">
+                          {/* Only meaningful once an ordered quantity
                             actually exists — greatest(produced-ordered,0)
                             treats a never-set ordered_quantity as 0,
                             which would otherwise show every unit
@@ -3511,28 +3581,31 @@ export function ProjectDetail({
                             quantity and producedQuantity=95 computed
                             overproductionQuantity=95 — correct per the
                             formula, misleading to display here. */}
-                        {project.orderedQuantity !== undefined
-                          ? (project.overproductionQuantity ?? 0)
-                          : "—"}
+                          {project.orderedQuantity !== undefined
+                            ? (project.overproductionQuantity ?? 0)
+                            : "—"}
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
-              </CardContent>
-              {pEdit && (
-                <div className="px-6 pb-6 flex justify-end">
-                  <Button
-                    onClick={handleSaveClassification}
-                    disabled={isSavingClassification}
-                    data-ocid="project-detail.classification.save_button"
-                  >
-                    <Save className="w-4 h-4 mr-1.5" />
-                    {isSavingClassification ? "Saving…" : "Save Classification"}
-                  </Button>
-                </div>
-              )}
-            </Card>
-          </section>
+                </CardContent>
+                {pEdit && (
+                  <div className="px-6 pb-6 flex justify-end">
+                    <Button
+                      onClick={handleSaveClassification}
+                      disabled={isSavingClassification}
+                      data-ocid="project-detail.classification.save_button"
+                    >
+                      <Save className="w-4 h-4 mr-1.5" />
+                      {isSavingClassification
+                        ? "Saving…"
+                        : "Save Classification"}
+                    </Button>
+                  </div>
+                )}
+              </Card>
+            </section>
+          )}
 
           {/* Tab 2 — Design Files.
             Project → Design Files workflow (see chat): "+ Add Files" here
@@ -3547,343 +3620,376 @@ export function ProjectDetail({
             entries for this project stay visible and untouched, including
             "Edit in Drawing Editor" for any already promoted to a real
             Repository drawing. */}
-          <section id="section-design" className="mt-4 space-y-4 scroll-mt-24">
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold">Design & Drawing Files</h2>
-            </div>
+          {activeTab === "design" && (
+            <section
+              id="section-design"
+              className="mt-4 space-y-4 scroll-mt-24"
+            >
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold">
+                  Design & Drawing Files
+                </h2>
+              </div>
 
-            <ProjectDrawingFiles
-              projectId={project.id}
-              drawings={allDrawings}
-              links={drawingLinks}
-              canCreate={dCreate}
-              canEdit={dEdit}
-              canDelete={dDelete}
-              userId={userId}
-              userName={userName}
-              onUpload={uploadDrawingDoc}
-              onAddLink={addDrawingLink}
-              onRemoveLink={removeDrawingLink}
-              onUpdateDrawing={updateDrawingDoc}
-              onDeleteDrawing={deleteDrawingDoc}
-              onAudit={addAuditLog}
-            />
+              <ProjectDrawingFiles
+                projectId={project.id}
+                drawings={allDrawings}
+                links={drawingLinks}
+                canCreate={dCreate}
+                canEdit={dEdit}
+                canDelete={dDelete}
+                userId={userId}
+                userName={userName}
+                onUpload={uploadDrawingDoc}
+                onAddLink={addDrawingLink}
+                onRemoveLink={removeDrawingLink}
+                onUpdateDrawing={updateDrawingDoc}
+                onDeleteDrawing={deleteDrawingDoc}
+                onAudit={addAuditLog}
+              />
 
-            {projDesignFiles.length > 0 && (
-              <>
-                <h3 className="text-xs font-semibold text-muted-foreground pt-2">
-                  Legacy Files (pre-Repository)
-                </h3>
-                <div
-                  className="rounded-md border border-warning/30 bg-warning/15 px-3 py-2 text-xs text-warning"
-                  data-ocid="project-detail.design.retired_notice"
-                >
-                  These files were uploaded before the Drawing Repository
-                  workflow existed and no longer accept new uploads here — use
-                  "+ Add Files" above instead. They remain accessible below.
-                </div>
-              </>
-            )}
-            {projDesignFiles.length > 0 && (
-              <div className="table-wrapper">
-                <div
-                  className="rounded-md border"
-                  data-ocid="project-detail.design.table"
-                >
-                  <Table>
-                    <TableHeader>
-                      <TableRow className="bg-muted/40">
-                        <TableHead className="text-xs font-semibold">
-                          File Name
-                        </TableHead>
-                        <TableHead className="text-xs font-semibold">
-                          Uploaded
-                        </TableHead>
-                        <TableHead className="text-xs font-semibold w-24">
-                          Actions
-                        </TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {projDesignFiles.map((f, i) => {
-                        // Read-only lookup — never findOrCreateMasterDrawing,
-                        // which would create a hidden Working Drawing just from
-                        // rendering this list. Only Edit (below) may create one.
-                        const master = allDrawings.find(
-                          (d) => d.sourceDesignFileId === f.id,
-                        );
-                        const workDrawings = master
-                          ? buildDrawingSubtree(master, allDrawings).children
-                          : [];
-                        return (
-                          <Fragment key={f.id}>
-                            <TableRow
-                              data-ocid={`project-detail.design.item.${i + 1}`}
-                            >
-                              <TableCell className="text-sm font-medium">
-                                <div className="flex items-center gap-1.5">
-                                  <span>{f.fileName}</span>
-                                  <Badge
-                                    variant="outline"
-                                    className="text-[10px] px-1 py-0"
-                                  >
-                                    Original
-                                  </Badge>
-                                  {master && (
+              {projDesignFiles.length > 0 && (
+                <>
+                  <h3 className="text-xs font-semibold text-muted-foreground pt-2">
+                    Legacy Files (pre-Repository)
+                  </h3>
+                  <div
+                    className="rounded-md border border-warning/30 bg-warning/15 px-3 py-2 text-xs text-warning"
+                    data-ocid="project-detail.design.retired_notice"
+                  >
+                    These files were uploaded before the Drawing Repository
+                    workflow existed and no longer accept new uploads here — use
+                    "+ Add Files" above instead. They remain accessible below.
+                  </div>
+                </>
+              )}
+              {projDesignFiles.length > 0 && (
+                <div className="table-wrapper">
+                  <div
+                    className="rounded-md border"
+                    data-ocid="project-detail.design.table"
+                  >
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="bg-muted/40">
+                          <TableHead className="text-xs font-semibold">
+                            File Name
+                          </TableHead>
+                          <TableHead className="text-xs font-semibold">
+                            Uploaded
+                          </TableHead>
+                          <TableHead className="text-xs font-semibold w-24">
+                            Actions
+                          </TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {projDesignFiles.map((f, i) => {
+                          // Read-only lookup — never findOrCreateMasterDrawing,
+                          // which would create a hidden Working Drawing just from
+                          // rendering this list. Only Edit (below) may create one.
+                          const master = allDrawings.find(
+                            (d) => d.sourceDesignFileId === f.id,
+                          );
+                          const workDrawings = master
+                            ? buildDrawingSubtree(master, allDrawings).children
+                            : [];
+                          return (
+                            <Fragment key={f.id}>
+                              <TableRow
+                                data-ocid={`project-detail.design.item.${i + 1}`}
+                              >
+                                <TableCell className="text-sm font-medium">
+                                  <div className="flex items-center gap-1.5">
+                                    <span>{f.fileName}</span>
                                     <Badge
                                       variant="outline"
-                                      className="text-[10px] px-1 py-0 border-info/40 text-info"
+                                      className="text-[10px] px-1 py-0"
                                     >
-                                      Edited
+                                      Original
                                     </Badge>
+                                    {master && (
+                                      <Badge
+                                        variant="outline"
+                                        className="text-[10px] px-1 py-0 border-info/40 text-info"
+                                      >
+                                        Edited
+                                      </Badge>
+                                    )}
+                                  </div>
+                                </TableCell>
+                                <TableCell className="text-xs text-muted-foreground">
+                                  {new Date(f.uploadedAt).toLocaleDateString(
+                                    "en-IN",
                                   )}
-                                </div>
-                              </TableCell>
-                              <TableCell className="text-xs text-muted-foreground">
-                                {new Date(f.uploadedAt).toLocaleDateString(
-                                  "en-IN",
-                                )}
-                              </TableCell>
-                              <TableCell className="flex gap-1">
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-6 px-2"
-                                  onClick={() =>
-                                    master
-                                      ? setPreviewWorkDrawing(master)
-                                      : setPreviewFile(f)
-                                  }
-                                  title={
-                                    master
-                                      ? "Preview — latest saved edited version"
-                                      : "Preview Original"
-                                  }
-                                  data-ocid={`project-detail.design.preview_button.${i + 1}`}
-                                >
-                                  <Eye className="w-3.5 h-3.5" />
-                                </Button>
-                                {master && (
+                                </TableCell>
+                                <TableCell className="flex gap-1">
                                   <Button
                                     variant="ghost"
                                     size="sm"
                                     className="h-6 px-2"
-                                    onClick={() => setPreviewFile(f)}
-                                    title="Preview Original — untouched uploaded file"
-                                    data-ocid={`project-detail.design.preview_original_button.${i + 1}`}
+                                    onClick={() =>
+                                      master
+                                        ? setPreviewWorkDrawing(master)
+                                        : setPreviewFile(f)
+                                    }
+                                    title={
+                                      master
+                                        ? "Preview — latest saved edited version"
+                                        : "Preview Original"
+                                    }
+                                    data-ocid={`project-detail.design.preview_button.${i + 1}`}
                                   >
-                                    <FileText className="w-3.5 h-3.5" />
+                                    <Eye className="w-3.5 h-3.5" />
                                   </Button>
-                                )}
-                                {dEdit && (
+                                  {master && (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className="h-6 px-2"
+                                      onClick={() => setPreviewFile(f)}
+                                      title="Preview Original — untouched uploaded file"
+                                      data-ocid={`project-detail.design.preview_original_button.${i + 1}`}
+                                    >
+                                      <FileText className="w-3.5 h-3.5" />
+                                    </Button>
+                                  )}
+                                  {dEdit && (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className="h-6 px-2"
+                                      onClick={() => handleEditDesignFile(f)}
+                                      title="Edit"
+                                      data-ocid={`project-detail.design.edit_button.${i + 1}`}
+                                    >
+                                      <Pencil className="w-3.5 h-3.5" />
+                                    </Button>
+                                  )}
                                   <Button
                                     variant="ghost"
                                     size="sm"
                                     className="h-6 px-2"
-                                    onClick={() => handleEditDesignFile(f)}
-                                    title="Edit"
-                                    data-ocid={`project-detail.design.edit_button.${i + 1}`}
+                                    onClick={() => handleDownloadFile(f)}
+                                    title="Download Original"
+                                    data-ocid={`project-detail.design.secondary_button.${i + 1}`}
                                   >
-                                    <Pencil className="w-3.5 h-3.5" />
+                                    <Download className="w-3.5 h-3.5" />
                                   </Button>
-                                )}
-                                <Button
-                                  variant="ghost"
-                                  size="sm"
-                                  className="h-6 px-2"
-                                  onClick={() => handleDownloadFile(f)}
-                                  title="Download Original"
-                                  data-ocid={`project-detail.design.secondary_button.${i + 1}`}
-                                >
-                                  <Download className="w-3.5 h-3.5" />
-                                </Button>
-                                {pDelete && (
-                                  <Button
-                                    variant="ghost"
-                                    size="sm"
-                                    className="h-6 px-2 text-destructive hover:text-destructive"
-                                    onClick={() => {
-                                      if (!pDelete) {
-                                        alert("Access restricted");
-                                        return;
-                                      }
-                                      deleteDesignFile(f.id);
-                                      toast.success("File removed");
-                                    }}
-                                    data-ocid={`project-detail.design.delete_button.${i + 1}`}
-                                  >
-                                    ×
-                                  </Button>
-                                )}
-                              </TableCell>
-                            </TableRow>
-                            {dView &&
-                              workDrawings.map((child) => (
-                                <DrawingTreeRow
-                                  key={child.drawing.id}
-                                  node={child}
-                                  depth={1}
-                                  canEdit={dEdit}
-                                  canDelete={dDelete}
-                                  onOpen={(d) =>
-                                    onOpenDrawingEditor?.({
-                                      projectId,
-                                      drawingId: d.id,
-                                    })
-                                  }
-                                  onDelete={handleDrawingDelete}
-                                  onPreview={setPreviewWorkDrawing}
-                                  onPrint={handlePrintWorkDrawing}
-                                  showRename={false}
-                                  showLink={false}
-                                  showDuplicate={false}
-                                  openLabel="Edit"
-                                  compact
-                                />
-                              ))}
-                          </Fragment>
-                        );
-                      })}
-                      {projDesignFiles.length === 0 && (
-                        <TableRow>
-                          <TableCell
-                            colSpan={3}
-                            className="text-center py-8 text-sm text-muted-foreground"
-                            data-ocid="project-detail.design.empty_state"
-                          >
-                            No design files uploaded yet
-                          </TableCell>
-                        </TableRow>
-                      )}
-                    </TableBody>
-                  </Table>
+                                  {pDelete && (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      className="h-6 px-2 text-destructive hover:text-destructive"
+                                      onClick={() => {
+                                        if (!pDelete) {
+                                          alert("Access restricted");
+                                          return;
+                                        }
+                                        deleteDesignFile(f.id);
+                                        toast.success("File removed");
+                                      }}
+                                      data-ocid={`project-detail.design.delete_button.${i + 1}`}
+                                    >
+                                      ×
+                                    </Button>
+                                  )}
+                                </TableCell>
+                              </TableRow>
+                              {dView &&
+                                workDrawings.map((child) => (
+                                  <DrawingTreeRow
+                                    key={child.drawing.id}
+                                    node={child}
+                                    depth={1}
+                                    canEdit={dEdit}
+                                    canDelete={dDelete}
+                                    onOpen={(d) =>
+                                      onOpenDrawingEditor?.({
+                                        projectId,
+                                        drawingId: d.id,
+                                      })
+                                    }
+                                    onDelete={handleDrawingDelete}
+                                    onPreview={setPreviewWorkDrawing}
+                                    onPrint={handlePrintWorkDrawing}
+                                    showRename={false}
+                                    showLink={false}
+                                    showDuplicate={false}
+                                    openLabel="Edit"
+                                    compact
+                                  />
+                                ))}
+                            </Fragment>
+                          );
+                        })}
+                        {projDesignFiles.length === 0 && (
+                          <TableRow>
+                            <TableCell
+                              colSpan={3}
+                              className="text-center py-8 text-sm text-muted-foreground"
+                              data-ocid="project-detail.design.empty_state"
+                            >
+                              No design files uploaded yet
+                            </TableCell>
+                          </TableRow>
+                        )}
+                      </TableBody>
+                    </Table>
+                  </div>
                 </div>
-              </div>
-            )}
-            <DesignFilePreviewDialog
-              file={previewFile}
-              open={!!previewFile}
-              onOpenChange={(o) => !o && setPreviewFile(null)}
-              onDownload={handleDownloadFile}
-            />
-            <WorkDrawingPreviewDialog
-              drawing={previewWorkDrawing}
-              open={!!previewWorkDrawing}
-              onOpenChange={(o) => !o && setPreviewWorkDrawing(null)}
-              company={{
-                companyName: settings?.companyName || "Your Company",
-                companyLogoDataUrl: settings?.companyLogo || undefined,
-              }}
-            />
-          </section>
+              )}
+              <DesignFilePreviewDialog
+                file={previewFile}
+                open={!!previewFile}
+                onOpenChange={(o) => !o && setPreviewFile(null)}
+                onDownload={handleDownloadFile}
+              />
+              <WorkDrawingPreviewDialog
+                drawing={previewWorkDrawing}
+                open={!!previewWorkDrawing}
+                onOpenChange={(o) => !o && setPreviewWorkDrawing(null)}
+                company={{
+                  companyName: settings?.companyName || "Your Company",
+                  companyLogoDataUrl: settings?.companyLogo || undefined,
+                }}
+              />
+            </section>
+          )}
 
           {/* Tab 3 — Internal Costing */}
-          <section id="section-costing" className="mt-4 scroll-mt-24">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base flex items-center gap-2">
-                  <AlertTriangle className="w-4 h-4 text-warning" />
-                  Internal Costing Sheet
-                  <Badge variant="outline" className="text-xs font-normal ml-1">
-                    Internal Use Only — Not visible to customer
-                  </Badge>
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  {(
-                    [
-                      ["rawMaterialCost", "Raw Material Cost"],
-                      ["cncCost", "CNC / Laser Cutting Cost"],
-                      ["hardwareCost", "Hardware Cost"],
-                      ["powderCoatingCost", "Powder Coating Cost"],
-                      ["assemblyCost", "Assembly Cost"],
-                      ["packingCost", "Packing Cost"],
-                      ["labourCost", "Labour Cost"],
-                      ["machineCost", "Machine / Equipment Cost"],
-                      ["outsourceCost", "Outsourced Work Cost"],
-                      ["consumablesCost", "Consumables Cost"],
-                      ["electricityCost", "Electricity Cost"],
-                      ["scrapLossCost", "Scrap / Material Loss"],
-                      ["transportCost", "Transport Cost"],
-                    ] as [keyof typeof costing, string][]
-                  ).map(([field, label]) => {
-                    // Only these 4 legacy fields have a real repeatable
-                    // line-item array behind them — every other field still
-                    // gets the small "+" for visual consistency, but it's
-                    // disabled rather than inventing a line-item type that
-                    // doesn't exist for that category.
-                    const lineItems =
-                      field === "rawMaterialCost"
+          {activeTab === "costing" && (
+            <section id="section-costing" className="mt-4 scroll-mt-24">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 text-warning" />
+                    Internal Costing Sheet
+                    <Badge
+                      variant="outline"
+                      className="text-xs font-normal ml-1"
+                    >
+                      Internal Use Only — Not visible to customer
+                    </Badge>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    {(
+                      [
+                        ["rawMaterialCost", "Raw Material Cost"],
+                        ["cncCost", "CNC / Laser Cutting Cost"],
+                        ["hardwareCost", "Hardware Cost"],
+                        ["powderCoatingCost", "Powder Coating Cost"],
+                        ["assemblyCost", "Assembly Cost"],
+                        ["packingCost", "Packing Cost"],
+                        ["labourCost", "Labour Cost"],
+                        ["machineCost", "Machine / Equipment Cost"],
+                        ["outsourceCost", "Outsourced Work Cost"],
+                        ["consumablesCost", "Consumables Cost"],
+                        ["electricityCost", "Electricity Cost"],
+                        ["scrapLossCost", "Scrap / Material Loss"],
+                        ["transportCost", "Transport Cost"],
+                      ] as [keyof typeof costing, string][]
+                    ).map(([field, label]) => {
+                      // Every one of the 13 categories gets a working "+".
+                      // Raw Material Cost, Hardware Cost, and Powder Coating
+                      // Cost each keep their own dedicated array (unchanged
+                      // from before). The other 10 — CNC, Assembly, Packing,
+                      // Labour, Machine/Equipment, Outsourced, Consumables,
+                      // Electricity, Scrap, Transport — all itemize into the
+                      // SAME manufacturingItems array, one generic/category-
+                      // aware line-item model rather than 10 more unrelated
+                      // arrays: each row carries a `category` tag (its own
+                      // legacy field key) so rows can be filtered back out
+                      // per category for display, editing, and totals.
+                      const lineItems = MANUFACTURING_CATEGORIES.has(field)
                         ? {
-                            fields: RAW_MATERIAL_FIELDS,
-                            rows: (costing.rawMaterials ||
-                              []) as unknown as CostingLineItemRow[],
+                            fields: MANUFACTURING_FIELDS,
+                            rows: (costing.manufacturingItems ?? []).filter(
+                              (r) => manufacturingCategoryOf(r) === field,
+                            ) as unknown as CostingLineItemRow[],
                             onAdd: () =>
                               setCosting((c) => ({
                                 ...c,
-                                rawMaterials: [
-                                  ...(c.rawMaterials ?? []),
-                                  createBlankLineItemRow(
-                                    RAW_MATERIAL_FIELDS,
-                                  ) as unknown as RawMaterialItem,
+                                manufacturingItems: [
+                                  ...(c.manufacturingItems ?? []),
+                                  {
+                                    ...createBlankLineItemRow(
+                                      MANUFACTURING_FIELDS,
+                                    ),
+                                    category: field,
+                                  } as unknown as ManufacturingItem,
                                 ],
                               })),
                             onChange: (rows: CostingLineItemRow[]) =>
-                              setCosting((c) => ({
-                                ...c,
-                                rawMaterials:
-                                  rows as unknown as RawMaterialItem[],
-                              })),
-                            dataOcidPrefix:
-                              "project-detail.costing.raw_materials",
+                              setCosting((c) => {
+                                const otherCategories = (
+                                  c.manufacturingItems ?? []
+                                ).filter(
+                                  (r) => manufacturingCategoryOf(r) !== field,
+                                );
+                                const thisCategory = rows.map((r) => ({
+                                  ...r,
+                                  category: field,
+                                })) as unknown as ManufacturingItem[];
+                                return {
+                                  ...c,
+                                  manufacturingItems: [
+                                    ...otherCategories,
+                                    ...thisCategory,
+                                  ],
+                                };
+                              }),
+                            dataOcidPrefix: `project-detail.costing.manufacturing.${field}`,
                           }
-                        : field === "hardwareCost"
+                        : field === "rawMaterialCost"
                           ? {
-                              fields: HARDWARE_FIELDS,
-                              rows: (costing.hardwareItems ||
+                              fields: RAW_MATERIAL_FIELDS,
+                              rows: (costing.rawMaterials ||
                                 []) as unknown as CostingLineItemRow[],
                               onAdd: () =>
                                 setCosting((c) => ({
                                   ...c,
-                                  hardwareItems: [
-                                    ...(c.hardwareItems ?? []),
+                                  rawMaterials: [
+                                    ...(c.rawMaterials ?? []),
                                     createBlankLineItemRow(
-                                      HARDWARE_FIELDS,
-                                    ) as unknown as HardwareItem,
+                                      RAW_MATERIAL_FIELDS,
+                                    ) as unknown as RawMaterialItem,
                                   ],
                                 })),
                               onChange: (rows: CostingLineItemRow[]) =>
                                 setCosting((c) => ({
                                   ...c,
-                                  hardwareItems:
-                                    rows as unknown as HardwareItem[],
+                                  rawMaterials:
+                                    rows as unknown as RawMaterialItem[],
                                 })),
-                              dataOcidPrefix: "project-detail.costing.hardware",
+                              dataOcidPrefix:
+                                "project-detail.costing.raw_materials",
                             }
-                          : field === "machineCost"
+                          : field === "hardwareCost"
                             ? {
-                                fields: MANUFACTURING_FIELDS,
-                                rows: (costing.manufacturingItems ||
+                                fields: HARDWARE_FIELDS,
+                                rows: (costing.hardwareItems ||
                                   []) as unknown as CostingLineItemRow[],
                                 onAdd: () =>
                                   setCosting((c) => ({
                                     ...c,
-                                    manufacturingItems: [
-                                      ...(c.manufacturingItems ?? []),
+                                    hardwareItems: [
+                                      ...(c.hardwareItems ?? []),
                                       createBlankLineItemRow(
-                                        MANUFACTURING_FIELDS,
-                                      ) as unknown as ManufacturingItem,
+                                        HARDWARE_FIELDS,
+                                      ) as unknown as HardwareItem,
                                     ],
                                   })),
                                 onChange: (rows: CostingLineItemRow[]) =>
                                   setCosting((c) => ({
                                     ...c,
-                                    manufacturingItems:
-                                      rows as unknown as ManufacturingItem[],
+                                    hardwareItems:
+                                      rows as unknown as HardwareItem[],
                                   })),
                                 dataOcidPrefix:
-                                  "project-detail.costing.manufacturing",
+                                  "project-detail.costing.hardware",
                               }
                             : field === "powderCoatingCost"
                               ? {
@@ -3911,433 +4017,2351 @@ export function ProjectDetail({
                                 }
                               : null;
 
-                    return (
-                      <Fragment key={field}>
-                        <div className="space-y-1.5">
-                          <div className="flex items-center justify-between gap-2">
-                            <Label htmlFor={`costing-${field}`}>
-                              {label} (₹)
-                            </Label>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon"
-                              className="h-5 w-5 shrink-0"
-                              disabled={!pEdit || !lineItems}
-                              onClick={lineItems?.onAdd}
-                              title={
-                                lineItems
-                                  ? `Add a detailed ${label} row`
-                                  : "No itemized breakdown for this cost category"
+                      return (
+                        <Fragment key={field}>
+                          <div className="space-y-1.5">
+                            <div className="flex items-center justify-between gap-2">
+                              <Label htmlFor={`costing-${field}`}>
+                                {label} (₹)
+                              </Label>
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon"
+                                className="h-5 w-5 shrink-0"
+                                disabled={!pEdit}
+                                onClick={lineItems?.onAdd}
+                                title={`Add a detailed ${label} row`}
+                                data-ocid={`project-detail.costing.${field}.add_item`}
+                              >
+                                <Plus className="w-3.5 h-3.5" />
+                              </Button>
+                            </div>
+                            <Input
+                              id={`costing-${field}`}
+                              type="number"
+                              min={0}
+                              value={(costing[field] as number) ?? 0}
+                              onChange={(e) =>
+                                setCosting((c) => ({
+                                  ...c,
+                                  [field]: Number(e.target.value),
+                                }))
                               }
-                              data-ocid={`project-detail.costing.${field}.add_item`}
-                            >
-                              <Plus className="w-3.5 h-3.5" />
-                            </Button>
-                          </div>
-                          <Input
-                            id={`costing-${field}`}
-                            type="number"
-                            min={0}
-                            value={(costing[field] as number) ?? 0}
-                            onChange={(e) =>
-                              setCosting((c) => ({
-                                ...c,
-                                [field]: Number(e.target.value),
-                              }))
-                            }
-                            data-ocid="project-detail.costing.input"
-                          />
-                        </div>
-                        {lineItems && lineItems.rows.length > 0 && (
-                          <div className="sm:col-span-2">
-                            <CostingLineItemsTable
-                              fields={lineItems.fields}
-                              rows={lineItems.rows}
-                              onChange={lineItems.onChange}
-                              disabled={!pEdit}
-                              dataOcidPrefix={lineItems.dataOcidPrefix}
+                              data-ocid="project-detail.costing.input"
                             />
                           </div>
-                        )}
-                      </Fragment>
-                    );
-                  })}
-                </div>
-                <p className="text-xs text-muted-foreground -mt-2">
-                  Itemizing a category's rows above (via its small "+") adds to
-                  that category's total below alongside its own ₹ field — leave
-                  the ₹ field at 0 once you're itemizing it via rows to avoid
-                  counting it twice. Same applies if you itemize machine or
-                  labour costs as Extra Cost lines below instead: leave Labour
-                  Cost / Machine Cost above at ₹0.
-                </p>
-
-                {/* Custom Costs Section */}
-                <div className="space-y-3 pt-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-semibold text-foreground">
-                      Extra Costs
-                    </span>
-                    {!showAddCustomCost && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => setShowAddCustomCost(true)}
-                        data-ocid="project-detail.costing.open_modal_button"
-                      >
-                        <Plus className="w-3.5 h-3.5 mr-1" /> Add Custom Cost
-                      </Button>
-                    )}
+                          {lineItems && lineItems.rows.length > 0 && (
+                            <div className="sm:col-span-2">
+                              <CostingLineItemsTable
+                                fields={lineItems.fields}
+                                rows={lineItems.rows}
+                                onChange={lineItems.onChange}
+                                disabled={!pEdit}
+                                dataOcidPrefix={lineItems.dataOcidPrefix}
+                              />
+                            </div>
+                          )}
+                        </Fragment>
+                      );
+                    })}
                   </div>
-                  {(costing.extraCosts || []).length > 0 && (
-                    <div className="table-wrapper">
-                      <div className="rounded-md border overflow-hidden">
-                        <table
-                          className="w-full text-sm"
-                          style={{ minWidth: "400px" }}
+                  <p className="text-xs text-muted-foreground -mt-2">
+                    Itemizing a category's rows above (via its small "+") adds
+                    to that category's total below alongside its own ₹ field —
+                    leave the ₹ field at 0 once you're itemizing it via rows to
+                    avoid counting it twice. Same applies if you itemize machine
+                    or labour costs as Extra Cost lines below instead: leave
+                    Labour Cost / Machine Cost above at ₹0.
+                  </p>
+
+                  {/* Custom Costs Section */}
+                  <div className="space-y-3 pt-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-semibold text-foreground">
+                        Extra Costs
+                      </span>
+                      {!showAddCustomCost && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setShowAddCustomCost(true)}
+                          data-ocid="project-detail.costing.open_modal_button"
                         >
-                          <thead className="bg-muted/50">
-                            <tr>
-                              <th className="px-3 py-2 text-left font-medium text-muted-foreground">
-                                #
-                              </th>
-                              <th className="px-3 py-2 text-left font-medium text-muted-foreground">
-                                Cost Name
-                              </th>
-                              <th className="px-3 py-2 text-left font-medium text-muted-foreground">
-                                Category
-                              </th>
-                              <th className="px-3 py-2 text-right font-medium text-muted-foreground">
-                                Qty × Rate
-                              </th>
-                              <th className="px-3 py-2 text-right font-medium text-muted-foreground">
-                                Amount
-                              </th>
-                              <th className="px-3 py-2 text-center font-medium text-muted-foreground">
-                                Del
-                              </th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {(costing.extraCosts || []).map((entry, idx) => (
-                              <tr
-                                key={entry.id}
-                                className="border-t"
-                                data-ocid={`project-detail.costing.item.${idx + 1}`}
-                              >
-                                <td className="px-3 py-2 text-muted-foreground">
-                                  {idx + 1}
-                                </td>
-                                <td className="px-3 py-2">{entry.name}</td>
-                                <td className="px-3 py-2">
-                                  <span className="text-xs px-2 py-0.5 rounded-full bg-muted">
-                                    {entry.category}
-                                  </span>
-                                </td>
-                                <td className="px-3 py-2 text-right text-xs text-muted-foreground">
-                                  {entry.basis && entry.basis !== "fixed"
-                                    ? `${entry.quantity} ${BASIS_UNIT[entry.basis]} × ${fmt(entry.rate ?? 0)}`
-                                    : "—"}
-                                </td>
-                                <td className="px-3 py-2 text-right font-medium">
-                                  {fmt(entry.amount)}
-                                </td>
-                                <td className="px-3 py-2 text-center">
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      handleDeleteCustomCost(entry.id)
-                                    }
-                                    className="text-destructive hover:text-destructive/80"
-                                    data-ocid={`project-detail.costing.delete_button.${idx + 1}`}
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
+                          <Plus className="w-3.5 h-3.5 mr-1" /> Add Custom Cost
+                        </Button>
+                      )}
                     </div>
-                  )}
-                  {showAddCustomCost && (
-                    <div className="flex flex-col gap-2 p-3 rounded-md border bg-muted/30">
-                      <div className="flex flex-col sm:flex-row gap-2">
-                        <Input
-                          placeholder="Cost Name"
-                          value={newCustomCost.name}
-                          onChange={(e) =>
-                            setNewCustomCost((c) => ({
-                              ...c,
-                              name: e.target.value,
-                            }))
-                          }
-                          className="flex-1"
-                          data-ocid="project-detail.costing.input"
-                        />
-                        <select
-                          value={newCustomCost.category}
-                          onChange={(e) =>
-                            setNewCustomCost((c) => ({
-                              ...c,
-                              category: e.target
-                                .value as CustomCostEntry["category"],
-                              machineId: "",
-                              employeeId: "",
-                            }))
-                          }
-                          className="border border-input rounded-md px-3 py-2 text-sm bg-background"
-                          data-ocid="project-detail.costing.category_select"
-                        >
-                          <option>Material</option>
-                          <option>Process</option>
-                          <option>Machine</option>
-                          <option>Labour</option>
-                          <option>Misc</option>
-                        </select>
-                        <select
-                          value={newCustomCost.basis}
-                          onChange={(e) =>
-                            setNewCustomCost((c) => ({
-                              ...c,
-                              basis: e.target.value as CostBasis,
-                            }))
-                          }
-                          className="border border-input rounded-md px-3 py-2 text-sm bg-background"
-                          data-ocid="project-detail.costing.basis_select"
-                        >
-                          <option value="fixed">Fixed Amount</option>
-                          <option value="per_piece">Per Piece</option>
-                          <option value="per_kg">Per Kg</option>
-                          <option value="per_hour">Per Hour</option>
-                          <option value="per_meter">Per Meter</option>
-                          <option value="per_unit">Per Unit</option>
-                        </select>
+                    {(costing.extraCosts || []).length > 0 && (
+                      <div className="table-wrapper">
+                        <div className="rounded-md border overflow-hidden">
+                          <table
+                            className="w-full text-sm"
+                            style={{ minWidth: "400px" }}
+                          >
+                            <thead className="bg-muted/50">
+                              <tr>
+                                <th className="px-3 py-2 text-left font-medium text-muted-foreground">
+                                  #
+                                </th>
+                                <th className="px-3 py-2 text-left font-medium text-muted-foreground">
+                                  Cost Name
+                                </th>
+                                <th className="px-3 py-2 text-left font-medium text-muted-foreground">
+                                  Category
+                                </th>
+                                <th className="px-3 py-2 text-right font-medium text-muted-foreground">
+                                  Qty × Rate
+                                </th>
+                                <th className="px-3 py-2 text-right font-medium text-muted-foreground">
+                                  Amount
+                                </th>
+                                <th className="px-3 py-2 text-center font-medium text-muted-foreground">
+                                  Del
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {(costing.extraCosts || []).map((entry, idx) => (
+                                <tr
+                                  key={entry.id}
+                                  className="border-t"
+                                  data-ocid={`project-detail.costing.item.${idx + 1}`}
+                                >
+                                  <td className="px-3 py-2 text-muted-foreground">
+                                    {idx + 1}
+                                  </td>
+                                  <td className="px-3 py-2">{entry.name}</td>
+                                  <td className="px-3 py-2">
+                                    <span className="text-xs px-2 py-0.5 rounded-full bg-muted">
+                                      {entry.category}
+                                    </span>
+                                  </td>
+                                  <td className="px-3 py-2 text-right text-xs text-muted-foreground">
+                                    {entry.basis && entry.basis !== "fixed"
+                                      ? `${entry.quantity} ${BASIS_UNIT[entry.basis]} × ${fmt(entry.rate ?? 0)}`
+                                      : "—"}
+                                  </td>
+                                  <td className="px-3 py-2 text-right font-medium">
+                                    {fmt(entry.amount)}
+                                  </td>
+                                  <td className="px-3 py-2 text-center">
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleDeleteCustomCost(entry.id)
+                                      }
+                                      className="text-destructive hover:text-destructive/80"
+                                      data-ocid={`project-detail.costing.delete_button.${idx + 1}`}
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
                       </div>
-
-                      {newCustomCost.category === "Machine" && (
-                        <MachineSelect
-                          value={newCustomCost.machineId}
-                          onChange={(id) => {
-                            const m = (machines || []).find((x) => x.id === id);
-                            setNewCustomCost((c) => ({
-                              ...c,
-                              machineId: id,
-                              rate:
-                                m?.hourlyRate != null
-                                  ? String(m.hourlyRate)
-                                  : c.rate,
-                            }));
-                          }}
-                          placeholder="Select machine (optional, fills rate)"
-                          data-ocid="project-detail.costing.machine_select"
-                        />
-                      )}
-                      {newCustomCost.category === "Labour" && (
-                        <EmployeeSelect
-                          value={newCustomCost.employeeId}
-                          onChange={(id) =>
-                            setNewCustomCost((c) => ({ ...c, employeeId: id }))
-                          }
-                          placeholder="Select employee (optional)"
-                          data-ocid="project-detail.costing.employee_select"
-                        />
-                      )}
-
-                      <div className="flex flex-wrap items-center gap-2">
-                        {newCustomCost.basis === "fixed" ? (
+                    )}
+                    {showAddCustomCost && (
+                      <div className="flex flex-col gap-2 p-3 rounded-md border bg-muted/30">
+                        <div className="flex flex-col sm:flex-row gap-2">
                           <Input
-                            type="number"
-                            placeholder="Amount"
-                            min={0}
-                            value={newCustomCost.amount}
+                            placeholder="Cost Name"
+                            value={newCustomCost.name}
                             onChange={(e) =>
                               setNewCustomCost((c) => ({
                                 ...c,
-                                amount: e.target.value,
+                                name: e.target.value,
                               }))
                             }
-                            className="w-28"
+                            className="flex-1"
                             data-ocid="project-detail.costing.input"
                           />
-                        ) : (
-                          <>
-                            <Input
-                              type="number"
-                              placeholder={`Qty (${BASIS_UNIT[newCustomCost.basis]})`}
-                              min={0}
-                              value={newCustomCost.quantity}
-                              onChange={(e) =>
-                                setNewCustomCost((c) => ({
-                                  ...c,
-                                  quantity: e.target.value,
-                                }))
-                              }
-                              className="w-28"
-                              data-ocid="project-detail.costing.quantity_input"
-                            />
-                            <span className="text-muted-foreground">×</span>
-                            <Input
-                              type="number"
-                              placeholder="Rate (₹)"
-                              min={0}
-                              value={newCustomCost.rate}
-                              onChange={(e) =>
-                                setNewCustomCost((c) => ({
-                                  ...c,
-                                  rate: e.target.value,
-                                }))
-                              }
-                              className="w-28"
-                              data-ocid="project-detail.costing.rate_input"
-                            />
-                            <span className="text-sm font-medium">
-                              ={" "}
-                              {fmt(
-                                (Number(newCustomCost.quantity) || 0) *
-                                  (Number(newCustomCost.rate) || 0),
-                              )}
-                            </span>
-                          </>
+                          <select
+                            value={newCustomCost.category}
+                            onChange={(e) =>
+                              setNewCustomCost((c) => ({
+                                ...c,
+                                category: e.target
+                                  .value as CustomCostEntry["category"],
+                                machineId: "",
+                                employeeId: "",
+                              }))
+                            }
+                            className="border border-input rounded-md px-3 py-2 text-sm bg-background"
+                            data-ocid="project-detail.costing.category_select"
+                          >
+                            <option>Material</option>
+                            <option>Process</option>
+                            <option>Machine</option>
+                            <option>Labour</option>
+                            <option>Misc</option>
+                          </select>
+                          <select
+                            value={newCustomCost.basis}
+                            onChange={(e) =>
+                              setNewCustomCost((c) => ({
+                                ...c,
+                                basis: e.target.value as CostBasis,
+                              }))
+                            }
+                            className="border border-input rounded-md px-3 py-2 text-sm bg-background"
+                            data-ocid="project-detail.costing.basis_select"
+                          >
+                            <option value="fixed">Fixed Amount</option>
+                            <option value="per_piece">Per Piece</option>
+                            <option value="per_kg">Per Kg</option>
+                            <option value="per_hour">Per Hour</option>
+                            <option value="per_meter">Per Meter</option>
+                            <option value="per_unit">Per Unit</option>
+                          </select>
+                        </div>
+
+                        {newCustomCost.category === "Machine" && (
+                          <MachineSelect
+                            value={newCustomCost.machineId}
+                            onChange={(id) => {
+                              const m = (machines || []).find(
+                                (x) => x.id === id,
+                              );
+                              setNewCustomCost((c) => ({
+                                ...c,
+                                machineId: id,
+                                rate:
+                                  m?.hourlyRate != null
+                                    ? String(m.hourlyRate)
+                                    : c.rate,
+                              }));
+                            }}
+                            placeholder="Select machine (optional, fills rate)"
+                            data-ocid="project-detail.costing.machine_select"
+                          />
                         )}
-                        <Button
-                          size="sm"
-                          onClick={handleAddCustomCost}
-                          data-ocid="project-detail.costing.save_button"
+                        {newCustomCost.category === "Labour" && (
+                          <EmployeeSelect
+                            value={newCustomCost.employeeId}
+                            onChange={(id) =>
+                              setNewCustomCost((c) => ({
+                                ...c,
+                                employeeId: id,
+                              }))
+                            }
+                            placeholder="Select employee (optional)"
+                            data-ocid="project-detail.costing.employee_select"
+                          />
+                        )}
+
+                        <div className="flex flex-wrap items-center gap-2">
+                          {newCustomCost.basis === "fixed" ? (
+                            <Input
+                              type="number"
+                              placeholder="Amount"
+                              min={0}
+                              value={newCustomCost.amount}
+                              onChange={(e) =>
+                                setNewCustomCost((c) => ({
+                                  ...c,
+                                  amount: e.target.value,
+                                }))
+                              }
+                              className="w-28"
+                              data-ocid="project-detail.costing.input"
+                            />
+                          ) : (
+                            <>
+                              <Input
+                                type="number"
+                                placeholder={`Qty (${BASIS_UNIT[newCustomCost.basis]})`}
+                                min={0}
+                                value={newCustomCost.quantity}
+                                onChange={(e) =>
+                                  setNewCustomCost((c) => ({
+                                    ...c,
+                                    quantity: e.target.value,
+                                  }))
+                                }
+                                className="w-28"
+                                data-ocid="project-detail.costing.quantity_input"
+                              />
+                              <span className="text-muted-foreground">×</span>
+                              <Input
+                                type="number"
+                                placeholder="Rate (₹)"
+                                min={0}
+                                value={newCustomCost.rate}
+                                onChange={(e) =>
+                                  setNewCustomCost((c) => ({
+                                    ...c,
+                                    rate: e.target.value,
+                                  }))
+                                }
+                                className="w-28"
+                                data-ocid="project-detail.costing.rate_input"
+                              />
+                              <span className="text-sm font-medium">
+                                ={" "}
+                                {fmt(
+                                  (Number(newCustomCost.quantity) || 0) *
+                                    (Number(newCustomCost.rate) || 0),
+                                )}
+                              </span>
+                            </>
+                          )}
+                          <Button
+                            size="sm"
+                            onClick={handleAddCustomCost}
+                            data-ocid="project-detail.costing.save_button"
+                          >
+                            Add
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setShowAddCustomCost(false)}
+                            data-ocid="project-detail.costing.cancel_button"
+                          >
+                            Cancel
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex items-center justify-between pt-3 border-t">
+                    <div>
+                      <span className="text-sm text-muted-foreground">
+                        Total Internal Cost:{" "}
+                      </span>
+                      <span className="text-lg font-bold">
+                        {fmt(totalCosting)}
+                      </span>
+                    </div>
+                    <Button
+                      onClick={handleSaveCosting}
+                      data-ocid="project-detail.costing.save_button"
+                    >
+                      <Save className="w-4 h-4 mr-1.5" /> Save Costing
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            </section>
+          )}
+
+          {/* Tab 4 — Material Purchases */}
+          {activeTab === "materials" && (
+            <section
+              id="section-materials"
+              className="mt-4 space-y-4 scroll-mt-24"
+            >
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold">
+                  Raw Material Purchases
+                </h2>
+                {pCreate && (
+                  <Button
+                    size="sm"
+                    onClick={() => setMatDialog(true)}
+                    data-ocid="project-detail.materials.open_modal_button"
+                  >
+                    <Plus className="w-3.5 h-3.5 mr-1" /> Add Purchase
+                  </Button>
+                )}
+              </div>
+              <div className="table-wrapper">
+                <div
+                  className="rounded-md border"
+                  data-ocid="project-detail.materials.table"
+                >
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="bg-muted/40">
+                        <TableHead className="text-xs font-semibold">
+                          Material
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold">
+                          Thickness
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold">
+                          Qty
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold">
+                          Supplier
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold">
+                          Date
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold">
+                          Attachments
+                        </TableHead>
+                        {(inventoryEdit || inventoryDelete) && (
+                          <TableHead className="text-xs font-semibold w-20">
+                            Actions
+                          </TableHead>
+                        )}
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {projMaterials.map((m, i) => (
+                        <TableRow
+                          key={m.id}
+                          data-ocid={`project-detail.materials.item.${i + 1}`}
                         >
-                          Add
-                        </Button>
+                          <TableCell className="text-sm font-medium">
+                            {m.materialType}
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            {m.thickness}
+                          </TableCell>
+                          <TableCell className="text-sm">
+                            {m.quantity}
+                          </TableCell>
+                          <TableCell className="text-sm">
+                            {m.supplierName}
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            {m.purchaseDate}
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            {(m.attachments ?? []).length > 0 ? (
+                              <span className="flex items-center gap-1 text-muted-foreground">
+                                <Paperclip className="w-3 h-3" />
+                                {(m.attachments ?? []).length}
+                              </span>
+                            ) : (
+                              "—"
+                            )}
+                          </TableCell>
+                          {(inventoryEdit || inventoryDelete) && (
+                            <TableCell>
+                              <div className="flex gap-1">
+                                {inventoryEdit && (
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-7 w-7"
+                                    title="Edit purchase"
+                                    aria-label="Edit purchase"
+                                    onClick={() => {
+                                      setEditPurchaseId(m.id);
+                                      setEditPurchaseForm({
+                                        materialType: m.materialType,
+                                        thickness: m.thickness,
+                                        quantity: m.quantity,
+                                        unit: m.unit || "",
+                                        vendorId: m.vendorId || "",
+                                        supplierName: m.supplierName,
+                                        purchaseDate: m.purchaseDate,
+                                      });
+                                    }}
+                                  >
+                                    <Pencil className="w-3.5 h-3.5" />
+                                  </Button>
+                                )}
+                                {inventoryDelete && (
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-7 w-7 text-destructive hover:text-destructive"
+                                    onClick={() =>
+                                      setDeletePurchaseTarget(m.id)
+                                    }
+                                    title="Delete purchase"
+                                    aria-label="Delete purchase"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </Button>
+                                )}
+                              </div>
+                            </TableCell>
+                          )}
+                        </TableRow>
+                      ))}
+                      {projMaterials.length === 0 && (
+                        <TableRow>
+                          <TableCell
+                            colSpan={pEdit || pDelete ? 7 : 6}
+                            className="text-center py-8 text-sm text-muted-foreground"
+                            data-ocid="project-detail.materials.empty_state"
+                          >
+                            No material purchases recorded
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
+              </div>
+
+              {/* Add Material Dialog */}
+              <Dialog open={matDialog} onOpenChange={setMatDialog}>
+                <DialogContent data-ocid="project-detail.materials.dialog">
+                  <DialogHeader>
+                    <DialogTitle>Add Material Purchase</DialogTitle>
+                  </DialogHeader>
+                  <div className="space-y-3 py-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="space-y-1.5">
+                        <Label>Material Type *</Label>
+                        <Input
+                          placeholder="e.g. MS Sheet"
+                          value={matForm.materialType}
+                          onChange={(e) =>
+                            setMatForm((f) => ({
+                              ...f,
+                              materialType: e.target.value,
+                            }))
+                          }
+                          data-ocid="project-detail.materials.input"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Thickness</Label>
+                        <Input
+                          placeholder="e.g. 2mm"
+                          value={matForm.thickness}
+                          onChange={(e) =>
+                            setMatForm((f) => ({
+                              ...f,
+                              thickness: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Quantity</Label>
+                        <Input
+                          type="number"
+                          min={0}
+                          value={matForm.quantity}
+                          onChange={(e) =>
+                            setMatForm((f) => ({
+                              ...f,
+                              quantity: Number(e.target.value),
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Unit</Label>
+                        <Input
+                          placeholder="e.g. kg, sheets, pcs"
+                          value={matForm.unit}
+                          onChange={(e) =>
+                            setMatForm((f) => ({
+                              ...f,
+                              unit: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Supplier / Vendor</Label>
+                        <VendorSelect
+                          value={matForm.vendorId || undefined}
+                          onChange={(id, name) =>
+                            setMatForm((f) => ({
+                              ...f,
+                              vendorId: id,
+                              supplierName: name,
+                            }))
+                          }
+                          placeholder="Select vendor"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Purchase Date</Label>
+                        <Input
+                          type="date"
+                          value={matForm.purchaseDate}
+                          onChange={(e) =>
+                            setMatForm((f) => ({
+                              ...f,
+                              purchaseDate: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                    </div>
+                    {/* Attachments */}
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <Label className="text-xs flex items-center gap-1.5">
+                          <Paperclip className="w-3.5 h-3.5" />
+                          Attach Invoices
+                        </Label>
                         <Button
+                          type="button"
+                          variant="outline"
                           size="sm"
-                          variant="ghost"
-                          onClick={() => setShowAddCustomCost(false)}
-                          data-ocid="project-detail.costing.cancel_button"
+                          className="h-7 text-xs"
+                          onClick={() => matFileInputRef.current?.click()}
                         >
-                          Cancel
+                          <Plus className="w-3 h-3 mr-1" /> Add Files
                         </Button>
+                        <input
+                          ref={matFileInputRef}
+                          type="file"
+                          accept=".pdf,.jpg,.jpeg,.png"
+                          multiple
+                          className="hidden"
+                          onChange={handleMatAttachFiles}
+                        />
+                      </div>
+                      {matPendingAttachments.length > 0 && (
+                        <div className="space-y-1.5">
+                          {matPendingAttachments.map((att) => (
+                            <div
+                              key={att.ref}
+                              className="flex items-center gap-2 p-2 rounded-md bg-muted/50 border border-border"
+                            >
+                              {att.type === "image" ? (
+                                <img
+                                  src={att.ref}
+                                  alt={att.name}
+                                  className="h-8 w-8 rounded object-cover shrink-0 border"
+                                />
+                              ) : (
+                                <div className="h-8 w-8 rounded bg-info/10 flex items-center justify-center shrink-0">
+                                  <FileText className="w-4 h-4 text-info" />
+                                </div>
+                              )}
+                              <span className="text-xs flex-1 truncate">
+                                {att.name}
+                              </span>
+                              {att.type === "pdf" && (
+                                <Badge
+                                  variant="secondary"
+                                  className="text-[10px] px-1.5 py-0 shrink-0"
+                                >
+                                  PDF
+                                </Badge>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => removeMatAttachment(att.ref)}
+                                className="p-1 rounded hover:bg-muted transition-colors shrink-0"
+                              >
+                                <X className="w-3 h-3 text-muted-foreground" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {matPendingAttachments.length === 0 && (
+                        <p className="text-[11px] text-muted-foreground">
+                          PDF, JPG or PNG — supports multiple files
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  <DialogFooter>
+                    <Button
+                      variant="outline"
+                      onClick={() => setMatDialog(false)}
+                      data-ocid="project-detail.materials.cancel_button"
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      onClick={handleAddMaterial}
+                      data-ocid="project-detail.materials.submit_button"
+                    >
+                      Save
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+
+              {/* Edit Material Purchase Dialog */}
+              <Dialog
+                open={!!editPurchaseId}
+                onOpenChange={(o) => {
+                  if (!o) {
+                    setEditPurchaseId(null);
+                    setEditPurchaseForm(null);
+                  }
+                }}
+              >
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle>Edit Material Purchase</DialogTitle>
+                  </DialogHeader>
+                  {editPurchaseForm && (
+                    <div className="space-y-3 py-2">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div className="space-y-1.5">
+                          <Label>Material Type *</Label>
+                          <Input
+                            value={editPurchaseForm.materialType}
+                            onChange={(e) =>
+                              setEditPurchaseForm((f) =>
+                                f ? { ...f, materialType: e.target.value } : f,
+                              )
+                            }
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label>Thickness</Label>
+                          <Input
+                            value={editPurchaseForm.thickness}
+                            onChange={(e) =>
+                              setEditPurchaseForm((f) =>
+                                f ? { ...f, thickness: e.target.value } : f,
+                              )
+                            }
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label>Quantity</Label>
+                          <Input
+                            type="number"
+                            min={0}
+                            value={editPurchaseForm.quantity}
+                            onChange={(e) =>
+                              setEditPurchaseForm((f) =>
+                                f
+                                  ? { ...f, quantity: Number(e.target.value) }
+                                  : f,
+                              )
+                            }
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label>Unit</Label>
+                          <Input
+                            value={editPurchaseForm.unit}
+                            onChange={(e) =>
+                              setEditPurchaseForm((f) =>
+                                f ? { ...f, unit: e.target.value } : f,
+                              )
+                            }
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label>Purchase Date</Label>
+                          <Input
+                            type="date"
+                            value={editPurchaseForm.purchaseDate}
+                            onChange={(e) =>
+                              setEditPurchaseForm((f) =>
+                                f ? { ...f, purchaseDate: e.target.value } : f,
+                              )
+                            }
+                          />
+                        </div>
                       </div>
                     </div>
                   )}
+                  <DialogFooter>
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        setEditPurchaseId(null);
+                        setEditPurchaseForm(null);
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      onClick={async () => {
+                        if (!editPurchaseId || !editPurchaseForm) return;
+                        const existing = materialPurchases.find(
+                          (x) => x.id === editPurchaseId,
+                        );
+                        if (!existing) return;
+                        if (!existing.inventoryItemId) {
+                          toast.error(
+                            "This purchase has no linked inventory item — cannot update.",
+                          );
+                          return;
+                        }
+                        // Monster-1 — remote-first via the same
+                        // inventory_purchases row inventoryPurchasesApi.ts
+                        // already manages. Note: this table has no per-purchase
+                        // "unit" column (unit lives on inventory_items) — a
+                        // pre-existing schema gap, not a new one, so a unit
+                        // edited here is reflected locally but not persisted.
+                        const result = await updateInventoryPurchaseRemote({
+                          id: existing.id,
+                          inventoryItemId: existing.inventoryItemId,
+                          materialName: editPurchaseForm.materialType,
+                          quantityPurchased: editPurchaseForm.quantity,
+                          supplierName: editPurchaseForm.supplierName,
+                          vendorId: editPurchaseForm.vendorId || undefined,
+                          purchaseDate: editPurchaseForm.purchaseDate,
+                          cost: 0,
+                          attachments: existing.attachments,
+                          createdAt: Date.now(),
+                        });
+                        if (result.status === "unauthenticated") {
+                          toast.error(
+                            "Not signed in to the server - purchase was not updated",
+                          );
+                          return;
+                        }
+                        if (
+                          result.status === "denied" ||
+                          result.status === "error"
+                        ) {
+                          toast.error(
+                            result.error ?? "Could not update purchase",
+                          );
+                          return;
+                        }
+                        const refreshed = await hydrateMaterialPurchases();
+                        if (refreshed.status === "success" && refreshed.data) {
+                          setMaterialPurchasesFromServer(refreshed.data);
+                        }
+                        setEditPurchaseId(null);
+                        setEditPurchaseForm(null);
+                        toast.success("Purchase updated");
+                      }}
+                    >
+                      Save
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+            </section>
+          )}
+
+          {/* Tab 5 — Outsourced Work */}
+          {activeTab === "outsourced" && (
+            <section
+              id="section-outsourced"
+              className="mt-4 space-y-4 scroll-mt-24"
+            >
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold">Outsourced Work</h2>
+                {pAddOutsourced && (
+                  <Button
+                    size="sm"
+                    onClick={() => setOutDialog(true)}
+                    data-ocid="project-detail.outsourced.open_modal_button"
+                  >
+                    <Plus className="w-3.5 h-3.5 mr-1" /> Add Outsourced
+                  </Button>
+                )}
+              </div>
+              <div className="table-wrapper">
+                <div
+                  className="rounded-md border"
+                  data-ocid="project-detail.outsourced.table"
+                >
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="bg-muted/40">
+                        <TableHead className="text-xs font-semibold">
+                          Vendor
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold">
+                          Material Sent
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold">
+                          Qty
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold">
+                          Date Sent
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold">
+                          Date Received
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold">
+                          Cost
+                        </TableHead>
+                        {(pEdit || pDelete) && (
+                          <TableHead className="text-xs font-semibold">
+                            Actions
+                          </TableHead>
+                        )}
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {projOutsourced.map((o, i) => (
+                        <TableRow
+                          key={o.id}
+                          data-ocid={`project-detail.outsourced.item.${i + 1}`}
+                        >
+                          <TableCell className="text-sm font-medium">
+                            {o.vendorName}
+                          </TableCell>
+                          <TableCell className="text-sm">
+                            {o.materialSent}
+                          </TableCell>
+                          <TableCell className="text-sm">
+                            {o.quantitySent}
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            {o.dateSent}
+                          </TableCell>
+                          <TableCell className="text-xs">
+                            {o.dateReceived || "—"}
+                          </TableCell>
+                          <TableCell className="text-sm font-medium">
+                            {fmt(o.processCost)}
+                          </TableCell>
+                          {(pEdit || pDelete) && (
+                            <TableCell>
+                              <div className="flex gap-1">
+                                {pEdit && (
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-7 w-7 p-0"
+                                    title="Edit outsourced work"
+                                    aria-label="Edit outsourced work"
+                                    data-ocid={`project-detail.outsourced.edit_button.${i + 1}`}
+                                    onClick={() => {
+                                      if (!canEdit(currentUser, "projects")) {
+                                        alert("Access restricted");
+                                        return;
+                                      }
+                                      setOutEditId(o.id);
+                                      setOutForm({
+                                        vendorId: o.vendorId || "",
+                                        vendorName: o.vendorName,
+                                        materialSent: o.materialSent || "",
+                                        quantitySent: o.quantitySent || 0,
+                                        dateSent: o.dateSent || "",
+                                        dateReceived: o.dateReceived || "",
+                                        processCost: o.processCost || 0,
+                                      });
+                                      setOutDialog(true);
+                                    }}
+                                  >
+                                    <Pencil className="w-3.5 h-3.5" />
+                                  </Button>
+                                )}
+                                {pDelete && (
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-7 w-7 p-0 text-destructive hover:text-destructive"
+                                    title="Delete outsourced work"
+                                    aria-label="Delete outsourced work"
+                                    data-ocid={`project-detail.outsourced.delete_button.${i + 1}`}
+                                    onClick={() => handleDeleteOutsourced(o.id)}
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </Button>
+                                )}
+                              </div>
+                            </TableCell>
+                          )}
+                        </TableRow>
+                      ))}
+                      {projOutsourced.length === 0 && (
+                        <TableRow>
+                          <TableCell
+                            colSpan={pEdit || pDelete ? 7 : 6}
+                            className="text-center py-8 text-sm text-muted-foreground"
+                            data-ocid="project-detail.outsourced.empty_state"
+                          >
+                            No outsourced work recorded
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
                 </div>
-                <div className="flex items-center justify-between pt-3 border-t">
-                  <div>
-                    <span className="text-sm text-muted-foreground">
-                      Total Internal Cost:{" "}
-                    </span>
-                    <span className="text-lg font-bold">
-                      {fmt(totalCosting)}
+              </div>
+
+              {/* Add Outsourced Dialog */}
+              <Dialog
+                open={outDialog}
+                onOpenChange={(open) => {
+                  if (!open) {
+                    setOutDialog(false);
+                    setOutEditId(null);
+                    setOutForm({
+                      vendorId: "",
+                      vendorName: "",
+                      materialSent: "",
+                      quantitySent: 0,
+                      dateSent: "",
+                      dateReceived: "",
+                      processCost: 0,
+                    });
+                  }
+                }}
+              >
+                <DialogContent data-ocid="project-detail.outsourced.dialog">
+                  <DialogHeader>
+                    <DialogTitle>
+                      {outEditId
+                        ? "Edit Outsourced Work"
+                        : "Add Outsourced Work"}
+                    </DialogTitle>
+                  </DialogHeader>
+                  <div className="space-y-3 py-2">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div className="space-y-1.5">
+                        <Label>Vendor Name *</Label>
+                        <VendorSelect
+                          value={outForm.vendorId || ""}
+                          onChange={(id) => handleVendorSelect(id)}
+                          placeholder="Select Vendor"
+                          className="w-full"
+                          data-ocid="project-detail.outsourced.input"
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Material Sent</Label>
+                        <Input
+                          placeholder="e.g. MS Sheet 2mm"
+                          value={outForm.materialSent}
+                          onChange={(e) =>
+                            setOutForm((f) => ({
+                              ...f,
+                              materialSent: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Quantity Sent</Label>
+                        <Input
+                          type="number"
+                          min={0}
+                          value={outForm.quantitySent}
+                          onChange={(e) =>
+                            setOutForm((f) => ({
+                              ...f,
+                              quantitySent: Number(e.target.value),
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Process Cost (₹)</Label>
+                        <Input
+                          type="number"
+                          min={0}
+                          value={outForm.processCost}
+                          onChange={(e) =>
+                            setOutForm((f) => ({
+                              ...f,
+                              processCost: Number(e.target.value),
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Date Sent</Label>
+                        <Input
+                          type="date"
+                          value={outForm.dateSent}
+                          onChange={(e) =>
+                            setOutForm((f) => ({
+                              ...f,
+                              dateSent: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>Date Received</Label>
+                        <Input
+                          type="date"
+                          value={outForm.dateReceived}
+                          onChange={(e) =>
+                            setOutForm((f) => ({
+                              ...f,
+                              dateReceived: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                    </div>
+                  </div>
+                  <DialogFooter>
+                    <Button
+                      variant="outline"
+                      onClick={() => setOutDialog(false)}
+                      data-ocid="project-detail.outsourced.cancel_button"
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      onClick={handleAddOutsourced}
+                      data-ocid="project-detail.outsourced.submit_button"
+                    >
+                      Save
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+            </section>
+          )}
+
+          {/* Tab 6 — Production Tracking */}
+          {activeTab === "production" && (
+            <section
+              id="section-production"
+              className="mt-4 space-y-3 scroll-mt-24"
+            >
+              {isV2 ? (
+                /* V2 Production UI */
+                <div className="space-y-3">
+                  {(() => {
+                    if (project.totalQty == null) {
+                      return (
+                        <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-warning/15 border border-warning/30 text-warning text-xs font-medium">
+                          ⚠ Quantity not set — please update project settings
+                        </div>
+                      );
+                    }
+                    const dispatchedQty = (deliveryChallans || []).reduce(
+                      (sum, dc) =>
+                        sum +
+                        ((dc.projectEntries || []).find(
+                          (e) => e.projectId === project.id,
+                        )?.dispatchQty || 0),
+                      0,
+                    );
+                    const progress = Math.round(
+                      (dispatchedQty / project.totalQty) * 100,
+                    );
+                    return (
+                      <div className="flex items-center gap-4 px-3 py-2 rounded-md bg-muted/50 border border-border text-sm">
+                        <span>
+                          Target: <strong>{project.totalQty} units</strong>
+                        </span>
+                        <span>
+                          Dispatched: <strong>{dispatchedQty}</strong>
+                        </span>
+                        <span>
+                          Progress: <strong>{progress}%</strong>
+                        </span>
+                      </div>
+                    );
+                  })()}
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-sm font-semibold">
+                      Production Stage Tracking
+                    </h2>
+                    {productionEdit && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          setNewStageType("");
+                          setNewStageTargetQty(
+                            project?.orderedQuantity
+                              ? String(project.orderedQuantity)
+                              : "",
+                          );
+                          setAddStageDialog(true);
+                        }}
+                      >
+                        <Plus className="w-3.5 h-3.5 mr-1.5" /> Add Stage
+                      </Button>
+                    )}
+                  </div>
+
+                  {v2Stages.length === 0 && (
+                    <div className="text-center py-8 text-muted-foreground text-sm">
+                      No stages defined. Click "Add Stage" to begin.
+                    </div>
+                  )}
+
+                  <div className="space-y-2">
+                    {v2Stages.map((stage, idx) => {
+                      const prevStage = idx > 0 ? v2Stages[idx - 1] : null;
+                      const isLocked =
+                        prevStage !== null && prevStage.status !== "Completed";
+                      const isExpanded = expandedStage === idx;
+                      const txs = stage.transactions || [];
+                      const totalSent = txs
+                        .filter((t) => t.type === "send")
+                        .reduce((a, t) => a + t.quantity, 0);
+                      const totalReceived = txs
+                        .filter((t) => t.type === "receive")
+                        .reduce((a, t) => a + t.quantity, 0);
+                      const pending = totalSent - totalReceived;
+                      const isActive =
+                        !isLocked && stage.status !== "Completed";
+
+                      return (
+                        <div
+                          key={`${stage.stageName}-${idx}`}
+                          className={`rounded-lg border ${isLocked ? "opacity-60" : ""} ${isActive ? "border-primary/40 shadow-sm" : ""}`}
+                        >
+                          {/* Stage Header */}
+                          <div className="flex items-center justify-between px-4 py-3">
+                            <button
+                              type="button"
+                              className="flex items-center gap-3 flex-1 text-left"
+                              onClick={() =>
+                                !isLocked &&
+                                setExpandedStage(isExpanded ? null : idx)
+                              }
+                              disabled={isLocked}
+                            >
+                              <span
+                                className={`flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${isActive ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}
+                              >
+                                {idx + 1}
+                              </span>
+                              <div>
+                                <span className="text-sm font-semibold">
+                                  {stage.stageName}
+                                </span>
+                                {stage.requiresMaterialTracking && (
+                                  <span className="ml-2 text-[10px] bg-warning/15 text-warning rounded px-1 py-0.5">
+                                    Material
+                                  </span>
+                                )}
+                                {stage.stageId &&
+                                  projectQmsInspectionsForThisProject.some(
+                                    (i) =>
+                                      i.requiredProductionStageId ===
+                                      stage.stageId,
+                                  ) && (
+                                    <span
+                                      className="ml-2 text-[10px] bg-info/10 text-info rounded px-1 py-0.5"
+                                      data-ocid={`project-detail.production.inspection_badge.${stage.stageId}`}
+                                    >
+                                      Inspection Required
+                                    </span>
+                                  )}
+                                {isLocked && (
+                                  <span className="ml-2 text-xs text-muted-foreground">
+                                    (locked)
+                                  </span>
+                                )}
+                              </div>
+                            </button>
+                            <div className="flex items-center gap-1">
+                              <span
+                                className={`text-xs px-2 py-0.5 rounded-full font-medium mr-2 ${STAGE_STATUS_COLORS[stage.status]}`}
+                              >
+                                {STAGE_STATUS_LABELS[stage.status]}
+                              </span>
+                              {productionEdit && (
+                                <>
+                                  <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    className="h-6 w-6"
+                                    onClick={() => handleMoveStage(idx, "up")}
+                                    disabled={idx === 0}
+                                    title="Move stage up"
+                                    aria-label="Move stage up"
+                                  >
+                                    <ChevronUp className="w-3 h-3" />
+                                  </Button>
+                                  <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    className="h-6 w-6"
+                                    onClick={() => handleMoveStage(idx, "down")}
+                                    disabled={idx === v2Stages.length - 1}
+                                    title="Move stage down"
+                                    aria-label="Move stage down"
+                                  >
+                                    <ChevronDown className="w-3 h-3" />
+                                  </Button>
+                                  <Button
+                                    size="icon"
+                                    variant="ghost"
+                                    className="h-6 w-6 text-destructive hover:text-destructive/80"
+                                    onClick={() => handleRemoveStage(idx)}
+                                    title="Remove stage"
+                                    aria-label="Remove stage"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                  </Button>
+                                </>
+                              )}
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                className="h-6 w-6"
+                                onClick={() =>
+                                  !isLocked &&
+                                  setExpandedStage(isExpanded ? null : idx)
+                                }
+                                disabled={isLocked}
+                                title={
+                                  isExpanded ? "Collapse stage" : "Expand stage"
+                                }
+                                aria-label={
+                                  isExpanded ? "Collapse stage" : "Expand stage"
+                                }
+                              >
+                                {isExpanded ? (
+                                  <ChevronUp className="w-4 h-4 text-muted-foreground" />
+                                ) : (
+                                  <ChevronDown className="w-4 h-4 text-muted-foreground" />
+                                )}
+                              </Button>
+                            </div>
+                          </div>
+
+                          {/* Stage Body */}
+                          {isExpanded && (
+                            <div className="border-t px-4 py-4 space-y-4">
+                              {/* Phase 32 (Task #174) - QMS inspection link.
+                               * Optional, independent of material tracking.
+                               * Task #176 added the actual gate enforcement
+                               * (handleCompleteStage above) and the read-only
+                               * gate status this control now displays. */}
+                              {stage.stageId && (
+                                <div className="border rounded-md px-3 py-2 bg-muted/20">
+                                  <ProductionStageInspectionControl
+                                    projectId={projectId}
+                                    stageId={stage.stageId}
+                                    stageName={stage.stageName}
+                                    libraryInspections={inspectionStages}
+                                    projectInspections={
+                                      projectQmsInspectionsForThisProject
+                                    }
+                                    projectOverrides={
+                                      projectQmsInspectionOverridesForThisProject
+                                    }
+                                    onOpenInspection={() =>
+                                      scrollToSection("qms")
+                                    }
+                                    currentUserId={userId}
+                                    currentUserName={userName}
+                                    canManage={canManageInspectionLink}
+                                  />
+                                </div>
+                              )}
+                              {stage.requiresMaterialTracking ? (
+                                <div className="space-y-3">
+                                  {/* Totals */}
+                                  <div className="grid grid-cols-3 gap-3">
+                                    <div className="bg-info/10 border border-info/30 rounded-md p-2 text-center">
+                                      <div className="text-xs text-info font-medium">
+                                        Total Sent
+                                      </div>
+                                      <div className="text-lg font-bold text-info">
+                                        {totalSent}
+                                      </div>
+                                    </div>
+                                    <div className="bg-success/10 border border-success/30 rounded-md p-2 text-center">
+                                      <div className="text-xs text-success font-medium">
+                                        Total Received
+                                      </div>
+                                      <div className="text-lg font-bold text-success">
+                                        {totalReceived}
+                                      </div>
+                                    </div>
+                                    <div
+                                      className={`border rounded-md p-2 text-center ${pending > 0 ? "bg-warning/15 border-warning/30" : "bg-muted border-border"}`}
+                                    >
+                                      <div
+                                        className={`text-xs font-medium ${pending > 0 ? "text-warning" : "text-muted-foreground"}`}
+                                      >
+                                        Pending
+                                      </div>
+                                      <div
+                                        className={`text-lg font-bold ${pending > 0 ? "text-warning" : "text-muted-foreground"}`}
+                                      >
+                                        {pending}
+                                      </div>
+                                    </div>
+                                  </div>
+                                  {/* Actions */}
+                                  {productionEdit && (
+                                    <div className="flex gap-2">
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={() => {
+                                          setSendMaterialDialog({
+                                            stageIdx: idx,
+                                          });
+                                          setSendForm({
+                                            quantity: 0,
+                                            dateTime: "",
+                                            vendorId: "",
+                                            vendorName: "",
+                                          });
+                                        }}
+                                      >
+                                        Send Material
+                                      </Button>
+                                      <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={() => {
+                                          setReceiveMaterialDialog({
+                                            stageIdx: idx,
+                                          });
+                                          setReceiveForm({
+                                            quantity: 0,
+                                            dateTime: "",
+                                          });
+                                        }}
+                                        disabled={totalSent <= 0}
+                                      >
+                                        Mark Received
+                                      </Button>
+                                      {totalReceived >= totalSent &&
+                                        totalSent > 0 &&
+                                        stage.status !== "Completed" && (
+                                          <Button
+                                            size="sm"
+                                            onClick={() =>
+                                              handleCompleteStage(idx)
+                                            }
+                                          >
+                                            Mark Complete
+                                          </Button>
+                                        )}
+                                    </div>
+                                  )}
+                                  {/* Transaction History */}
+                                  {txs.length > 0 && (
+                                    <div className="space-y-1">
+                                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                                        Transaction History
+                                      </p>
+                                      <div className="border rounded-md overflow-hidden">
+                                        <table className="w-full text-xs">
+                                          <thead className="bg-muted">
+                                            <tr>
+                                              <th className="text-left px-2 py-1 font-medium">
+                                                Type
+                                              </th>
+                                              <th className="text-left px-2 py-1 font-medium">
+                                                Qty
+                                              </th>
+                                              <th className="text-left px-2 py-1 font-medium">
+                                                Date & Time
+                                              </th>
+                                              <th className="text-left px-2 py-1 font-medium">
+                                                Sent To
+                                              </th>
+                                            </tr>
+                                          </thead>
+                                          <tbody>
+                                            {txs.map((tx) => (
+                                              <tr
+                                                key={tx.id}
+                                                className="border-t"
+                                              >
+                                                <td className="px-2 py-1">
+                                                  <span
+                                                    className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${tx.type === "send" ? "bg-info/10 text-info" : "bg-success/10 text-success"}`}
+                                                  >
+                                                    {tx.type === "send"
+                                                      ? "Sent"
+                                                      : "Received"}
+                                                  </span>
+                                                </td>
+                                                <td className="px-2 py-1">
+                                                  {tx.quantity}
+                                                </td>
+                                                <td className="px-2 py-1">
+                                                  {tx.dateTime
+                                                    ? new Date(
+                                                        tx.dateTime,
+                                                      ).toLocaleString("en-IN")
+                                                    : "—"}
+                                                </td>
+                                                <td className="px-2 py-1">
+                                                  {tx.sentToVendorName ||
+                                                    (tx.type === "receive"
+                                                      ? "—"
+                                                      : "In-house")}
+                                                </td>
+                                              </tr>
+                                            ))}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              ) : (
+                                /* Non-material stage */
+                                <div className="space-y-3">
+                                  <div className="space-y-1">
+                                    <Label className="text-xs">Status</Label>
+                                    <Select
+                                      value={stage.status}
+                                      disabled={!productionEdit}
+                                      onValueChange={async (v) => {
+                                        // Phase 32 (Task #176) - "Completed" is
+                                        // the one transition the QMS gate can
+                                        // block, so route it through the same
+                                        // gated handler the "Mark as Complete"
+                                        // button already uses below, instead of
+                                        // writing the status directly here.
+                                        if (v === "Completed") {
+                                          handleCompleteStage(idx);
+                                          return;
+                                        }
+                                        const updated = v2Stages.map((s, i) =>
+                                          i === idx
+                                            ? {
+                                                ...s,
+                                                status: v as ProjectStageStatus,
+                                              }
+                                            : s,
+                                        );
+                                        const ok = await updateProjectStagesV2(
+                                          projectId,
+                                          updated,
+                                        );
+                                        if (!ok) {
+                                          toast.error(
+                                            "Could not save stage status - please try again",
+                                          );
+                                        }
+                                      }}
+                                    >
+                                      <SelectTrigger className="h-8 text-xs w-40">
+                                        <SelectValue />
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        {(
+                                          [
+                                            "NotStarted",
+                                            "InProgress",
+                                            "Completed",
+                                          ] as ProjectStageStatus[]
+                                        ).map((s) => (
+                                          <SelectItem
+                                            key={s}
+                                            value={s}
+                                            className="text-xs"
+                                          >
+                                            {STAGE_STATUS_LABELS[s]}
+                                          </SelectItem>
+                                        ))}
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+
+                                  {/* Quantity Tracking */}
+                                  <div>
+                                    <div className="flex items-center justify-between mb-2">
+                                      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                                        Quantity Tracking
+                                      </p>
+                                      {project?.totalQty && (
+                                        <span className="text-xs text-muted-foreground">
+                                          Ordered:{" "}
+                                          <strong>{project.totalQty}</strong>
+                                        </span>
+                                      )}
+                                    </div>
+                                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                                      {[
+                                        {
+                                          label: "Input Qty",
+                                          field: "sentQty" as const,
+                                          color:
+                                            "bg-info/10 border-info/30 text-info",
+                                        },
+                                        {
+                                          label: "Completed",
+                                          field: "okQty" as const,
+                                          color:
+                                            "bg-success/10 border-success/30 text-success",
+                                        },
+                                        {
+                                          label: "Rejected",
+                                          field: "rejectedQty" as const,
+                                          color:
+                                            "bg-destructive/10 border-destructive/30 text-destructive",
+                                        },
+                                        {
+                                          label: "Rework",
+                                          field: "reworkQty" as const,
+                                          color:
+                                            "bg-warning/15 border-warning/30 text-warning",
+                                        },
+                                      ].map(({ label, field, color }) => (
+                                        <div
+                                          key={field}
+                                          className={`rounded-md border p-2 ${color}`}
+                                        >
+                                          <p className="text-[10px] font-medium mb-1">
+                                            {label}
+                                          </p>
+                                          <input
+                                            key={`${stage.stageId ?? idx}-${field}`}
+                                            type="number"
+                                            min={0}
+                                            disabled={!productionEdit}
+                                            className="w-full bg-transparent text-sm font-bold border-none outline-none p-0 rounded-sm focus-visible:ring-2 focus-visible:ring-primary/50 disabled:opacity-70"
+                                            defaultValue={stage[field] ?? 0}
+                                            // Fires on blur, not on every
+                                            // keystroke - now that this goes
+                                            // through the remote-first
+                                            // updateProjectStagesV2, awaiting a
+                                            // network round-trip per digit
+                                            // typed would make the field
+                                            // lag/drop keystrokes (same fix as
+                                            // the Notes textarea above).
+                                            onBlur={async (e) => {
+                                              const nextValue = Math.max(
+                                                0,
+                                                Number(e.target.value),
+                                              );
+                                              if (
+                                                (stage[field] ?? 0) ===
+                                                nextValue
+                                              )
+                                                return;
+                                              const updated = v2Stages.map(
+                                                (s, i) =>
+                                                  i === idx
+                                                    ? {
+                                                        ...s,
+                                                        [field]: nextValue,
+                                                      }
+                                                    : s,
+                                              );
+                                              const ok =
+                                                await updateProjectStagesV2(
+                                                  projectId,
+                                                  updated,
+                                                );
+                                              if (!ok) {
+                                                toast.error(
+                                                  `Could not save ${label} - please try again`,
+                                                );
+                                              }
+                                            }}
+                                          />
+                                        </div>
+                                      ))}
+                                    </div>
+                                    {/* Balance — auto-calculated */}
+                                    {(() => {
+                                      const input = stage.sentQty ?? 0;
+                                      const completed = stage.okQty ?? 0;
+                                      const rejected = stage.rejectedQty ?? 0;
+                                      const rework = stage.reworkQty ?? 0;
+                                      const balance = Math.max(
+                                        0,
+                                        input - completed - rejected - rework,
+                                      );
+                                      const stageMoves = (
+                                        productionMovements || []
+                                      ).filter(
+                                        (m) =>
+                                          m.projectId === projectId &&
+                                          (m.fromStage === stage.stageName ||
+                                            m.toStage === stage.stageName),
+                                      );
+                                      return (
+                                        <>
+                                          {input > 0 && (
+                                            <div
+                                              className={`mt-2 flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium ${balance > 0 ? "bg-warning/15 border border-warning/30 text-warning" : "bg-success/10 border border-success/30 text-success"}`}
+                                            >
+                                              <span>
+                                                Balance:{" "}
+                                                <strong>{balance}</strong>
+                                              </span>
+                                              {balance === 0 &&
+                                                completed > 0 && (
+                                                  <span>
+                                                    · Stage fully accounted
+                                                  </span>
+                                                )}
+                                            </div>
+                                          )}
+                                          {stageMoves.length > 0 && (
+                                            <div className="mt-1.5 text-[11px] text-muted-foreground">
+                                              {stageMoves.map((m) => (
+                                                <span
+                                                  key={m.id}
+                                                  className="inline-flex items-center gap-1 mr-2"
+                                                >
+                                                  {m.fromStage ===
+                                                  stage.stageName
+                                                    ? `→ ${m.toStage}: ${m.qty}`
+                                                    : `← ${m.fromStage}: ${m.qty}`}
+                                                </span>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </>
+                                      );
+                                    })()}
+                                  </div>
+
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    {productionEdit &&
+                                      stage.status !== "Completed" && (
+                                        <Button
+                                          size="sm"
+                                          onClick={() =>
+                                            handleCompleteStage(idx)
+                                          }
+                                        >
+                                          Mark as Complete
+                                        </Button>
+                                      )}
+                                    {productionEdit && (
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="outline"
+                                        onClick={() => {
+                                          setMoveForm({
+                                            fromStage: stage.stageName,
+                                            toStage: "",
+                                            qty: 0,
+                                            notes: "",
+                                          });
+                                          setMoveQtyDialog(true);
+                                        }}
+                                      >
+                                        Move Qty →
+                                      </Button>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+                              {/* Notes */}
+                              <div className="space-y-1">
+                                <Label className="text-xs">Notes</Label>
+                                <Textarea
+                                  key={stage.stageId ?? idx}
+                                  rows={2}
+                                  className="text-xs"
+                                  placeholder="Notes for this stage..."
+                                  disabled={!productionEdit}
+                                  defaultValue={stage.notes}
+                                  // Fires on blur, not on every keystroke - see
+                                  // the matching fix earlier in this file.
+                                  onBlur={async (e) => {
+                                    if (stage.notes === e.target.value) return;
+                                    const updated = v2Stages.map((s, i) =>
+                                      i === idx
+                                        ? { ...s, notes: e.target.value }
+                                        : s,
+                                    );
+                                    const ok = await updateProjectStagesV2(
+                                      projectId,
+                                      updated,
+                                    );
+                                    if (!ok) {
+                                      toast.error(
+                                        "Could not save notes - please try again",
+                                      );
+                                    }
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Add Stage Dialog */}
+                  <Dialog
+                    open={addStageDialog}
+                    onOpenChange={setAddStageDialog}
+                  >
+                    <DialogContent className="max-w-sm">
+                      <DialogHeader>
+                        <DialogTitle>Add Stage</DialogTitle>
+                      </DialogHeader>
+                      <div className="space-y-3 py-2">
+                        <div className="space-y-1">
+                          <Label className="text-xs">Stage Name</Label>
+                          <Input
+                            className="h-8 text-xs"
+                            placeholder="e.g. Drilling"
+                            value={newStageName}
+                            onChange={(e) => setNewStageName(e.target.value)}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-xs">Workflow *</Label>
+                          <div className="flex gap-2">
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant={
+                                newStageType === "inhouse"
+                                  ? "default"
+                                  : "outline"
+                              }
+                              className="flex-1"
+                              onClick={() => setNewStageType("inhouse")}
+                            >
+                              🏭 In-House
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant={
+                                newStageType === "external"
+                                  ? "default"
+                                  : "outline"
+                              }
+                              className="flex-1"
+                              onClick={() => setNewStageType("external")}
+                            >
+                              External
+                            </Button>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground">
+                            {newStageType === "inhouse"
+                              ? "Job Cards will drive this stage's Accepted/Rejected/Rework."
+                              : newStageType === "external"
+                                ? "Send/Receive transactions will drive this stage's Sent/Received/Pending."
+                                : "Choose which workflow this stage exposes — cannot be inferred later."}
+                          </p>
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-xs">
+                            Target Quantity (pieces)
+                          </Label>
+                          <Input
+                            type="number"
+                            min={1}
+                            className="h-8 text-xs"
+                            placeholder="e.g. 100"
+                            value={newStageTargetQty}
+                            onChange={(e) =>
+                              setNewStageTargetQty(e.target.value)
+                            }
+                          />
+                          <p className="text-[11px] text-muted-foreground">
+                            {project?.orderedQuantity
+                              ? `Seeded from the project's Ordered Quantity (${project.orderedQuantity}) — editable, never synced back.`
+                              : "How many output pieces this stage needs."}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            id="req-material"
+                            checked={newStageRequiresMaterial}
+                            onChange={(e) =>
+                              setNewStageRequiresMaterial(e.target.checked)
+                            }
+                            className="w-4 h-4"
+                          />
+                          <Label
+                            htmlFor="req-material"
+                            className="text-xs cursor-pointer"
+                          >
+                            Requires Material Tracking
+                          </Label>
+                        </div>
+                      </div>
+                      <DialogFooter>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setAddStageDialog(false)}
+                        >
+                          Cancel
+                        </Button>
+                        <Button size="sm" onClick={handleAddStage}>
+                          Add
+                        </Button>
+                      </DialogFooter>
+                    </DialogContent>
+                  </Dialog>
+
+                  {/* Phase 32 (Task #176) - Supervisor/admin QMS gate override */}
+                  {gateOverrideDialog && (
+                    <QmsGateOverrideDialog
+                      open={!!gateOverrideDialog}
+                      onOpenChange={(open) =>
+                        !open && setGateOverrideDialog(null)
+                      }
+                      stageName={gateOverrideDialog.stageName}
+                      inspectionName={
+                        gateOverrideDialog.gate.inspection.libraryInspectionName
+                      }
+                      blockReason={gateOverrideDialog.gate.blockReason ?? ""}
+                      onConfirm={async (reason) => {
+                        const result = await createProjectQmsInspectionOverride(
+                          {
+                            projectQmsInspectionId:
+                              gateOverrideDialog.gate.inspection.id,
+                            requiredProductionStageId:
+                              gateOverrideDialog.stageId,
+                            reason,
+                            byUserId: userId,
+                            byUserName: userName,
+                          },
+                        );
+                        if (result.status !== "success") {
+                          toast.error(
+                            result.error || "Could not record override",
+                          );
+                          return false;
+                        }
+                        const idx = gateOverrideDialog.idx;
+                        const updated = v2Stages.map((s, i) =>
+                          i === idx
+                            ? {
+                                ...s,
+                                status: "Completed" as ProjectStageStatus,
+                              }
+                            : s,
+                        );
+                        const ok = await updateProjectStagesV2(
+                          projectId,
+                          updated,
+                        );
+                        if (!ok) {
+                          toast.error(
+                            "Could not save stage completion - please try again",
+                          );
+                          return false;
+                        }
+                        toast.success(
+                          "Stage marked complete (supervisor override recorded)",
+                        );
+                        return true;
+                      }}
+                    />
+                  )}
+
+                  {/* Send Material Dialog */}
+                  <Dialog
+                    open={!!sendMaterialDialog}
+                    onOpenChange={(open) =>
+                      !open && setSendMaterialDialog(null)
+                    }
+                  >
+                    <DialogContent className="max-w-sm">
+                      <DialogHeader>
+                        <DialogTitle>Send Material</DialogTitle>
+                      </DialogHeader>
+                      <div className="space-y-3 py-2">
+                        <div className="space-y-1">
+                          <Label className="text-xs">Quantity</Label>
+                          <Input
+                            type="number"
+                            className="h-8 text-xs"
+                            min={1}
+                            placeholder="0"
+                            value={sendForm.quantity || ""}
+                            onChange={(e) =>
+                              setSendForm((f) => ({
+                                ...f,
+                                quantity: +e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-xs">Date & Time</Label>
+                          <Input
+                            type="datetime-local"
+                            className="h-8 text-xs"
+                            value={sendForm.dateTime}
+                            onChange={(e) =>
+                              setSendForm((f) => ({
+                                ...f,
+                                dateTime: e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-xs">Sent To</Label>
+                          <SentToSelect
+                            vendorId={sendForm.vendorId}
+                            onChange={(id, name) =>
+                              setSendForm((f) => ({
+                                ...f,
+                                vendorId: id,
+                                vendorName: name,
+                              }))
+                            }
+                            stageIdx={sendMaterialDialog?.stageIdx ?? 0}
+                          />
+                        </div>
+                      </div>
+                      <DialogFooter>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setSendMaterialDialog(null)}
+                        >
+                          Cancel
+                        </Button>
+                        <Button size="sm" onClick={handleSendMaterial}>
+                          Save
+                        </Button>
+                      </DialogFooter>
+                    </DialogContent>
+                  </Dialog>
+
+                  {/* Mark Received Dialog */}
+                  <Dialog
+                    open={!!receiveMaterialDialog}
+                    onOpenChange={(open) =>
+                      !open && setReceiveMaterialDialog(null)
+                    }
+                  >
+                    <DialogContent className="max-w-sm">
+                      <DialogHeader>
+                        <DialogTitle>Mark as Received</DialogTitle>
+                      </DialogHeader>
+                      <div className="space-y-3 py-2">
+                        <div className="space-y-1">
+                          <Label className="text-xs">Received Quantity</Label>
+                          <Input
+                            type="number"
+                            className="h-8 text-xs"
+                            min={1}
+                            placeholder="0"
+                            value={receiveForm.quantity || ""}
+                            onChange={(e) =>
+                              setReceiveForm((f) => ({
+                                ...f,
+                                quantity: +e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <Label className="text-xs">Date & Time</Label>
+                          <Input
+                            type="datetime-local"
+                            className="h-8 text-xs"
+                            value={receiveForm.dateTime}
+                            onChange={(e) =>
+                              setReceiveForm((f) => ({
+                                ...f,
+                                dateTime: e.target.value,
+                              }))
+                            }
+                          />
+                        </div>
+                      </div>
+                      <DialogFooter>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => setReceiveMaterialDialog(null)}
+                        >
+                          Cancel
+                        </Button>
+                        <Button size="sm" onClick={handleReceiveMaterial}>
+                          Save
+                        </Button>
+                      </DialogFooter>
+                    </DialogContent>
+                  </Dialog>
+                </div>
+              ) : (
+                /* Legacy Production UI — Read-only */
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-sm font-semibold">
+                      Production Stage Tracking
+                    </h2>
+                    <span className="text-xs bg-warning/15 text-warning border border-warning/30 rounded px-2 py-0.5">
+                      Legacy — Read Only
                     </span>
                   </div>
-                  <Button
-                    onClick={handleSaveCosting}
-                    data-ocid="project-detail.costing.save_button"
-                  >
-                    <Save className="w-4 h-4 mr-1.5" /> Save Costing
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-          </section>
-
-          {/* Tab 4 — Material Purchases */}
-          <section
-            id="section-materials"
-            className="mt-4 space-y-4 scroll-mt-24"
-          >
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold">Raw Material Purchases</h2>
-              {pCreate && (
-                <Button
-                  size="sm"
-                  onClick={() => setMatDialog(true)}
-                  data-ocid="project-detail.materials.open_modal_button"
-                >
-                  <Plus className="w-3.5 h-3.5 mr-1" /> Add Purchase
-                </Button>
-              )}
-            </div>
-            <div className="table-wrapper">
-              <div
-                className="rounded-md border"
-                data-ocid="project-detail.materials.table"
-              >
-                <Table>
-                  <TableHeader>
-                    <TableRow className="bg-muted/40">
-                      <TableHead className="text-xs font-semibold">
-                        Material
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold">
-                        Thickness
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold">
-                        Qty
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold">
-                        Supplier
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold">
-                        Date
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold">
-                        Attachments
-                      </TableHead>
-                      {(inventoryEdit || inventoryDelete) && (
-                        <TableHead className="text-xs font-semibold w-20">
-                          Actions
-                        </TableHead>
-                      )}
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {projMaterials.map((m, i) => (
-                      <TableRow
-                        key={m.id}
-                        data-ocid={`project-detail.materials.item.${i + 1}`}
-                      >
-                        <TableCell className="text-sm font-medium">
-                          {m.materialType}
-                        </TableCell>
-                        <TableCell className="text-xs">{m.thickness}</TableCell>
-                        <TableCell className="text-sm">{m.quantity}</TableCell>
-                        <TableCell className="text-sm">
-                          {m.supplierName}
-                        </TableCell>
-                        <TableCell className="text-xs">
-                          {m.purchaseDate}
-                        </TableCell>
-                        <TableCell className="text-xs">
-                          {(m.attachments ?? []).length > 0 ? (
-                            <span className="flex items-center gap-1 text-muted-foreground">
-                              <Paperclip className="w-3 h-3" />
-                              {(m.attachments ?? []).length}
-                            </span>
-                          ) : (
-                            "—"
+                  <div className="rounded-md border bg-warning/15 px-4 py-2 text-xs text-warning mb-2">
+                    This project uses the legacy production system. Production
+                    data is view-only.
+                  </div>
+                  <div className="space-y-2 pointer-events-none opacity-80">
+                    {stages.map((stage, idx) => {
+                      const prevStage = idx > 0 ? stages[idx - 1] : null;
+                      const isLocked =
+                        prevStage !== null &&
+                        prevStage.status !== "Completed" &&
+                        prevStage.status !== "Received";
+                      const isExpanded = expandedStage === idx;
+                      return (
+                        <div
+                          key={stage.stageName}
+                          className={`rounded-lg border ${isLocked ? "opacity-50" : ""}`}
+                        >
+                          <button
+                            type="button"
+                            className="w-full flex items-center justify-between px-4 py-3 text-left"
+                            onClick={() =>
+                              setExpandedStage(isExpanded ? null : idx)
+                            }
+                          >
+                            <div className="flex items-center gap-3">
+                              <span className="flex items-center justify-center w-6 h-6 rounded-full bg-muted text-xs font-bold">
+                                {idx + 1}
+                              </span>
+                              <span className="text-sm font-semibold">
+                                {stage.stageName}
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={`text-xs px-2 py-0.5 rounded-full font-medium ${STAGE_STATUS_COLORS[stage.status]}`}
+                              >
+                                {STAGE_STATUS_LABELS[stage.status]}
+                              </span>
+                              {isExpanded ? (
+                                <ChevronUp className="w-4 h-4 text-muted-foreground" />
+                              ) : (
+                                <ChevronDown className="w-4 h-4 text-muted-foreground" />
+                              )}
+                            </div>
+                          </button>
+                          {isExpanded && (
+                            <div className="border-t px-4 py-3 space-y-2 text-xs text-muted-foreground">
+                              {stage.quantitySent > 0 && (
+                                <div>Qty Sent: {stage.quantitySent}</div>
+                              )}
+                              {stage.receivedQuantity > 0 && (
+                                <div>
+                                  Qty Received: {stage.receivedQuantity}
+                                </div>
+                              )}
+                              {stage.sentDateTime && (
+                                <div>
+                                  Sent:{" "}
+                                  {new Date(stage.sentDateTime).toLocaleString(
+                                    "en-IN",
+                                  )}
+                                </div>
+                              )}
+                              {stage.receivedDateTime && (
+                                <div>
+                                  Received:{" "}
+                                  {new Date(
+                                    stage.receivedDateTime,
+                                  ).toLocaleString("en-IN")}
+                                </div>
+                              )}
+                              {stage.sentToVendorName && (
+                                <div>Sent To: {stage.sentToVendorName}</div>
+                              )}
+                              {stage.notes && <div>Notes: {stage.notes}</div>}
+                            </div>
                           )}
-                        </TableCell>
-                        {(inventoryEdit || inventoryDelete) && (
-                          <TableCell>
-                            <div className="flex gap-1">
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* Tab — Inspection (QMS Phase 2) */}
+          {activeTab === "inspection" && (
+            <section id="section-inspection" className="mt-4 scroll-mt-24">
+              <ProjectInspectionTab projectId={projectId} />
+            </section>
+          )}
+
+          {/* Tab — QMS (Phase 32, Task #175) */}
+          {activeTab === "qms" && (
+            <section id="section-qms" className="mt-4 scroll-mt-24">
+              <ProjectQmsInspectionsTab projectId={projectId} />
+            </section>
+          )}
+
+          {/* Tab 7 — Delivery Details */}
+          {activeTab === "delivery" && (
+            <section id="section-delivery" className="mt-4 scroll-mt-24">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base">Delivery Details</CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="space-y-1.5">
+                      <Label htmlFor="del-date">Delivery Date</Label>
+                      <Input
+                        id="del-date"
+                        type="date"
+                        value={delivery.deliveryDate}
+                        onChange={(e) =>
+                          setDelivery((d) => ({
+                            ...d,
+                            deliveryDate: e.target.value,
+                          }))
+                        }
+                        data-ocid="project-detail.delivery.input"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="del-vehicle">Vehicle Number</Label>
+                      <Input
+                        id="del-vehicle"
+                        placeholder="e.g. MH12-AB-1234"
+                        value={delivery.vehicleNumber}
+                        onChange={(e) =>
+                          setDelivery((d) => ({
+                            ...d,
+                            vehicleNumber: e.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5 sm:col-span-2">
+                      <Label htmlFor="del-dest">Delivery Destination</Label>
+                      <Input
+                        id="del-dest"
+                        placeholder="Delivery address or location"
+                        value={delivery.deliveryDestination}
+                        onChange={(e) =>
+                          setDelivery((d) => ({
+                            ...d,
+                            deliveryDestination: e.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label htmlFor="del-challan">Delivery Challan No</Label>
+                      <Input
+                        id="del-challan"
+                        placeholder="e.g. DC-2026-001"
+                        value={delivery.deliveryChallan}
+                        onChange={(e) =>
+                          setDelivery((d) => ({
+                            ...d,
+                            deliveryChallan: e.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+                  </div>
+                  <div className="pt-2">
+                    {isAdmin && (
+                      <Button
+                        onClick={handleSaveDelivery}
+                        data-ocid="project-detail.delivery.save_button"
+                      >
+                        <Save className="w-4 h-4 mr-1.5" /> Save Delivery
+                      </Button>
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            </section>
+          )}
+
+          {/* Tab 8 — Material Usage */}
+          {activeTab === "material-usage" && (
+            <section
+              id="section-material-usage"
+              className="mt-4 space-y-4 scroll-mt-24"
+            >
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold">Material Usage</h2>
+                {pCreateInventory && (
+                  <Button
+                    size="sm"
+                    onClick={() => setUsageDialog(true)}
+                    data-ocid="project-detail.material-usage.open_modal_button"
+                  >
+                    <Plus className="w-3.5 h-3.5 mr-1" /> Add Usage
+                  </Button>
+                )}
+              </div>
+
+              <div className="table-wrapper">
+                <div
+                  className="rounded-md border"
+                  data-ocid="project-detail.material-usage.table"
+                >
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="bg-muted/40">
+                        <TableHead className="text-xs font-semibold">
+                          Material
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold">
+                          Qty Used
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold">
+                          Unit
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold">
+                          Date
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold">
+                          Notes
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold w-16">
+                          Del
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {projUsages.map((u, i) => {
+                        const invItem = inventoryItems.find(
+                          (x) => x.id === u.inventoryItemId,
+                        );
+                        return (
+                          <TableRow
+                            key={u.id}
+                            data-ocid={`project-detail.material-usage.item.${i + 1}`}
+                          >
+                            <TableCell
+                              className={cn(
+                                "font-medium text-sm",
+                                onViewInventoryUsage &&
+                                  "cursor-pointer hover:underline",
+                              )}
+                              role={onViewInventoryUsage ? "button" : undefined}
+                              tabIndex={onViewInventoryUsage ? 0 : undefined}
+                              onClick={
+                                onViewInventoryUsage
+                                  ? () => onViewInventoryUsage(u.id)
+                                  : undefined
+                              }
+                              onKeyDown={
+                                onViewInventoryUsage
+                                  ? (e) => {
+                                      if (e.key === "Enter" || e.key === " ") {
+                                        e.preventDefault();
+                                        onViewInventoryUsage(u.id);
+                                      }
+                                    }
+                                  : undefined
+                              }
+                            >
+                              {u.materialName}
+                            </TableCell>
+                            <TableCell className="text-sm font-mono">
+                              {u.quantityUsed}
+                            </TableCell>
+                            <TableCell className="text-xs text-muted-foreground">
+                              {invItem?.unit ?? ""}
+                            </TableCell>
+                            <TableCell className="text-xs">
+                              {u.usedDate}
+                            </TableCell>
+                            <TableCell className="text-xs text-muted-foreground">
+                              {u.notes || "—"}
+                            </TableCell>
+                            <TableCell>
                               {inventoryEdit && (
                                 <Button
                                   variant="ghost"
                                   size="icon"
                                   className="h-7 w-7"
-                                  title="Edit purchase"
-                                  aria-label="Edit purchase"
+                                  title="Edit usage"
+                                  aria-label="Edit usage"
                                   onClick={() => {
-                                    setEditPurchaseId(m.id);
-                                    setEditPurchaseForm({
-                                      materialType: m.materialType,
-                                      thickness: m.thickness,
-                                      quantity: m.quantity,
-                                      unit: m.unit || "",
-                                      vendorId: m.vendorId || "",
-                                      supplierName: m.supplierName,
-                                      purchaseDate: m.purchaseDate,
+                                    setEditUsageId(u.id);
+                                    setEditUsageForm({
+                                      quantityUsed: String(u.quantityUsed),
+                                      usedDate: u.usedDate,
+                                      notes: u.notes || "",
                                     });
                                   }}
                                 >
@@ -4349,2311 +6373,18 @@ export function ProjectDetail({
                                   variant="ghost"
                                   size="icon"
                                   className="h-7 w-7 text-destructive hover:text-destructive"
-                                  onClick={() => setDeletePurchaseTarget(m.id)}
-                                  title="Delete purchase"
-                                  aria-label="Delete purchase"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </Button>
-                              )}
-                            </div>
-                          </TableCell>
-                        )}
-                      </TableRow>
-                    ))}
-                    {projMaterials.length === 0 && (
-                      <TableRow>
-                        <TableCell
-                          colSpan={pEdit || pDelete ? 7 : 6}
-                          className="text-center py-8 text-sm text-muted-foreground"
-                          data-ocid="project-detail.materials.empty_state"
-                        >
-                          No material purchases recorded
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
-              </div>
-            </div>
-
-            {/* Add Material Dialog */}
-            <Dialog open={matDialog} onOpenChange={setMatDialog}>
-              <DialogContent data-ocid="project-detail.materials.dialog">
-                <DialogHeader>
-                  <DialogTitle>Add Material Purchase</DialogTitle>
-                </DialogHeader>
-                <div className="space-y-3 py-2">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div className="space-y-1.5">
-                      <Label>Material Type *</Label>
-                      <Input
-                        placeholder="e.g. MS Sheet"
-                        value={matForm.materialType}
-                        onChange={(e) =>
-                          setMatForm((f) => ({
-                            ...f,
-                            materialType: e.target.value,
-                          }))
-                        }
-                        data-ocid="project-detail.materials.input"
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Thickness</Label>
-                      <Input
-                        placeholder="e.g. 2mm"
-                        value={matForm.thickness}
-                        onChange={(e) =>
-                          setMatForm((f) => ({
-                            ...f,
-                            thickness: e.target.value,
-                          }))
-                        }
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Quantity</Label>
-                      <Input
-                        type="number"
-                        min={0}
-                        value={matForm.quantity}
-                        onChange={(e) =>
-                          setMatForm((f) => ({
-                            ...f,
-                            quantity: Number(e.target.value),
-                          }))
-                        }
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Unit</Label>
-                      <Input
-                        placeholder="e.g. kg, sheets, pcs"
-                        value={matForm.unit}
-                        onChange={(e) =>
-                          setMatForm((f) => ({
-                            ...f,
-                            unit: e.target.value,
-                          }))
-                        }
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Supplier / Vendor</Label>
-                      <VendorSelect
-                        value={matForm.vendorId || undefined}
-                        onChange={(id, name) =>
-                          setMatForm((f) => ({
-                            ...f,
-                            vendorId: id,
-                            supplierName: name,
-                          }))
-                        }
-                        placeholder="Select vendor"
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Purchase Date</Label>
-                      <Input
-                        type="date"
-                        value={matForm.purchaseDate}
-                        onChange={(e) =>
-                          setMatForm((f) => ({
-                            ...f,
-                            purchaseDate: e.target.value,
-                          }))
-                        }
-                      />
-                    </div>
-                  </div>
-                  {/* Attachments */}
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-xs flex items-center gap-1.5">
-                        <Paperclip className="w-3.5 h-3.5" />
-                        Attach Invoices
-                      </Label>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="h-7 text-xs"
-                        onClick={() => matFileInputRef.current?.click()}
-                      >
-                        <Plus className="w-3 h-3 mr-1" /> Add Files
-                      </Button>
-                      <input
-                        ref={matFileInputRef}
-                        type="file"
-                        accept=".pdf,.jpg,.jpeg,.png"
-                        multiple
-                        className="hidden"
-                        onChange={handleMatAttachFiles}
-                      />
-                    </div>
-                    {matPendingAttachments.length > 0 && (
-                      <div className="space-y-1.5">
-                        {matPendingAttachments.map((att) => (
-                          <div
-                            key={att.ref}
-                            className="flex items-center gap-2 p-2 rounded-md bg-muted/50 border border-border"
-                          >
-                            {att.type === "image" ? (
-                              <img
-                                src={att.ref}
-                                alt={att.name}
-                                className="h-8 w-8 rounded object-cover shrink-0 border"
-                              />
-                            ) : (
-                              <div className="h-8 w-8 rounded bg-info/10 flex items-center justify-center shrink-0">
-                                <FileText className="w-4 h-4 text-info" />
-                              </div>
-                            )}
-                            <span className="text-xs flex-1 truncate">
-                              {att.name}
-                            </span>
-                            {att.type === "pdf" && (
-                              <Badge
-                                variant="secondary"
-                                className="text-[10px] px-1.5 py-0 shrink-0"
-                              >
-                                PDF
-                              </Badge>
-                            )}
-                            <button
-                              type="button"
-                              onClick={() => removeMatAttachment(att.ref)}
-                              className="p-1 rounded hover:bg-muted transition-colors shrink-0"
-                            >
-                              <X className="w-3 h-3 text-muted-foreground" />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    {matPendingAttachments.length === 0 && (
-                      <p className="text-[11px] text-muted-foreground">
-                        PDF, JPG or PNG — supports multiple files
-                      </p>
-                    )}
-                  </div>
-                </div>
-                <DialogFooter>
-                  <Button
-                    variant="outline"
-                    onClick={() => setMatDialog(false)}
-                    data-ocid="project-detail.materials.cancel_button"
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    onClick={handleAddMaterial}
-                    data-ocid="project-detail.materials.submit_button"
-                  >
-                    Save
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
-
-            {/* Edit Material Purchase Dialog */}
-            <Dialog
-              open={!!editPurchaseId}
-              onOpenChange={(o) => {
-                if (!o) {
-                  setEditPurchaseId(null);
-                  setEditPurchaseForm(null);
-                }
-              }}
-            >
-              <DialogContent>
-                <DialogHeader>
-                  <DialogTitle>Edit Material Purchase</DialogTitle>
-                </DialogHeader>
-                {editPurchaseForm && (
-                  <div className="space-y-3 py-2">
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <div className="space-y-1.5">
-                        <Label>Material Type *</Label>
-                        <Input
-                          value={editPurchaseForm.materialType}
-                          onChange={(e) =>
-                            setEditPurchaseForm((f) =>
-                              f ? { ...f, materialType: e.target.value } : f,
-                            )
-                          }
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <Label>Thickness</Label>
-                        <Input
-                          value={editPurchaseForm.thickness}
-                          onChange={(e) =>
-                            setEditPurchaseForm((f) =>
-                              f ? { ...f, thickness: e.target.value } : f,
-                            )
-                          }
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <Label>Quantity</Label>
-                        <Input
-                          type="number"
-                          min={0}
-                          value={editPurchaseForm.quantity}
-                          onChange={(e) =>
-                            setEditPurchaseForm((f) =>
-                              f
-                                ? { ...f, quantity: Number(e.target.value) }
-                                : f,
-                            )
-                          }
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <Label>Unit</Label>
-                        <Input
-                          value={editPurchaseForm.unit}
-                          onChange={(e) =>
-                            setEditPurchaseForm((f) =>
-                              f ? { ...f, unit: e.target.value } : f,
-                            )
-                          }
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <Label>Purchase Date</Label>
-                        <Input
-                          type="date"
-                          value={editPurchaseForm.purchaseDate}
-                          onChange={(e) =>
-                            setEditPurchaseForm((f) =>
-                              f ? { ...f, purchaseDate: e.target.value } : f,
-                            )
-                          }
-                        />
-                      </div>
-                    </div>
-                  </div>
-                )}
-                <DialogFooter>
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      setEditPurchaseId(null);
-                      setEditPurchaseForm(null);
-                    }}
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    onClick={async () => {
-                      if (!editPurchaseId || !editPurchaseForm) return;
-                      const existing = materialPurchases.find(
-                        (x) => x.id === editPurchaseId,
-                      );
-                      if (!existing) return;
-                      if (!existing.inventoryItemId) {
-                        toast.error(
-                          "This purchase has no linked inventory item — cannot update.",
-                        );
-                        return;
-                      }
-                      // Monster-1 — remote-first via the same
-                      // inventory_purchases row inventoryPurchasesApi.ts
-                      // already manages. Note: this table has no per-purchase
-                      // "unit" column (unit lives on inventory_items) — a
-                      // pre-existing schema gap, not a new one, so a unit
-                      // edited here is reflected locally but not persisted.
-                      const result = await updateInventoryPurchaseRemote({
-                        id: existing.id,
-                        inventoryItemId: existing.inventoryItemId,
-                        materialName: editPurchaseForm.materialType,
-                        quantityPurchased: editPurchaseForm.quantity,
-                        supplierName: editPurchaseForm.supplierName,
-                        vendorId: editPurchaseForm.vendorId || undefined,
-                        purchaseDate: editPurchaseForm.purchaseDate,
-                        cost: 0,
-                        attachments: existing.attachments,
-                        createdAt: Date.now(),
-                      });
-                      if (result.status === "unauthenticated") {
-                        toast.error(
-                          "Not signed in to the server - purchase was not updated",
-                        );
-                        return;
-                      }
-                      if (
-                        result.status === "denied" ||
-                        result.status === "error"
-                      ) {
-                        toast.error(
-                          result.error ?? "Could not update purchase",
-                        );
-                        return;
-                      }
-                      const refreshed = await hydrateMaterialPurchases();
-                      if (refreshed.status === "success" && refreshed.data) {
-                        setMaterialPurchasesFromServer(refreshed.data);
-                      }
-                      setEditPurchaseId(null);
-                      setEditPurchaseForm(null);
-                      toast.success("Purchase updated");
-                    }}
-                  >
-                    Save
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
-          </section>
-
-          {/* Tab 5 — Outsourced Work */}
-          <section
-            id="section-outsourced"
-            className="mt-4 space-y-4 scroll-mt-24"
-          >
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold">Outsourced Work</h2>
-              {pAddOutsourced && (
-                <Button
-                  size="sm"
-                  onClick={() => setOutDialog(true)}
-                  data-ocid="project-detail.outsourced.open_modal_button"
-                >
-                  <Plus className="w-3.5 h-3.5 mr-1" /> Add Outsourced
-                </Button>
-              )}
-            </div>
-            <div className="table-wrapper">
-              <div
-                className="rounded-md border"
-                data-ocid="project-detail.outsourced.table"
-              >
-                <Table>
-                  <TableHeader>
-                    <TableRow className="bg-muted/40">
-                      <TableHead className="text-xs font-semibold">
-                        Vendor
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold">
-                        Material Sent
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold">
-                        Qty
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold">
-                        Date Sent
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold">
-                        Date Received
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold">
-                        Cost
-                      </TableHead>
-                      {(pEdit || pDelete) && (
-                        <TableHead className="text-xs font-semibold">
-                          Actions
-                        </TableHead>
-                      )}
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {projOutsourced.map((o, i) => (
-                      <TableRow
-                        key={o.id}
-                        data-ocid={`project-detail.outsourced.item.${i + 1}`}
-                      >
-                        <TableCell className="text-sm font-medium">
-                          {o.vendorName}
-                        </TableCell>
-                        <TableCell className="text-sm">
-                          {o.materialSent}
-                        </TableCell>
-                        <TableCell className="text-sm">
-                          {o.quantitySent}
-                        </TableCell>
-                        <TableCell className="text-xs">{o.dateSent}</TableCell>
-                        <TableCell className="text-xs">
-                          {o.dateReceived || "—"}
-                        </TableCell>
-                        <TableCell className="text-sm font-medium">
-                          {fmt(o.processCost)}
-                        </TableCell>
-                        {(pEdit || pDelete) && (
-                          <TableCell>
-                            <div className="flex gap-1">
-                              {pEdit && (
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  className="h-7 w-7 p-0"
-                                  title="Edit outsourced work"
-                                  aria-label="Edit outsourced work"
-                                  data-ocid={`project-detail.outsourced.edit_button.${i + 1}`}
-                                  onClick={() => {
-                                    if (!canEdit(currentUser, "projects")) {
-                                      alert("Access restricted");
-                                      return;
-                                    }
-                                    setOutEditId(o.id);
-                                    setOutForm({
-                                      vendorId: o.vendorId || "",
-                                      vendorName: o.vendorName,
-                                      materialSent: o.materialSent || "",
-                                      quantitySent: o.quantitySent || 0,
-                                      dateSent: o.dateSent || "",
-                                      dateReceived: o.dateReceived || "",
-                                      processCost: o.processCost || 0,
-                                    });
-                                    setOutDialog(true);
-                                  }}
-                                >
-                                  <Pencil className="w-3.5 h-3.5" />
-                                </Button>
-                              )}
-                              {pDelete && (
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  className="h-7 w-7 p-0 text-destructive hover:text-destructive"
-                                  title="Delete outsourced work"
-                                  aria-label="Delete outsourced work"
-                                  data-ocid={`project-detail.outsourced.delete_button.${i + 1}`}
-                                  onClick={() => handleDeleteOutsourced(o.id)}
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </Button>
-                              )}
-                            </div>
-                          </TableCell>
-                        )}
-                      </TableRow>
-                    ))}
-                    {projOutsourced.length === 0 && (
-                      <TableRow>
-                        <TableCell
-                          colSpan={pEdit || pDelete ? 7 : 6}
-                          className="text-center py-8 text-sm text-muted-foreground"
-                          data-ocid="project-detail.outsourced.empty_state"
-                        >
-                          No outsourced work recorded
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
-              </div>
-            </div>
-
-            {/* Add Outsourced Dialog */}
-            <Dialog
-              open={outDialog}
-              onOpenChange={(open) => {
-                if (!open) {
-                  setOutDialog(false);
-                  setOutEditId(null);
-                  setOutForm({
-                    vendorId: "",
-                    vendorName: "",
-                    materialSent: "",
-                    quantitySent: 0,
-                    dateSent: "",
-                    dateReceived: "",
-                    processCost: 0,
-                  });
-                }
-              }}
-            >
-              <DialogContent data-ocid="project-detail.outsourced.dialog">
-                <DialogHeader>
-                  <DialogTitle>
-                    {outEditId ? "Edit Outsourced Work" : "Add Outsourced Work"}
-                  </DialogTitle>
-                </DialogHeader>
-                <div className="space-y-3 py-2">
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <div className="space-y-1.5">
-                      <Label>Vendor Name *</Label>
-                      <VendorSelect
-                        value={outForm.vendorId || ""}
-                        onChange={(id) => handleVendorSelect(id)}
-                        placeholder="Select Vendor"
-                        className="w-full"
-                        data-ocid="project-detail.outsourced.input"
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Material Sent</Label>
-                      <Input
-                        placeholder="e.g. MS Sheet 2mm"
-                        value={outForm.materialSent}
-                        onChange={(e) =>
-                          setOutForm((f) => ({
-                            ...f,
-                            materialSent: e.target.value,
-                          }))
-                        }
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Quantity Sent</Label>
-                      <Input
-                        type="number"
-                        min={0}
-                        value={outForm.quantitySent}
-                        onChange={(e) =>
-                          setOutForm((f) => ({
-                            ...f,
-                            quantitySent: Number(e.target.value),
-                          }))
-                        }
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Process Cost (₹)</Label>
-                      <Input
-                        type="number"
-                        min={0}
-                        value={outForm.processCost}
-                        onChange={(e) =>
-                          setOutForm((f) => ({
-                            ...f,
-                            processCost: Number(e.target.value),
-                          }))
-                        }
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Date Sent</Label>
-                      <Input
-                        type="date"
-                        value={outForm.dateSent}
-                        onChange={(e) =>
-                          setOutForm((f) => ({
-                            ...f,
-                            dateSent: e.target.value,
-                          }))
-                        }
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label>Date Received</Label>
-                      <Input
-                        type="date"
-                        value={outForm.dateReceived}
-                        onChange={(e) =>
-                          setOutForm((f) => ({
-                            ...f,
-                            dateReceived: e.target.value,
-                          }))
-                        }
-                      />
-                    </div>
-                  </div>
-                </div>
-                <DialogFooter>
-                  <Button
-                    variant="outline"
-                    onClick={() => setOutDialog(false)}
-                    data-ocid="project-detail.outsourced.cancel_button"
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    onClick={handleAddOutsourced}
-                    data-ocid="project-detail.outsourced.submit_button"
-                  >
-                    Save
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
-          </section>
-
-          {/* Tab 6 — Production Tracking */}
-          <section
-            id="section-production"
-            className="mt-4 space-y-3 scroll-mt-24"
-          >
-            {isV2 ? (
-              /* V2 Production UI */
-              <div className="space-y-3">
-                {(() => {
-                  if (project.totalQty == null) {
-                    return (
-                      <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-warning/15 border border-warning/30 text-warning text-xs font-medium">
-                        ⚠ Quantity not set — please update project settings
-                      </div>
-                    );
-                  }
-                  const dispatchedQty = (deliveryChallans || []).reduce(
-                    (sum, dc) =>
-                      sum +
-                      ((dc.projectEntries || []).find(
-                        (e) => e.projectId === project.id,
-                      )?.dispatchQty || 0),
-                    0,
-                  );
-                  const progress = Math.round(
-                    (dispatchedQty / project.totalQty) * 100,
-                  );
-                  return (
-                    <div className="flex items-center gap-4 px-3 py-2 rounded-md bg-muted/50 border border-border text-sm">
-                      <span>
-                        Target: <strong>{project.totalQty} units</strong>
-                      </span>
-                      <span>
-                        Dispatched: <strong>{dispatchedQty}</strong>
-                      </span>
-                      <span>
-                        Progress: <strong>{progress}%</strong>
-                      </span>
-                    </div>
-                  );
-                })()}
-                <div className="flex items-center justify-between">
-                  <h2 className="text-sm font-semibold">
-                    Production Stage Tracking
-                  </h2>
-                  {productionEdit && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => {
-                        setNewStageType("");
-                        setNewStageTargetQty(
-                          project?.orderedQuantity
-                            ? String(project.orderedQuantity)
-                            : "",
-                        );
-                        setAddStageDialog(true);
-                      }}
-                    >
-                      <Plus className="w-3.5 h-3.5 mr-1.5" /> Add Stage
-                    </Button>
-                  )}
-                </div>
-
-                {v2Stages.length === 0 && (
-                  <div className="text-center py-8 text-muted-foreground text-sm">
-                    No stages defined. Click "Add Stage" to begin.
-                  </div>
-                )}
-
-                <div className="space-y-2">
-                  {v2Stages.map((stage, idx) => {
-                    const prevStage = idx > 0 ? v2Stages[idx - 1] : null;
-                    const isLocked =
-                      prevStage !== null && prevStage.status !== "Completed";
-                    const isExpanded = expandedStage === idx;
-                    const txs = stage.transactions || [];
-                    const totalSent = txs
-                      .filter((t) => t.type === "send")
-                      .reduce((a, t) => a + t.quantity, 0);
-                    const totalReceived = txs
-                      .filter((t) => t.type === "receive")
-                      .reduce((a, t) => a + t.quantity, 0);
-                    const pending = totalSent - totalReceived;
-                    const isActive = !isLocked && stage.status !== "Completed";
-
-                    return (
-                      <div
-                        key={`${stage.stageName}-${idx}`}
-                        className={`rounded-lg border ${isLocked ? "opacity-60" : ""} ${isActive ? "border-primary/40 shadow-sm" : ""}`}
-                      >
-                        {/* Stage Header */}
-                        <div className="flex items-center justify-between px-4 py-3">
-                          <button
-                            type="button"
-                            className="flex items-center gap-3 flex-1 text-left"
-                            onClick={() =>
-                              !isLocked &&
-                              setExpandedStage(isExpanded ? null : idx)
-                            }
-                            disabled={isLocked}
-                          >
-                            <span
-                              className={`flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${isActive ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground"}`}
-                            >
-                              {idx + 1}
-                            </span>
-                            <div>
-                              <span className="text-sm font-semibold">
-                                {stage.stageName}
-                              </span>
-                              {stage.requiresMaterialTracking && (
-                                <span className="ml-2 text-[10px] bg-warning/15 text-warning rounded px-1 py-0.5">
-                                  Material
-                                </span>
-                              )}
-                              {stage.stageId &&
-                                projectQmsInspectionsForThisProject.some(
-                                  (i) =>
-                                    i.requiredProductionStageId ===
-                                    stage.stageId,
-                                ) && (
-                                  <span
-                                    className="ml-2 text-[10px] bg-info/10 text-info rounded px-1 py-0.5"
-                                    data-ocid={`project-detail.production.inspection_badge.${stage.stageId}`}
-                                  >
-                                    Inspection Required
-                                  </span>
-                                )}
-                              {isLocked && (
-                                <span className="ml-2 text-xs text-muted-foreground">
-                                  (locked)
-                                </span>
-                              )}
-                            </div>
-                          </button>
-                          <div className="flex items-center gap-1">
-                            <span
-                              className={`text-xs px-2 py-0.5 rounded-full font-medium mr-2 ${STAGE_STATUS_COLORS[stage.status]}`}
-                            >
-                              {STAGE_STATUS_LABELS[stage.status]}
-                            </span>
-                            {productionEdit && (
-                              <>
-                                <Button
-                                  size="icon"
-                                  variant="ghost"
-                                  className="h-6 w-6"
-                                  onClick={() => handleMoveStage(idx, "up")}
-                                  disabled={idx === 0}
-                                  title="Move stage up"
-                                  aria-label="Move stage up"
-                                >
-                                  <ChevronUp className="w-3 h-3" />
-                                </Button>
-                                <Button
-                                  size="icon"
-                                  variant="ghost"
-                                  className="h-6 w-6"
-                                  onClick={() => handleMoveStage(idx, "down")}
-                                  disabled={idx === v2Stages.length - 1}
-                                  title="Move stage down"
-                                  aria-label="Move stage down"
-                                >
-                                  <ChevronDown className="w-3 h-3" />
-                                </Button>
-                                <Button
-                                  size="icon"
-                                  variant="ghost"
-                                  className="h-6 w-6 text-destructive hover:text-destructive/80"
-                                  onClick={() => handleRemoveStage(idx)}
-                                  title="Remove stage"
-                                  aria-label="Remove stage"
-                                >
-                                  <Trash2 className="w-3 h-3" />
-                                </Button>
-                              </>
-                            )}
-                            <Button
-                              size="icon"
-                              variant="ghost"
-                              className="h-6 w-6"
-                              onClick={() =>
-                                !isLocked &&
-                                setExpandedStage(isExpanded ? null : idx)
-                              }
-                              disabled={isLocked}
-                              title={
-                                isExpanded ? "Collapse stage" : "Expand stage"
-                              }
-                              aria-label={
-                                isExpanded ? "Collapse stage" : "Expand stage"
-                              }
-                            >
-                              {isExpanded ? (
-                                <ChevronUp className="w-4 h-4 text-muted-foreground" />
-                              ) : (
-                                <ChevronDown className="w-4 h-4 text-muted-foreground" />
-                              )}
-                            </Button>
-                          </div>
-                        </div>
-
-                        {/* Stage Body */}
-                        {isExpanded && (
-                          <div className="border-t px-4 py-4 space-y-4">
-                            {/* Phase 32 (Task #174) - QMS inspection link.
-                             * Optional, independent of material tracking.
-                             * Task #176 added the actual gate enforcement
-                             * (handleCompleteStage above) and the read-only
-                             * gate status this control now displays. */}
-                            {stage.stageId && (
-                              <div className="border rounded-md px-3 py-2 bg-muted/20">
-                                <ProductionStageInspectionControl
-                                  projectId={projectId}
-                                  stageId={stage.stageId}
-                                  stageName={stage.stageName}
-                                  libraryInspections={inspectionStages}
-                                  projectInspections={
-                                    projectQmsInspectionsForThisProject
-                                  }
-                                  projectOverrides={
-                                    projectQmsInspectionOverridesForThisProject
-                                  }
-                                  onOpenInspection={() =>
-                                    scrollToSection("qms")
-                                  }
-                                  currentUserId={userId}
-                                  currentUserName={userName}
-                                  canManage={canManageInspectionLink}
-                                />
-                              </div>
-                            )}
-                            {stage.requiresMaterialTracking ? (
-                              <div className="space-y-3">
-                                {/* Totals */}
-                                <div className="grid grid-cols-3 gap-3">
-                                  <div className="bg-info/10 border border-info/30 rounded-md p-2 text-center">
-                                    <div className="text-xs text-info font-medium">
-                                      Total Sent
-                                    </div>
-                                    <div className="text-lg font-bold text-info">
-                                      {totalSent}
-                                    </div>
-                                  </div>
-                                  <div className="bg-success/10 border border-success/30 rounded-md p-2 text-center">
-                                    <div className="text-xs text-success font-medium">
-                                      Total Received
-                                    </div>
-                                    <div className="text-lg font-bold text-success">
-                                      {totalReceived}
-                                    </div>
-                                  </div>
-                                  <div
-                                    className={`border rounded-md p-2 text-center ${pending > 0 ? "bg-warning/15 border-warning/30" : "bg-muted border-border"}`}
-                                  >
-                                    <div
-                                      className={`text-xs font-medium ${pending > 0 ? "text-warning" : "text-muted-foreground"}`}
-                                    >
-                                      Pending
-                                    </div>
-                                    <div
-                                      className={`text-lg font-bold ${pending > 0 ? "text-warning" : "text-muted-foreground"}`}
-                                    >
-                                      {pending}
-                                    </div>
-                                  </div>
-                                </div>
-                                {/* Actions */}
-                                {productionEdit && (
-                                  <div className="flex gap-2">
-                                    <Button
-                                      size="sm"
-                                      variant="outline"
-                                      onClick={() => {
-                                        setSendMaterialDialog({
-                                          stageIdx: idx,
-                                        });
-                                        setSendForm({
-                                          quantity: 0,
-                                          dateTime: "",
-                                          vendorId: "",
-                                          vendorName: "",
-                                        });
-                                      }}
-                                    >
-                                      Send Material
-                                    </Button>
-                                    <Button
-                                      size="sm"
-                                      variant="outline"
-                                      onClick={() => {
-                                        setReceiveMaterialDialog({
-                                          stageIdx: idx,
-                                        });
-                                        setReceiveForm({
-                                          quantity: 0,
-                                          dateTime: "",
-                                        });
-                                      }}
-                                      disabled={totalSent <= 0}
-                                    >
-                                      Mark Received
-                                    </Button>
-                                    {totalReceived >= totalSent &&
-                                      totalSent > 0 &&
-                                      stage.status !== "Completed" && (
-                                        <Button
-                                          size="sm"
-                                          onClick={() =>
-                                            handleCompleteStage(idx)
-                                          }
-                                        >
-                                          Mark Complete
-                                        </Button>
-                                      )}
-                                  </div>
-                                )}
-                                {/* Transaction History */}
-                                {txs.length > 0 && (
-                                  <div className="space-y-1">
-                                    <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-                                      Transaction History
-                                    </p>
-                                    <div className="border rounded-md overflow-hidden">
-                                      <table className="w-full text-xs">
-                                        <thead className="bg-muted">
-                                          <tr>
-                                            <th className="text-left px-2 py-1 font-medium">
-                                              Type
-                                            </th>
-                                            <th className="text-left px-2 py-1 font-medium">
-                                              Qty
-                                            </th>
-                                            <th className="text-left px-2 py-1 font-medium">
-                                              Date & Time
-                                            </th>
-                                            <th className="text-left px-2 py-1 font-medium">
-                                              Sent To
-                                            </th>
-                                          </tr>
-                                        </thead>
-                                        <tbody>
-                                          {txs.map((tx) => (
-                                            <tr
-                                              key={tx.id}
-                                              className="border-t"
-                                            >
-                                              <td className="px-2 py-1">
-                                                <span
-                                                  className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${tx.type === "send" ? "bg-info/10 text-info" : "bg-success/10 text-success"}`}
-                                                >
-                                                  {tx.type === "send"
-                                                    ? "Sent"
-                                                    : "Received"}
-                                                </span>
-                                              </td>
-                                              <td className="px-2 py-1">
-                                                {tx.quantity}
-                                              </td>
-                                              <td className="px-2 py-1">
-                                                {tx.dateTime
-                                                  ? new Date(
-                                                      tx.dateTime,
-                                                    ).toLocaleString("en-IN")
-                                                  : "—"}
-                                              </td>
-                                              <td className="px-2 py-1">
-                                                {tx.sentToVendorName ||
-                                                  (tx.type === "receive"
-                                                    ? "—"
-                                                    : "In-house")}
-                                              </td>
-                                            </tr>
-                                          ))}
-                                        </tbody>
-                                      </table>
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-                            ) : (
-                              /* Non-material stage */
-                              <div className="space-y-3">
-                                <div className="space-y-1">
-                                  <Label className="text-xs">Status</Label>
-                                  <Select
-                                    value={stage.status}
-                                    disabled={!productionEdit}
-                                    onValueChange={async (v) => {
-                                      // Phase 32 (Task #176) - "Completed" is
-                                      // the one transition the QMS gate can
-                                      // block, so route it through the same
-                                      // gated handler the "Mark as Complete"
-                                      // button already uses below, instead of
-                                      // writing the status directly here.
-                                      if (v === "Completed") {
-                                        handleCompleteStage(idx);
-                                        return;
-                                      }
-                                      const updated = v2Stages.map((s, i) =>
-                                        i === idx
-                                          ? {
-                                              ...s,
-                                              status: v as ProjectStageStatus,
-                                            }
-                                          : s,
-                                      );
-                                      const ok = await updateProjectStagesV2(
-                                        projectId,
-                                        updated,
-                                      );
-                                      if (!ok) {
-                                        toast.error(
-                                          "Could not save stage status - please try again",
-                                        );
-                                      }
-                                    }}
-                                  >
-                                    <SelectTrigger className="h-8 text-xs w-40">
-                                      <SelectValue />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      {(
-                                        [
-                                          "NotStarted",
-                                          "InProgress",
-                                          "Completed",
-                                        ] as ProjectStageStatus[]
-                                      ).map((s) => (
-                                        <SelectItem
-                                          key={s}
-                                          value={s}
-                                          className="text-xs"
-                                        >
-                                          {STAGE_STATUS_LABELS[s]}
-                                        </SelectItem>
-                                      ))}
-                                    </SelectContent>
-                                  </Select>
-                                </div>
-
-                                {/* Quantity Tracking */}
-                                <div>
-                                  <div className="flex items-center justify-between mb-2">
-                                    <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-                                      Quantity Tracking
-                                    </p>
-                                    {project?.totalQty && (
-                                      <span className="text-xs text-muted-foreground">
-                                        Ordered:{" "}
-                                        <strong>{project.totalQty}</strong>
-                                      </span>
-                                    )}
-                                  </div>
-                                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                                    {[
-                                      {
-                                        label: "Input Qty",
-                                        field: "sentQty" as const,
-                                        color:
-                                          "bg-info/10 border-info/30 text-info",
-                                      },
-                                      {
-                                        label: "Completed",
-                                        field: "okQty" as const,
-                                        color:
-                                          "bg-success/10 border-success/30 text-success",
-                                      },
-                                      {
-                                        label: "Rejected",
-                                        field: "rejectedQty" as const,
-                                        color:
-                                          "bg-destructive/10 border-destructive/30 text-destructive",
-                                      },
-                                      {
-                                        label: "Rework",
-                                        field: "reworkQty" as const,
-                                        color:
-                                          "bg-warning/15 border-warning/30 text-warning",
-                                      },
-                                    ].map(({ label, field, color }) => (
-                                      <div
-                                        key={field}
-                                        className={`rounded-md border p-2 ${color}`}
-                                      >
-                                        <p className="text-[10px] font-medium mb-1">
-                                          {label}
-                                        </p>
-                                        <input
-                                          key={`${stage.stageId ?? idx}-${field}`}
-                                          type="number"
-                                          min={0}
-                                          disabled={!productionEdit}
-                                          className="w-full bg-transparent text-sm font-bold border-none outline-none p-0 rounded-sm focus-visible:ring-2 focus-visible:ring-primary/50 disabled:opacity-70"
-                                          defaultValue={stage[field] ?? 0}
-                                          // Fires on blur, not on every
-                                          // keystroke - now that this goes
-                                          // through the remote-first
-                                          // updateProjectStagesV2, awaiting a
-                                          // network round-trip per digit
-                                          // typed would make the field
-                                          // lag/drop keystrokes (same fix as
-                                          // the Notes textarea above).
-                                          onBlur={async (e) => {
-                                            const nextValue = Math.max(
-                                              0,
-                                              Number(e.target.value),
-                                            );
-                                            if (
-                                              (stage[field] ?? 0) === nextValue
-                                            )
-                                              return;
-                                            const updated = v2Stages.map(
-                                              (s, i) =>
-                                                i === idx
-                                                  ? { ...s, [field]: nextValue }
-                                                  : s,
-                                            );
-                                            const ok =
-                                              await updateProjectStagesV2(
-                                                projectId,
-                                                updated,
-                                              );
-                                            if (!ok) {
-                                              toast.error(
-                                                `Could not save ${label} - please try again`,
-                                              );
-                                            }
-                                          }}
-                                        />
-                                      </div>
-                                    ))}
-                                  </div>
-                                  {/* Balance — auto-calculated */}
-                                  {(() => {
-                                    const input = stage.sentQty ?? 0;
-                                    const completed = stage.okQty ?? 0;
-                                    const rejected = stage.rejectedQty ?? 0;
-                                    const rework = stage.reworkQty ?? 0;
-                                    const balance = Math.max(
-                                      0,
-                                      input - completed - rejected - rework,
-                                    );
-                                    const stageMoves = (
-                                      productionMovements || []
-                                    ).filter(
-                                      (m) =>
-                                        m.projectId === projectId &&
-                                        (m.fromStage === stage.stageName ||
-                                          m.toStage === stage.stageName),
-                                    );
-                                    return (
-                                      <>
-                                        {input > 0 && (
-                                          <div
-                                            className={`mt-2 flex items-center gap-2 px-3 py-1.5 rounded-md text-xs font-medium ${balance > 0 ? "bg-warning/15 border border-warning/30 text-warning" : "bg-success/10 border border-success/30 text-success"}`}
-                                          >
-                                            <span>
-                                              Balance:{" "}
-                                              <strong>{balance}</strong>
-                                            </span>
-                                            {balance === 0 && completed > 0 && (
-                                              <span>
-                                                · Stage fully accounted
-                                              </span>
-                                            )}
-                                          </div>
-                                        )}
-                                        {stageMoves.length > 0 && (
-                                          <div className="mt-1.5 text-[11px] text-muted-foreground">
-                                            {stageMoves.map((m) => (
-                                              <span
-                                                key={m.id}
-                                                className="inline-flex items-center gap-1 mr-2"
-                                              >
-                                                {m.fromStage === stage.stageName
-                                                  ? `→ ${m.toStage}: ${m.qty}`
-                                                  : `← ${m.fromStage}: ${m.qty}`}
-                                              </span>
-                                            ))}
-                                          </div>
-                                        )}
-                                      </>
-                                    );
-                                  })()}
-                                </div>
-
-                                <div className="flex items-center gap-2 flex-wrap">
-                                  {productionEdit &&
-                                    stage.status !== "Completed" && (
-                                      <Button
-                                        size="sm"
-                                        onClick={() => handleCompleteStage(idx)}
-                                      >
-                                        Mark as Complete
-                                      </Button>
-                                    )}
-                                  {productionEdit && (
-                                    <Button
-                                      type="button"
-                                      size="sm"
-                                      variant="outline"
-                                      onClick={() => {
-                                        setMoveForm({
-                                          fromStage: stage.stageName,
-                                          toStage: "",
-                                          qty: 0,
-                                          notes: "",
-                                        });
-                                        setMoveQtyDialog(true);
-                                      }}
-                                    >
-                                      Move Qty →
-                                    </Button>
-                                  )}
-                                </div>
-                              </div>
-                            )}
-                            {/* Notes */}
-                            <div className="space-y-1">
-                              <Label className="text-xs">Notes</Label>
-                              <Textarea
-                                key={stage.stageId ?? idx}
-                                rows={2}
-                                className="text-xs"
-                                placeholder="Notes for this stage..."
-                                disabled={!productionEdit}
-                                defaultValue={stage.notes}
-                                // Fires on blur, not on every keystroke - see
-                                // the matching fix earlier in this file.
-                                onBlur={async (e) => {
-                                  if (stage.notes === e.target.value) return;
-                                  const updated = v2Stages.map((s, i) =>
-                                    i === idx
-                                      ? { ...s, notes: e.target.value }
-                                      : s,
-                                  );
-                                  const ok = await updateProjectStagesV2(
-                                    projectId,
-                                    updated,
-                                  );
-                                  if (!ok) {
-                                    toast.error(
-                                      "Could not save notes - please try again",
-                                    );
-                                  }
-                                }}
-                              />
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {/* Add Stage Dialog */}
-                <Dialog open={addStageDialog} onOpenChange={setAddStageDialog}>
-                  <DialogContent className="max-w-sm">
-                    <DialogHeader>
-                      <DialogTitle>Add Stage</DialogTitle>
-                    </DialogHeader>
-                    <div className="space-y-3 py-2">
-                      <div className="space-y-1">
-                        <Label className="text-xs">Stage Name</Label>
-                        <Input
-                          className="h-8 text-xs"
-                          placeholder="e.g. Drilling"
-                          value={newStageName}
-                          onChange={(e) => setNewStageName(e.target.value)}
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <Label className="text-xs">Workflow *</Label>
-                        <div className="flex gap-2">
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant={
-                              newStageType === "inhouse" ? "default" : "outline"
-                            }
-                            className="flex-1"
-                            onClick={() => setNewStageType("inhouse")}
-                          >
-                            🏭 In-House
-                          </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant={
-                              newStageType === "external"
-                                ? "default"
-                                : "outline"
-                            }
-                            className="flex-1"
-                            onClick={() => setNewStageType("external")}
-                          >
-                            External
-                          </Button>
-                        </div>
-                        <p className="text-[11px] text-muted-foreground">
-                          {newStageType === "inhouse"
-                            ? "Job Cards will drive this stage's Accepted/Rejected/Rework."
-                            : newStageType === "external"
-                              ? "Send/Receive transactions will drive this stage's Sent/Received/Pending."
-                              : "Choose which workflow this stage exposes — cannot be inferred later."}
-                        </p>
-                      </div>
-                      <div className="space-y-1">
-                        <Label className="text-xs">
-                          Target Quantity (pieces)
-                        </Label>
-                        <Input
-                          type="number"
-                          min={1}
-                          className="h-8 text-xs"
-                          placeholder="e.g. 100"
-                          value={newStageTargetQty}
-                          onChange={(e) => setNewStageTargetQty(e.target.value)}
-                        />
-                        <p className="text-[11px] text-muted-foreground">
-                          {project?.orderedQuantity
-                            ? `Seeded from the project's Ordered Quantity (${project.orderedQuantity}) — editable, never synced back.`
-                            : "How many output pieces this stage needs."}
-                        </p>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          id="req-material"
-                          checked={newStageRequiresMaterial}
-                          onChange={(e) =>
-                            setNewStageRequiresMaterial(e.target.checked)
-                          }
-                          className="w-4 h-4"
-                        />
-                        <Label
-                          htmlFor="req-material"
-                          className="text-xs cursor-pointer"
-                        >
-                          Requires Material Tracking
-                        </Label>
-                      </div>
-                    </div>
-                    <DialogFooter>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setAddStageDialog(false)}
-                      >
-                        Cancel
-                      </Button>
-                      <Button size="sm" onClick={handleAddStage}>
-                        Add
-                      </Button>
-                    </DialogFooter>
-                  </DialogContent>
-                </Dialog>
-
-                {/* Phase 32 (Task #176) - Supervisor/admin QMS gate override */}
-                {gateOverrideDialog && (
-                  <QmsGateOverrideDialog
-                    open={!!gateOverrideDialog}
-                    onOpenChange={(open) =>
-                      !open && setGateOverrideDialog(null)
-                    }
-                    stageName={gateOverrideDialog.stageName}
-                    inspectionName={
-                      gateOverrideDialog.gate.inspection.libraryInspectionName
-                    }
-                    blockReason={gateOverrideDialog.gate.blockReason ?? ""}
-                    onConfirm={async (reason) => {
-                      const result = await createProjectQmsInspectionOverride({
-                        projectQmsInspectionId:
-                          gateOverrideDialog.gate.inspection.id,
-                        requiredProductionStageId: gateOverrideDialog.stageId,
-                        reason,
-                        byUserId: userId,
-                        byUserName: userName,
-                      });
-                      if (result.status !== "success") {
-                        toast.error(
-                          result.error || "Could not record override",
-                        );
-                        return false;
-                      }
-                      const idx = gateOverrideDialog.idx;
-                      const updated = v2Stages.map((s, i) =>
-                        i === idx
-                          ? { ...s, status: "Completed" as ProjectStageStatus }
-                          : s,
-                      );
-                      const ok = await updateProjectStagesV2(
-                        projectId,
-                        updated,
-                      );
-                      if (!ok) {
-                        toast.error(
-                          "Could not save stage completion - please try again",
-                        );
-                        return false;
-                      }
-                      toast.success(
-                        "Stage marked complete (supervisor override recorded)",
-                      );
-                      return true;
-                    }}
-                  />
-                )}
-
-                {/* Send Material Dialog */}
-                <Dialog
-                  open={!!sendMaterialDialog}
-                  onOpenChange={(open) => !open && setSendMaterialDialog(null)}
-                >
-                  <DialogContent className="max-w-sm">
-                    <DialogHeader>
-                      <DialogTitle>Send Material</DialogTitle>
-                    </DialogHeader>
-                    <div className="space-y-3 py-2">
-                      <div className="space-y-1">
-                        <Label className="text-xs">Quantity</Label>
-                        <Input
-                          type="number"
-                          className="h-8 text-xs"
-                          min={1}
-                          placeholder="0"
-                          value={sendForm.quantity || ""}
-                          onChange={(e) =>
-                            setSendForm((f) => ({
-                              ...f,
-                              quantity: +e.target.value,
-                            }))
-                          }
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <Label className="text-xs">Date & Time</Label>
-                        <Input
-                          type="datetime-local"
-                          className="h-8 text-xs"
-                          value={sendForm.dateTime}
-                          onChange={(e) =>
-                            setSendForm((f) => ({
-                              ...f,
-                              dateTime: e.target.value,
-                            }))
-                          }
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <Label className="text-xs">Sent To</Label>
-                        <SentToSelect
-                          vendorId={sendForm.vendorId}
-                          onChange={(id, name) =>
-                            setSendForm((f) => ({
-                              ...f,
-                              vendorId: id,
-                              vendorName: name,
-                            }))
-                          }
-                          stageIdx={sendMaterialDialog?.stageIdx ?? 0}
-                        />
-                      </div>
-                    </div>
-                    <DialogFooter>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setSendMaterialDialog(null)}
-                      >
-                        Cancel
-                      </Button>
-                      <Button size="sm" onClick={handleSendMaterial}>
-                        Save
-                      </Button>
-                    </DialogFooter>
-                  </DialogContent>
-                </Dialog>
-
-                {/* Mark Received Dialog */}
-                <Dialog
-                  open={!!receiveMaterialDialog}
-                  onOpenChange={(open) =>
-                    !open && setReceiveMaterialDialog(null)
-                  }
-                >
-                  <DialogContent className="max-w-sm">
-                    <DialogHeader>
-                      <DialogTitle>Mark as Received</DialogTitle>
-                    </DialogHeader>
-                    <div className="space-y-3 py-2">
-                      <div className="space-y-1">
-                        <Label className="text-xs">Received Quantity</Label>
-                        <Input
-                          type="number"
-                          className="h-8 text-xs"
-                          min={1}
-                          placeholder="0"
-                          value={receiveForm.quantity || ""}
-                          onChange={(e) =>
-                            setReceiveForm((f) => ({
-                              ...f,
-                              quantity: +e.target.value,
-                            }))
-                          }
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <Label className="text-xs">Date & Time</Label>
-                        <Input
-                          type="datetime-local"
-                          className="h-8 text-xs"
-                          value={receiveForm.dateTime}
-                          onChange={(e) =>
-                            setReceiveForm((f) => ({
-                              ...f,
-                              dateTime: e.target.value,
-                            }))
-                          }
-                        />
-                      </div>
-                    </div>
-                    <DialogFooter>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => setReceiveMaterialDialog(null)}
-                      >
-                        Cancel
-                      </Button>
-                      <Button size="sm" onClick={handleReceiveMaterial}>
-                        Save
-                      </Button>
-                    </DialogFooter>
-                  </DialogContent>
-                </Dialog>
-              </div>
-            ) : (
-              /* Legacy Production UI — Read-only */
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <h2 className="text-sm font-semibold">
-                    Production Stage Tracking
-                  </h2>
-                  <span className="text-xs bg-warning/15 text-warning border border-warning/30 rounded px-2 py-0.5">
-                    Legacy — Read Only
-                  </span>
-                </div>
-                <div className="rounded-md border bg-warning/15 px-4 py-2 text-xs text-warning mb-2">
-                  This project uses the legacy production system. Production
-                  data is view-only.
-                </div>
-                <div className="space-y-2 pointer-events-none opacity-80">
-                  {stages.map((stage, idx) => {
-                    const prevStage = idx > 0 ? stages[idx - 1] : null;
-                    const isLocked =
-                      prevStage !== null &&
-                      prevStage.status !== "Completed" &&
-                      prevStage.status !== "Received";
-                    const isExpanded = expandedStage === idx;
-                    return (
-                      <div
-                        key={stage.stageName}
-                        className={`rounded-lg border ${isLocked ? "opacity-50" : ""}`}
-                      >
-                        <button
-                          type="button"
-                          className="w-full flex items-center justify-between px-4 py-3 text-left"
-                          onClick={() =>
-                            setExpandedStage(isExpanded ? null : idx)
-                          }
-                        >
-                          <div className="flex items-center gap-3">
-                            <span className="flex items-center justify-center w-6 h-6 rounded-full bg-muted text-xs font-bold">
-                              {idx + 1}
-                            </span>
-                            <span className="text-sm font-semibold">
-                              {stage.stageName}
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <span
-                              className={`text-xs px-2 py-0.5 rounded-full font-medium ${STAGE_STATUS_COLORS[stage.status]}`}
-                            >
-                              {STAGE_STATUS_LABELS[stage.status]}
-                            </span>
-                            {isExpanded ? (
-                              <ChevronUp className="w-4 h-4 text-muted-foreground" />
-                            ) : (
-                              <ChevronDown className="w-4 h-4 text-muted-foreground" />
-                            )}
-                          </div>
-                        </button>
-                        {isExpanded && (
-                          <div className="border-t px-4 py-3 space-y-2 text-xs text-muted-foreground">
-                            {stage.quantitySent > 0 && (
-                              <div>Qty Sent: {stage.quantitySent}</div>
-                            )}
-                            {stage.receivedQuantity > 0 && (
-                              <div>Qty Received: {stage.receivedQuantity}</div>
-                            )}
-                            {stage.sentDateTime && (
-                              <div>
-                                Sent:{" "}
-                                {new Date(stage.sentDateTime).toLocaleString(
-                                  "en-IN",
-                                )}
-                              </div>
-                            )}
-                            {stage.receivedDateTime && (
-                              <div>
-                                Received:{" "}
-                                {new Date(
-                                  stage.receivedDateTime,
-                                ).toLocaleString("en-IN")}
-                              </div>
-                            )}
-                            {stage.sentToVendorName && (
-                              <div>Sent To: {stage.sentToVendorName}</div>
-                            )}
-                            {stage.notes && <div>Notes: {stage.notes}</div>}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-          </section>
-
-          {/* Tab — Inspection (QMS Phase 2) */}
-          <section id="section-inspection" className="mt-4 scroll-mt-24">
-            <ProjectInspectionTab projectId={projectId} />
-          </section>
-
-          {/* Tab — QMS (Phase 32, Task #175) */}
-          <section id="section-qms" className="mt-4 scroll-mt-24">
-            <ProjectQmsInspectionsTab projectId={projectId} />
-          </section>
-
-          {/* Tab 7 — Delivery Details */}
-          <section id="section-delivery" className="mt-4 scroll-mt-24">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">Delivery Details</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div className="space-y-1.5">
-                    <Label htmlFor="del-date">Delivery Date</Label>
-                    <Input
-                      id="del-date"
-                      type="date"
-                      value={delivery.deliveryDate}
-                      onChange={(e) =>
-                        setDelivery((d) => ({
-                          ...d,
-                          deliveryDate: e.target.value,
-                        }))
-                      }
-                      data-ocid="project-detail.delivery.input"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="del-vehicle">Vehicle Number</Label>
-                    <Input
-                      id="del-vehicle"
-                      placeholder="e.g. MH12-AB-1234"
-                      value={delivery.vehicleNumber}
-                      onChange={(e) =>
-                        setDelivery((d) => ({
-                          ...d,
-                          vehicleNumber: e.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="space-y-1.5 sm:col-span-2">
-                    <Label htmlFor="del-dest">Delivery Destination</Label>
-                    <Input
-                      id="del-dest"
-                      placeholder="Delivery address or location"
-                      value={delivery.deliveryDestination}
-                      onChange={(e) =>
-                        setDelivery((d) => ({
-                          ...d,
-                          deliveryDestination: e.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label htmlFor="del-challan">Delivery Challan No</Label>
-                    <Input
-                      id="del-challan"
-                      placeholder="e.g. DC-2026-001"
-                      value={delivery.deliveryChallan}
-                      onChange={(e) =>
-                        setDelivery((d) => ({
-                          ...d,
-                          deliveryChallan: e.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                </div>
-                <div className="pt-2">
-                  {isAdmin && (
-                    <Button
-                      onClick={handleSaveDelivery}
-                      data-ocid="project-detail.delivery.save_button"
-                    >
-                      <Save className="w-4 h-4 mr-1.5" /> Save Delivery
-                    </Button>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-          </section>
-
-          {/* Tab 8 — Material Usage */}
-          <section
-            id="section-material-usage"
-            className="mt-4 space-y-4 scroll-mt-24"
-          >
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold">Material Usage</h2>
-              {pCreateInventory && (
-                <Button
-                  size="sm"
-                  onClick={() => setUsageDialog(true)}
-                  data-ocid="project-detail.material-usage.open_modal_button"
-                >
-                  <Plus className="w-3.5 h-3.5 mr-1" /> Add Usage
-                </Button>
-              )}
-            </div>
-
-            <div className="table-wrapper">
-              <div
-                className="rounded-md border"
-                data-ocid="project-detail.material-usage.table"
-              >
-                <Table>
-                  <TableHeader>
-                    <TableRow className="bg-muted/40">
-                      <TableHead className="text-xs font-semibold">
-                        Material
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold">
-                        Qty Used
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold">
-                        Unit
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold">
-                        Date
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold">
-                        Notes
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold w-16">
-                        Del
-                      </TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {projUsages.map((u, i) => {
-                      const invItem = inventoryItems.find(
-                        (x) => x.id === u.inventoryItemId,
-                      );
-                      return (
-                        <TableRow
-                          key={u.id}
-                          data-ocid={`project-detail.material-usage.item.${i + 1}`}
-                        >
-                          <TableCell
-                            className={cn(
-                              "font-medium text-sm",
-                              onViewInventoryUsage &&
-                                "cursor-pointer hover:underline",
-                            )}
-                            role={onViewInventoryUsage ? "button" : undefined}
-                            tabIndex={onViewInventoryUsage ? 0 : undefined}
-                            onClick={
-                              onViewInventoryUsage
-                                ? () => onViewInventoryUsage(u.id)
-                                : undefined
-                            }
-                            onKeyDown={
-                              onViewInventoryUsage
-                                ? (e) => {
-                                    if (e.key === "Enter" || e.key === " ") {
-                                      e.preventDefault();
-                                      onViewInventoryUsage(u.id);
-                                    }
-                                  }
-                                : undefined
-                            }
-                          >
-                            {u.materialName}
-                          </TableCell>
-                          <TableCell className="text-sm font-mono">
-                            {u.quantityUsed}
-                          </TableCell>
-                          <TableCell className="text-xs text-muted-foreground">
-                            {invItem?.unit ?? ""}
-                          </TableCell>
-                          <TableCell className="text-xs">
-                            {u.usedDate}
-                          </TableCell>
-                          <TableCell className="text-xs text-muted-foreground">
-                            {u.notes || "—"}
-                          </TableCell>
-                          <TableCell>
-                            {inventoryEdit && (
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-7 w-7"
-                                title="Edit usage"
-                                aria-label="Edit usage"
-                                onClick={() => {
-                                  setEditUsageId(u.id);
-                                  setEditUsageForm({
-                                    quantityUsed: String(u.quantityUsed),
-                                    usedDate: u.usedDate,
-                                    notes: u.notes || "",
-                                  });
-                                }}
-                              >
-                                <Pencil className="w-3.5 h-3.5" />
-                              </Button>
-                            )}
-                            {inventoryDelete && (
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="h-7 w-7 text-destructive hover:text-destructive"
-                                title="Delete usage"
-                                aria-label="Delete usage"
-                                onClick={async () => {
-                                  if (!inventoryDelete) {
-                                    alert("Access restricted");
-                                    return;
-                                  }
-                                  const result =
-                                    await deleteInventoryUsageRemote(u.id);
-                                  if (result.status === "unauthenticated") {
-                                    toast.error(
-                                      "Not signed in to the server - usage was not deleted",
-                                    );
-                                    return;
-                                  }
-                                  if (
-                                    result.status === "denied" ||
-                                    result.status === "error"
-                                  ) {
-                                    toast.error(
-                                      result.error ?? "Could not delete usage",
-                                    );
-                                    return;
-                                  }
-                                  // Disclosed mechanical gap (see
-                                  // lib/inventoryUsagesApi.ts): no DB
-                                  // trigger restores stock on delete -
-                                  // explicitly compensate to preserve
-                                  // existing behavior.
-                                  const restoreResult =
-                                    await restoreInventoryStockRemote(
-                                      u.inventoryItemId,
-                                      u.quantityUsed,
-                                    );
-                                  if (restoreResult.status !== "success") {
-                                    toast.error(
-                                      "Usage deleted, but stock restore failed - please verify inventory manually",
-                                    );
-                                  }
-                                  deleteMaterialUsage(
-                                    u.id,
-                                    u.inventoryItemId,
-                                    u.quantityUsed,
-                                  );
-                                  toast.success("Usage deleted");
-                                }}
-                                data-ocid={`project-detail.material-usage.delete_button.${i + 1}`}
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </Button>
-                            )}
-                          </TableCell>
-                        </TableRow>
-                      );
-                    })}
-                    {projUsages.length === 0 && (
-                      <TableRow>
-                        <TableCell
-                          colSpan={6}
-                          className="text-center py-8 text-sm text-muted-foreground"
-                          data-ocid="project-detail.material-usage.empty_state"
-                        >
-                          No material usage recorded for this project.
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
-              </div>
-            </div>
-
-            {/* Add Usage Dialog */}
-            <Dialog open={usageDialog} onOpenChange={setUsageDialog}>
-              <DialogContent className="max-w-sm">
-                <DialogHeader>
-                  <DialogTitle>Record Material Usage</DialogTitle>
-                </DialogHeader>
-                <div className="space-y-4 py-2">
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Select Material *</Label>
-                    <Select
-                      value={usageForm.inventoryItemId}
-                      onValueChange={(v) =>
-                        setUsageForm((f) => ({
-                          ...f,
-                          inventoryItemId: v,
-                          quantityUsed: "",
-                        }))
-                      }
-                    >
-                      <SelectTrigger data-ocid="project-detail.material-usage.select">
-                        <SelectValue placeholder="Choose material..." />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {inventoryItems.map((item) => (
-                          <SelectItem
-                            key={item.id}
-                            value={item.id}
-                            disabled={item.quantityAvailable === 0}
-                          >
-                            <span
-                              className={
-                                item.quantityAvailable === 0 ? "opacity-40" : ""
-                              }
-                            >
-                              {item.name} – Stock: {item.quantityAvailable}{" "}
-                              {item.unit}
-                            </span>
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    {selectedUsageItem && (
-                      <p className="text-xs text-muted-foreground">
-                        Available:{" "}
-                        <span className="font-medium text-foreground">
-                          {selectedUsageItem.quantityAvailable}{" "}
-                          {selectedUsageItem.unit}
-                        </span>
-                      </p>
-                    )}
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Quantity Used *</Label>
-                    <Input
-                      type="number"
-                      min="1"
-                      max={selectedUsageItem?.quantityAvailable ?? undefined}
-                      placeholder="0"
-                      value={usageForm.quantityUsed}
-                      onChange={(e) =>
-                        setUsageForm((f) => ({
-                          ...f,
-                          quantityUsed: e.target.value,
-                        }))
-                      }
-                      data-ocid="project-detail.material-usage.input"
-                    />
-                    {selectedUsageItem &&
-                      Number(usageForm.quantityUsed) >
-                        selectedUsageItem.quantityAvailable && (
-                        <p
-                          className="text-xs text-destructive"
-                          data-ocid="project-detail.material-usage.error_state"
-                        >
-                          Exceeds available stock (
-                          {selectedUsageItem.quantityAvailable}{" "}
-                          {selectedUsageItem.unit})
-                        </p>
-                      )}
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Date Used</Label>
-                    <Input
-                      type="date"
-                      value={usageForm.usedDate}
-                      onChange={(e) =>
-                        setUsageForm((f) => ({
-                          ...f,
-                          usedDate: e.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Notes</Label>
-                    <Textarea
-                      rows={2}
-                      className="text-xs"
-                      placeholder="Optional notes..."
-                      value={usageForm.notes}
-                      onChange={(e) =>
-                        setUsageForm((f) => ({ ...f, notes: e.target.value }))
-                      }
-                      data-ocid="project-detail.material-usage.textarea"
-                    />
-                  </div>
-                </div>
-                <DialogFooter>
-                  <Button
-                    variant="outline"
-                    onClick={() => setUsageDialog(false)}
-                    data-ocid="project-detail.material-usage.cancel_button"
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    onClick={handleAddUsage}
-                    disabled={
-                      !!selectedUsageItem &&
-                      Number(usageForm.quantityUsed) >
-                        selectedUsageItem.quantityAvailable
-                    }
-                    data-ocid="project-detail.material-usage.submit_button"
-                  >
-                    Save Usage
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
-
-            {/* Edit Usage Dialog */}
-            <Dialog
-              open={!!editUsageId}
-              onOpenChange={(o) => {
-                if (!o) {
-                  setEditUsageId(null);
-                  setEditUsageForm(null);
-                }
-              }}
-            >
-              <DialogContent className="max-w-sm">
-                <DialogHeader>
-                  <DialogTitle>Edit Material Usage</DialogTitle>
-                </DialogHeader>
-                {editUsageForm && (
-                  <div className="space-y-4 py-2">
-                    <div className="space-y-1.5">
-                      <Label className="text-xs">Quantity Used *</Label>
-                      <Input
-                        type="number"
-                        min="1"
-                        value={editUsageForm.quantityUsed}
-                        onChange={(e) =>
-                          setEditUsageForm((f) =>
-                            f ? { ...f, quantityUsed: e.target.value } : f,
-                          )
-                        }
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label className="text-xs">Date Used</Label>
-                      <Input
-                        type="date"
-                        value={editUsageForm.usedDate}
-                        onChange={(e) =>
-                          setEditUsageForm((f) =>
-                            f ? { ...f, usedDate: e.target.value } : f,
-                          )
-                        }
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label className="text-xs">Notes</Label>
-                      <Textarea
-                        rows={2}
-                        className="text-xs"
-                        value={editUsageForm.notes}
-                        onChange={(e) =>
-                          setEditUsageForm((f) =>
-                            f ? { ...f, notes: e.target.value } : f,
-                          )
-                        }
-                      />
-                    </div>
-                  </div>
-                )}
-                <DialogFooter>
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      setEditUsageId(null);
-                      setEditUsageForm(null);
-                    }}
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    onClick={async () => {
-                      if (!editUsageId || !editUsageForm) return;
-                      const existing = materialUsages.find(
-                        (x) => x.id === editUsageId,
-                      );
-                      if (!existing) return;
-                      const result = await updateInventoryUsageRemote({
-                        ...existing,
-                        quantityUsed: Number(editUsageForm.quantityUsed),
-                        usedDate: editUsageForm.usedDate,
-                        notes: editUsageForm.notes,
-                      });
-                      if (result.status === "unauthenticated") {
-                        toast.error(
-                          "Not signed in to the server - usage was not saved",
-                        );
-                        return;
-                      }
-                      if (
-                        result.status === "denied" ||
-                        result.status === "error"
-                      ) {
-                        toast.error(result.error ?? "Could not save usage");
-                        return;
-                      }
-                      if (!result.data) {
-                        toast.error("Could not save usage");
-                        return;
-                      }
-                      // Same pre-existing behavior as before this
-                      // migration: updateMaterialUsage does NOT adjust
-                      // stock, matching the DB's own lack of a
-                      // recompute-on-update trigger.
-                      updateMaterialUsage(result.data);
-                      setEditUsageId(null);
-                      setEditUsageForm(null);
-                      toast.success("Usage updated");
-                    }}
-                  >
-                    Save
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
-          </section>
-
-          {/* Tab 9 — Bill of Materials */}
-          <section id="section-bom" className="mt-4 space-y-4 scroll-mt-24">
-            <div className="flex items-center justify-between">
-              <h2 className="text-sm font-semibold">Bill of Materials</h2>
-              {bomCreate && (
-                <Button
-                  size="sm"
-                  onClick={openAddBom}
-                  data-ocid="project-detail.bom.open_modal_button"
-                >
-                  <Plus className="w-3.5 h-3.5 mr-1" /> Add Item
-                </Button>
-              )}
-            </div>
-
-            <div className="table-wrapper">
-              <div
-                className="rounded-md border"
-                data-ocid="project-detail.bom.table"
-              >
-                <Table>
-                  <TableHeader>
-                    <TableRow className="bg-muted/40">
-                      <TableHead className="text-xs font-semibold">
-                        Material
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold">
-                        Required Qty
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold">
-                        Available Stock
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold">
-                        Shortage
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold">
-                        Est. Price
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold">
-                        Est. Cost
-                      </TableHead>
-                      <TableHead className="text-xs font-semibold w-20">
-                        Actions
-                      </TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {projBomItems.map((b, i) => {
-                      const inv = inventoryItems.find(
-                        (x) => x.id === b.inventoryItemId,
-                      );
-                      const estimatedPrice = Number(b.estimatedPrice || 0);
-                      const requiredQty = Number(b.requiredQuantity || 0);
-                      const availableQty = Number(inv?.quantityAvailable || 0);
-                      const shortage = Math.max(0, requiredQty - availableQty);
-                      const totalEstimatedCost = shortage * estimatedPrice;
-                      return (
-                        <TableRow
-                          key={b.id}
-                          data-ocid={`project-detail.bom.item.${i + 1}`}
-                        >
-                          <TableCell className="font-medium text-sm">
-                            {b.materialName}
-                          </TableCell>
-                          <TableCell className="text-sm font-mono">
-                            {requiredQty} {inv?.unit ?? ""}
-                          </TableCell>
-                          <TableCell className="text-sm font-mono">
-                            {availableQty} {inv?.unit ?? ""}
-                          </TableCell>
-                          <TableCell className="text-sm font-mono">
-                            {shortage > 0 ? (
-                              <span className="text-destructive font-semibold">
-                                {shortage} {inv?.unit ?? ""}
-                              </span>
-                            ) : (
-                              <span className="text-success font-semibold">
-                                0
-                              </span>
-                            )}
-                          </TableCell>
-                          <TableCell className="text-sm font-mono">
-                            ₹{estimatedPrice.toFixed(2)}
-                          </TableCell>
-                          <TableCell className="text-sm font-mono">
-                            {totalEstimatedCost > 0 ? (
-                              <span className="text-warning font-semibold">
-                                ₹{totalEstimatedCost.toFixed(2)}
-                              </span>
-                            ) : (
-                              <span className="text-muted-foreground">—</span>
-                            )}
-                          </TableCell>
-                          <TableCell>
-                            <div className="flex gap-1">
-                              {bomEdit && (
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-7 w-7"
-                                  onClick={() => openEditBom(b)}
-                                  title="Edit BOM item"
-                                  aria-label="Edit BOM item"
-                                  data-ocid={`project-detail.bom.edit_button.${i + 1}`}
-                                >
-                                  <Pencil className="w-3.5 h-3.5" />
-                                </Button>
-                              )}
-                              {bomDelete && (
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-7 w-7 text-destructive hover:text-destructive"
-                                  title="Delete BOM item"
-                                  aria-label="Delete BOM item"
+                                  title="Delete usage"
+                                  aria-label="Delete usage"
                                   onClick={async () => {
-                                    if (!bomDelete) {
+                                    if (!inventoryDelete) {
                                       alert("Access restricted");
                                       return;
                                     }
-                                    const result = await deleteBomItemRemote(
-                                      b.id,
-                                    );
+                                    const result =
+                                      await deleteInventoryUsageRemote(u.id);
                                     if (result.status === "unauthenticated") {
                                       toast.error(
-                                        "Not signed in to the server - BOM item was not deleted",
+                                        "Not signed in to the server - usage was not deleted",
                                       );
                                       return;
                                     }
@@ -6663,1209 +6394,1663 @@ export function ProjectDetail({
                                     ) {
                                       toast.error(
                                         result.error ??
-                                          "Could not delete BOM item",
+                                          "Could not delete usage",
                                       );
                                       return;
                                     }
-                                    deleteBomItem(b.id);
-                                    toast.success("BOM item removed");
-                                    await refreshBomRequisitions();
+                                    // Disclosed mechanical gap (see
+                                    // lib/inventoryUsagesApi.ts): no DB
+                                    // trigger restores stock on delete -
+                                    // explicitly compensate to preserve
+                                    // existing behavior.
+                                    const restoreResult =
+                                      await restoreInventoryStockRemote(
+                                        u.inventoryItemId,
+                                        u.quantityUsed,
+                                      );
+                                    if (restoreResult.status !== "success") {
+                                      toast.error(
+                                        "Usage deleted, but stock restore failed - please verify inventory manually",
+                                      );
+                                    }
+                                    deleteMaterialUsage(
+                                      u.id,
+                                      u.inventoryItemId,
+                                      u.quantityUsed,
+                                    );
+                                    toast.success("Usage deleted");
                                   }}
-                                  data-ocid={`project-detail.bom.delete_button.${i + 1}`}
+                                  data-ocid={`project-detail.material-usage.delete_button.${i + 1}`}
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
                                 </Button>
                               )}
-                            </div>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                      {projUsages.length === 0 && (
+                        <TableRow>
+                          <TableCell
+                            colSpan={6}
+                            className="text-center py-8 text-sm text-muted-foreground"
+                            data-ocid="project-detail.material-usage.empty_state"
+                          >
+                            No material usage recorded for this project.
                           </TableCell>
                         </TableRow>
-                      );
-                    })}
-                    {projBomItems.length === 0 && (
-                      <TableRow>
-                        <TableCell
-                          colSpan={7}
-                          className="text-center py-8 text-sm text-muted-foreground"
-                          data-ocid="project-detail.bom.empty_state"
-                        >
-                          No BOM items added yet. Click 'Add Item' to plan
-                          materials.
-                        </TableCell>
-                      </TableRow>
-                    )}
-                  </TableBody>
-                </Table>
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
               </div>
-            </div>
 
-            {/* Add/Edit BOM Dialog */}
-            <Dialog open={bomDialog} onOpenChange={setBomDialog}>
-              <DialogContent className="max-w-sm">
-                <DialogHeader>
-                  <DialogTitle>
-                    {editingBomId ? "Edit BOM Item" : "Add BOM Item"}
-                  </DialogTitle>
-                </DialogHeader>
-                <div className="space-y-4 py-2">
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Select Material *</Label>
-                    <Select
-                      value={bomForm.inventoryItemId}
-                      onValueChange={(v) =>
-                        setBomForm((f) => ({
-                          ...f,
-                          inventoryItemId: v,
-                          requiredQuantity: "",
-                        }))
-                      }
-                    >
-                      <SelectTrigger data-ocid="project-detail.bom.select">
-                        <SelectValue placeholder="Choose material..." />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {inventoryItems.map((item) => (
-                          <SelectItem key={item.id} value={item.id}>
-                            {item.name} (Stock: {item.quantityAvailable}{" "}
-                            {item.unit})
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    {selectedBomItem && (
-                      <p className="text-xs text-muted-foreground">
-                        Available:{" "}
-                        <span className="font-medium text-foreground">
-                          {selectedBomItem.quantityAvailable}{" "}
-                          {selectedBomItem.unit}
-                        </span>
-                      </p>
-                    )}
-                  </div>
-                  {pCreateInventory && (
-                    <div className="flex justify-end">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        className="h-7 text-xs text-primary"
-                        onClick={() => setNewMatDialog(true)}
-                        data-ocid="project-detail.bom.add_new_material_button"
+              {/* Add Usage Dialog */}
+              <Dialog open={usageDialog} onOpenChange={setUsageDialog}>
+                <DialogContent className="max-w-sm">
+                  <DialogHeader>
+                    <DialogTitle>Record Material Usage</DialogTitle>
+                  </DialogHeader>
+                  <div className="space-y-4 py-2">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Select Material *</Label>
+                      <Select
+                        value={usageForm.inventoryItemId}
+                        onValueChange={(v) =>
+                          setUsageForm((f) => ({
+                            ...f,
+                            inventoryItemId: v,
+                            quantityUsed: "",
+                          }))
+                        }
                       >
-                        <Plus className="w-3 h-3 mr-1" /> Add New Material
-                      </Button>
+                        <SelectTrigger data-ocid="project-detail.material-usage.select">
+                          <SelectValue placeholder="Choose material..." />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {inventoryItems.map((item) => (
+                            <SelectItem
+                              key={item.id}
+                              value={item.id}
+                              disabled={item.quantityAvailable === 0}
+                            >
+                              <span
+                                className={
+                                  item.quantityAvailable === 0
+                                    ? "opacity-40"
+                                    : ""
+                                }
+                              >
+                                {item.name} – Stock: {item.quantityAvailable}{" "}
+                                {item.unit}
+                              </span>
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      {selectedUsageItem && (
+                        <p className="text-xs text-muted-foreground">
+                          Available:{" "}
+                          <span className="font-medium text-foreground">
+                            {selectedUsageItem.quantityAvailable}{" "}
+                            {selectedUsageItem.unit}
+                          </span>
+                        </p>
+                      )}
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Quantity Used *</Label>
+                      <Input
+                        type="number"
+                        min="1"
+                        max={selectedUsageItem?.quantityAvailable ?? undefined}
+                        placeholder="0"
+                        value={usageForm.quantityUsed}
+                        onChange={(e) =>
+                          setUsageForm((f) => ({
+                            ...f,
+                            quantityUsed: e.target.value,
+                          }))
+                        }
+                        data-ocid="project-detail.material-usage.input"
+                      />
+                      {selectedUsageItem &&
+                        Number(usageForm.quantityUsed) >
+                          selectedUsageItem.quantityAvailable && (
+                          <p
+                            className="text-xs text-destructive"
+                            data-ocid="project-detail.material-usage.error_state"
+                          >
+                            Exceeds available stock (
+                            {selectedUsageItem.quantityAvailable}{" "}
+                            {selectedUsageItem.unit})
+                          </p>
+                        )}
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Date Used</Label>
+                      <Input
+                        type="date"
+                        value={usageForm.usedDate}
+                        onChange={(e) =>
+                          setUsageForm((f) => ({
+                            ...f,
+                            usedDate: e.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Notes</Label>
+                      <Textarea
+                        rows={2}
+                        className="text-xs"
+                        placeholder="Optional notes..."
+                        value={usageForm.notes}
+                        onChange={(e) =>
+                          setUsageForm((f) => ({ ...f, notes: e.target.value }))
+                        }
+                        data-ocid="project-detail.material-usage.textarea"
+                      />
+                    </div>
+                  </div>
+                  <DialogFooter>
+                    <Button
+                      variant="outline"
+                      onClick={() => setUsageDialog(false)}
+                      data-ocid="project-detail.material-usage.cancel_button"
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      onClick={handleAddUsage}
+                      disabled={
+                        !!selectedUsageItem &&
+                        Number(usageForm.quantityUsed) >
+                          selectedUsageItem.quantityAvailable
+                      }
+                      data-ocid="project-detail.material-usage.submit_button"
+                    >
+                      Save Usage
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+
+              {/* Edit Usage Dialog */}
+              <Dialog
+                open={!!editUsageId}
+                onOpenChange={(o) => {
+                  if (!o) {
+                    setEditUsageId(null);
+                    setEditUsageForm(null);
+                  }
+                }}
+              >
+                <DialogContent className="max-w-sm">
+                  <DialogHeader>
+                    <DialogTitle>Edit Material Usage</DialogTitle>
+                  </DialogHeader>
+                  {editUsageForm && (
+                    <div className="space-y-4 py-2">
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">Quantity Used *</Label>
+                        <Input
+                          type="number"
+                          min="1"
+                          value={editUsageForm.quantityUsed}
+                          onChange={(e) =>
+                            setEditUsageForm((f) =>
+                              f ? { ...f, quantityUsed: e.target.value } : f,
+                            )
+                          }
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">Date Used</Label>
+                        <Input
+                          type="date"
+                          value={editUsageForm.usedDate}
+                          onChange={(e) =>
+                            setEditUsageForm((f) =>
+                              f ? { ...f, usedDate: e.target.value } : f,
+                            )
+                          }
+                        />
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">Notes</Label>
+                        <Textarea
+                          rows={2}
+                          className="text-xs"
+                          value={editUsageForm.notes}
+                          onChange={(e) =>
+                            setEditUsageForm((f) =>
+                              f ? { ...f, notes: e.target.value } : f,
+                            )
+                          }
+                        />
+                      </div>
                     </div>
                   )}
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Required Quantity *</Label>
-                    <Input
-                      type="number"
-                      min="1"
-                      placeholder="0"
-                      value={bomForm.requiredQuantity}
-                      onChange={(e) =>
-                        setBomForm((f) => ({
-                          ...f,
-                          requiredQuantity: e.target.value,
-                        }))
-                      }
-                      data-ocid="project-detail.bom.input"
-                    />
-                    {selectedBomItem &&
-                      Number(bomForm.requiredQuantity) > 0 && (
-                        <p className="text-xs text-muted-foreground">
-                          Shortage:{" "}
-                          <span
-                            className={
-                              Number(bomForm.requiredQuantity) >
-                              selectedBomItem.quantityAvailable
-                                ? "text-destructive font-semibold"
-                                : "text-success font-semibold"
-                            }
+                  <DialogFooter>
+                    <Button
+                      variant="outline"
+                      onClick={() => {
+                        setEditUsageId(null);
+                        setEditUsageForm(null);
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      onClick={async () => {
+                        if (!editUsageId || !editUsageForm) return;
+                        const existing = materialUsages.find(
+                          (x) => x.id === editUsageId,
+                        );
+                        if (!existing) return;
+                        const result = await updateInventoryUsageRemote({
+                          ...existing,
+                          quantityUsed: Number(editUsageForm.quantityUsed),
+                          usedDate: editUsageForm.usedDate,
+                          notes: editUsageForm.notes,
+                        });
+                        if (result.status === "unauthenticated") {
+                          toast.error(
+                            "Not signed in to the server - usage was not saved",
+                          );
+                          return;
+                        }
+                        if (
+                          result.status === "denied" ||
+                          result.status === "error"
+                        ) {
+                          toast.error(result.error ?? "Could not save usage");
+                          return;
+                        }
+                        if (!result.data) {
+                          toast.error("Could not save usage");
+                          return;
+                        }
+                        // Same pre-existing behavior as before this
+                        // migration: updateMaterialUsage does NOT adjust
+                        // stock, matching the DB's own lack of a
+                        // recompute-on-update trigger.
+                        updateMaterialUsage(result.data);
+                        setEditUsageId(null);
+                        setEditUsageForm(null);
+                        toast.success("Usage updated");
+                      }}
+                    >
+                      Save
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+            </section>
+          )}
+
+          {/* Tab 9 — Bill of Materials */}
+          {activeTab === "bom" && (
+            <section id="section-bom" className="mt-4 space-y-4 scroll-mt-24">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold">Bill of Materials</h2>
+                {bomCreate && (
+                  <Button
+                    size="sm"
+                    onClick={openAddBom}
+                    data-ocid="project-detail.bom.open_modal_button"
+                  >
+                    <Plus className="w-3.5 h-3.5 mr-1" /> Add Item
+                  </Button>
+                )}
+              </div>
+
+              <div className="table-wrapper">
+                <div
+                  className="rounded-md border"
+                  data-ocid="project-detail.bom.table"
+                >
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="bg-muted/40">
+                        <TableHead className="text-xs font-semibold">
+                          Material
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold">
+                          Required Qty
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold">
+                          Available Stock
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold">
+                          Shortage
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold">
+                          Est. Price
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold">
+                          Est. Cost
+                        </TableHead>
+                        <TableHead className="text-xs font-semibold w-20">
+                          Actions
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {projBomItems.map((b, i) => {
+                        const inv = inventoryItems.find(
+                          (x) => x.id === b.inventoryItemId,
+                        );
+                        const estimatedPrice = Number(b.estimatedPrice || 0);
+                        const requiredQty = Number(b.requiredQuantity || 0);
+                        const availableQty = Number(
+                          inv?.quantityAvailable || 0,
+                        );
+                        const shortage = Math.max(
+                          0,
+                          requiredQty - availableQty,
+                        );
+                        const totalEstimatedCost = shortage * estimatedPrice;
+                        return (
+                          <TableRow
+                            key={b.id}
+                            data-ocid={`project-detail.bom.item.${i + 1}`}
                           >
-                            {Math.max(
-                              0,
-                              Number(bomForm.requiredQuantity) -
-                                selectedBomItem.quantityAvailable,
-                            )}{" "}
+                            <TableCell className="font-medium text-sm">
+                              {b.materialName}
+                            </TableCell>
+                            <TableCell className="text-sm font-mono">
+                              {requiredQty} {inv?.unit ?? ""}
+                            </TableCell>
+                            <TableCell className="text-sm font-mono">
+                              {availableQty} {inv?.unit ?? ""}
+                            </TableCell>
+                            <TableCell className="text-sm font-mono">
+                              {shortage > 0 ? (
+                                <span className="text-destructive font-semibold">
+                                  {shortage} {inv?.unit ?? ""}
+                                </span>
+                              ) : (
+                                <span className="text-success font-semibold">
+                                  0
+                                </span>
+                              )}
+                            </TableCell>
+                            <TableCell className="text-sm font-mono">
+                              ₹{estimatedPrice.toFixed(2)}
+                            </TableCell>
+                            <TableCell className="text-sm font-mono">
+                              {totalEstimatedCost > 0 ? (
+                                <span className="text-warning font-semibold">
+                                  ₹{totalEstimatedCost.toFixed(2)}
+                                </span>
+                              ) : (
+                                <span className="text-muted-foreground">—</span>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              <div className="flex gap-1">
+                                {bomEdit && (
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-7 w-7"
+                                    onClick={() => openEditBom(b)}
+                                    title="Edit BOM item"
+                                    aria-label="Edit BOM item"
+                                    data-ocid={`project-detail.bom.edit_button.${i + 1}`}
+                                  >
+                                    <Pencil className="w-3.5 h-3.5" />
+                                  </Button>
+                                )}
+                                {bomDelete && (
+                                  <Button
+                                    variant="ghost"
+                                    size="icon"
+                                    className="h-7 w-7 text-destructive hover:text-destructive"
+                                    title="Delete BOM item"
+                                    aria-label="Delete BOM item"
+                                    onClick={async () => {
+                                      if (!bomDelete) {
+                                        alert("Access restricted");
+                                        return;
+                                      }
+                                      const result = await deleteBomItemRemote(
+                                        b.id,
+                                      );
+                                      if (result.status === "unauthenticated") {
+                                        toast.error(
+                                          "Not signed in to the server - BOM item was not deleted",
+                                        );
+                                        return;
+                                      }
+                                      if (
+                                        result.status === "denied" ||
+                                        result.status === "error"
+                                      ) {
+                                        toast.error(
+                                          result.error ??
+                                            "Could not delete BOM item",
+                                        );
+                                        return;
+                                      }
+                                      deleteBomItem(b.id);
+                                      toast.success("BOM item removed");
+                                      await refreshBomRequisitions();
+                                    }}
+                                    data-ocid={`project-detail.bom.delete_button.${i + 1}`}
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </Button>
+                                )}
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                      {projBomItems.length === 0 && (
+                        <TableRow>
+                          <TableCell
+                            colSpan={7}
+                            className="text-center py-8 text-sm text-muted-foreground"
+                            data-ocid="project-detail.bom.empty_state"
+                          >
+                            No BOM items added yet. Click 'Add Item' to plan
+                            materials.
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </TableBody>
+                  </Table>
+                </div>
+              </div>
+
+              {/* Add/Edit BOM Dialog */}
+              <Dialog open={bomDialog} onOpenChange={setBomDialog}>
+                <DialogContent className="max-w-sm">
+                  <DialogHeader>
+                    <DialogTitle>
+                      {editingBomId ? "Edit BOM Item" : "Add BOM Item"}
+                    </DialogTitle>
+                  </DialogHeader>
+                  <div className="space-y-4 py-2">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Select Material *</Label>
+                      <Select
+                        value={bomForm.inventoryItemId}
+                        onValueChange={(v) =>
+                          setBomForm((f) => ({
+                            ...f,
+                            inventoryItemId: v,
+                            requiredQuantity: "",
+                          }))
+                        }
+                      >
+                        <SelectTrigger data-ocid="project-detail.bom.select">
+                          <SelectValue placeholder="Choose material..." />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {inventoryItems.map((item) => (
+                            <SelectItem key={item.id} value={item.id}>
+                              {item.name} (Stock: {item.quantityAvailable}{" "}
+                              {item.unit})
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      {selectedBomItem && (
+                        <p className="text-xs text-muted-foreground">
+                          Available:{" "}
+                          <span className="font-medium text-foreground">
+                            {selectedBomItem.quantityAvailable}{" "}
                             {selectedBomItem.unit}
                           </span>
                         </p>
                       )}
+                    </div>
+                    {pCreateInventory && (
+                      <div className="flex justify-end">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 text-xs text-primary"
+                          onClick={() => setNewMatDialog(true)}
+                          data-ocid="project-detail.bom.add_new_material_button"
+                        >
+                          <Plus className="w-3 h-3 mr-1" /> Add New Material
+                        </Button>
+                      </div>
+                    )}
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Required Quantity *</Label>
+                      <Input
+                        type="number"
+                        min="1"
+                        placeholder="0"
+                        value={bomForm.requiredQuantity}
+                        onChange={(e) =>
+                          setBomForm((f) => ({
+                            ...f,
+                            requiredQuantity: e.target.value,
+                          }))
+                        }
+                        data-ocid="project-detail.bom.input"
+                      />
+                      {selectedBomItem &&
+                        Number(bomForm.requiredQuantity) > 0 && (
+                          <p className="text-xs text-muted-foreground">
+                            Shortage:{" "}
+                            <span
+                              className={
+                                Number(bomForm.requiredQuantity) >
+                                selectedBomItem.quantityAvailable
+                                  ? "text-destructive font-semibold"
+                                  : "text-success font-semibold"
+                              }
+                            >
+                              {Math.max(
+                                0,
+                                Number(bomForm.requiredQuantity) -
+                                  selectedBomItem.quantityAvailable,
+                              )}{" "}
+                              {selectedBomItem.unit}
+                            </span>
+                          </p>
+                        )}
+                    </div>
                   </div>
-                </div>
-                <DialogFooter>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setBomDialog(false)}
-                    data-ocid="project-detail.bom.cancel_button"
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    size="sm"
-                    onClick={handleSaveBom}
-                    data-ocid="project-detail.bom.submit_button"
-                  >
-                    Save
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
-
-            {/* Add New Material Sub-Modal */}
-            <Dialog open={newMatDialog} onOpenChange={setNewMatDialog}>
-              <DialogContent className="max-w-xs">
-                <DialogHeader>
-                  <DialogTitle>Add New Material</DialogTitle>
-                </DialogHeader>
-                <div className="space-y-4 py-2">
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Material Name *</Label>
-                    <Input
-                      placeholder="e.g. MS Sheet 3mm"
-                      value={newMatForm.name}
-                      onChange={(e) =>
-                        setNewMatForm((f) => ({ ...f, name: e.target.value }))
-                      }
-                      data-ocid="project-detail.bom.new_material_name_input"
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">Unit</Label>
-                    <Select
-                      value={newMatForm.unit}
-                      onValueChange={(v) =>
-                        setNewMatForm((f) => ({ ...f, unit: v }))
-                      }
+                  <DialogFooter>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setBomDialog(false)}
+                      data-ocid="project-detail.bom.cancel_button"
                     >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {[
-                          "pcs",
-                          "kg",
-                          "sheets",
-                          "meters",
-                          "liters",
-                          "boxes",
-                          "rolls",
-                        ].map((u) => (
-                          <SelectItem key={u} value={u}>
-                            {u}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                      Cancel
+                    </Button>
+                    <Button
+                      size="sm"
+                      onClick={handleSaveBom}
+                      data-ocid="project-detail.bom.submit_button"
+                    >
+                      Save
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+
+              {/* Add New Material Sub-Modal */}
+              <Dialog open={newMatDialog} onOpenChange={setNewMatDialog}>
+                <DialogContent className="max-w-xs">
+                  <DialogHeader>
+                    <DialogTitle>Add New Material</DialogTitle>
+                  </DialogHeader>
+                  <div className="space-y-4 py-2">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Material Name *</Label>
+                      <Input
+                        placeholder="e.g. MS Sheet 3mm"
+                        value={newMatForm.name}
+                        onChange={(e) =>
+                          setNewMatForm((f) => ({ ...f, name: e.target.value }))
+                        }
+                        data-ocid="project-detail.bom.new_material_name_input"
+                      />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Unit</Label>
+                      <Select
+                        value={newMatForm.unit}
+                        onValueChange={(v) =>
+                          setNewMatForm((f) => ({ ...f, unit: v }))
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {[
+                            "pcs",
+                            "kg",
+                            "sheets",
+                            "meters",
+                            "liters",
+                            "boxes",
+                            "rolls",
+                          ].map((u) => (
+                            <SelectItem key={u} value={u}>
+                              {u}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">
+                        Estimated Price (optional)
+                      </Label>
+                      <Input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        placeholder="0.00"
+                        value={newMatForm.estimatedPrice}
+                        onChange={(e) =>
+                          setNewMatForm((f) => ({
+                            ...f,
+                            estimatedPrice: e.target.value,
+                          }))
+                        }
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Material will be added to the material list with 0 stock
+                      and auto-selected.
+                    </p>
                   </div>
-                  <div className="space-y-1.5">
-                    <Label className="text-xs">
-                      Estimated Price (optional)
-                    </Label>
-                    <Input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      placeholder="0.00"
-                      value={newMatForm.estimatedPrice}
-                      onChange={(e) =>
-                        setNewMatForm((f) => ({
-                          ...f,
-                          estimatedPrice: e.target.value,
-                        }))
-                      }
-                    />
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    Material will be added to the material list with 0 stock and
-                    auto-selected.
-                  </p>
-                </div>
-                <DialogFooter>
-                  <Button
-                    variant="outline"
-                    onClick={() => setNewMatDialog(false)}
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    onClick={handleAddNewMaterial}
-                    data-ocid="project-detail.bom.new_material_save_button"
-                  >
-                    Add Material
-                  </Button>
-                </DialogFooter>
-              </DialogContent>
-            </Dialog>
-          </section>
+                  <DialogFooter>
+                    <Button
+                      variant="outline"
+                      onClick={() => setNewMatDialog(false)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      onClick={handleAddNewMaterial}
+                      data-ocid="project-detail.bom.new_material_save_button"
+                    >
+                      Add Material
+                    </Button>
+                  </DialogFooter>
+                </DialogContent>
+              </Dialog>
+            </section>
+          )}
 
           {/* Tab 10 — Items */}
-          <section
-            id="section-items"
-            className="mt-4 space-y-4 scroll-mt-24"
-            data-ocid="project-detail.items.panel"
-          >
-            <ProjectItemsTab
-              projectId={projectId}
-              projectItems={projectItems}
-              addProjectItem={addProjectItem}
-              updateProjectItem={updateProjectItem}
-              deleteProjectItem={deleteProjectItem}
-              canAdd={pCreate}
-              canEditItem={pEdit}
-              canDelete={pDelete}
-            />
-          </section>
+          {activeTab === "items" && (
+            <section
+              id="section-items"
+              className="mt-4 space-y-4 scroll-mt-24"
+              data-ocid="project-detail.items.panel"
+            >
+              <ProjectItemsTab
+                projectId={projectId}
+                projectItems={projectItems}
+                addProjectItem={addProjectItem}
+                updateProjectItem={updateProjectItem}
+                deleteProjectItem={deleteProjectItem}
+                canAdd={pCreate}
+                canEditItem={pEdit}
+                canDelete={pDelete}
+              />
+            </section>
+          )}
 
           {/* Profit & Costing Tab */}
-          <section
-            id="section-profit"
-            className="mt-4 space-y-4 scroll-mt-24"
-            data-ocid="project-detail.profit.panel"
-          >
-            {(() => {
-              const projectCosting = internalCostings.find(
-                (c) => c.projectId === projectId,
-              );
-              const projectInvoices = (invoices || []).filter(
-                (inv) =>
-                  inv.projectId === projectId && inv.invoiceType !== "proforma",
-              );
-              const totalRevenue = projectInvoices.reduce(
-                (sum, inv) => sum + (inv.totalAmount || 0),
-                0,
-              );
-              const projectMaterialUsages = (materialUsages || []).filter(
-                (u) => u.projectId === projectId,
-              );
-              const materialCost = projectMaterialUsages.reduce(
-                (sum, usage) => {
-                  const item = (inventoryItems || []).find(
-                    (i) =>
-                      i.id === usage.inventoryItemId ||
-                      i.name.trim().toLowerCase() ===
-                        (usage.materialName || "").trim().toLowerCase(),
-                  );
-                  const price = item?.lastPurchasePrice ?? 0;
-                  return sum + (usage.quantityUsed || 0) * price;
-                },
-                0,
-              );
-              const labourCost = projectCosting?.labourCost ?? 0;
-              const outsourceCost = projOutsourced.reduce(
-                (sum, o) => sum + (o.processCost || 0),
-                0,
-              );
-              const transportCost = projectCosting?.transportCost ?? 0;
-              const customCostExtra = (projectCosting?.extraCosts || []).reduce(
-                (s, c) => s + (Number(c.amount) || 0),
-                0,
-              );
-              const pettyExpenseCost = (pettyExpenses || [])
-                .filter(
-                  (e) =>
-                    e.projectId === projectId &&
-                    e.expenseMode === "Company Expense",
-                )
-                .reduce((s, e) => s + (Number(e.amount) || 0), 0);
-              const autoCost =
-                materialCost +
-                labourCost +
-                outsourceCost +
-                transportCost +
-                customCostExtra +
-                pettyExpenseCost;
-              const manualAdjustments = projectCosting?.manualAdjustments || [];
-              const addCostTotal = manualAdjustments
-                .filter((a) => a.type === "Add Cost")
-                .reduce((s, a) => s + (Number(a.amount) || 0), 0);
-              const reduceCostTotal = manualAdjustments
-                .filter((a) => a.type === "Reduce Cost")
-                .reduce((s, a) => s + (Number(a.amount) || 0), 0);
-              const adjustedCost = autoCost + addCostTotal - reduceCostTotal;
-              const profit = totalRevenue - adjustedCost;
-              const profitPct =
-                totalRevenue > 0 ? (profit / totalRevenue) * 100 : 0;
-              const isProfit = profit >= 0;
-              const hasAdjustments = addCostTotal > 0 || reduceCostTotal > 0;
-              // allProjectInvoices — hoisted to component scope above (see
-              // the comment there); this list is purely for visibility,
-              // showing every real invoice that exists for this project
-              // (including proforma — projectInvoices above deliberately
-              // excludes it, and that exclusion is correct real revenue-
-              // recognition logic, left untouched), matching what
-              // pages/Invoices.tsx itself would show if filtered to this
-              // project.
+          {activeTab === "profit" && (
+            <section
+              id="section-profit"
+              className="mt-4 space-y-4 scroll-mt-24"
+              data-ocid="project-detail.profit.panel"
+            >
+              {(() => {
+                const projectCosting = internalCostings.find(
+                  (c) => c.projectId === projectId,
+                );
+                const projectInvoices = (invoices || []).filter(
+                  (inv) =>
+                    inv.projectId === projectId &&
+                    inv.invoiceType !== "proforma",
+                );
+                const totalRevenue = projectInvoices.reduce(
+                  (sum, inv) => sum + (inv.totalAmount || 0),
+                  0,
+                );
+                const projectMaterialUsages = (materialUsages || []).filter(
+                  (u) => u.projectId === projectId,
+                );
+                const materialCost = projectMaterialUsages.reduce(
+                  (sum, usage) => {
+                    const item = (inventoryItems || []).find(
+                      (i) =>
+                        i.id === usage.inventoryItemId ||
+                        i.name.trim().toLowerCase() ===
+                          (usage.materialName || "").trim().toLowerCase(),
+                    );
+                    const price = item?.lastPurchasePrice ?? 0;
+                    return sum + (usage.quantityUsed || 0) * price;
+                  },
+                  0,
+                );
+                const labourCost = projectCosting?.labourCost ?? 0;
+                const outsourceCost = projOutsourced.reduce(
+                  (sum, o) => sum + (o.processCost || 0),
+                  0,
+                );
+                const transportCost = projectCosting?.transportCost ?? 0;
+                const customCostExtra = (
+                  projectCosting?.extraCosts || []
+                ).reduce((s, c) => s + (Number(c.amount) || 0), 0);
+                const pettyExpenseCost = (pettyExpenses || [])
+                  .filter(
+                    (e) =>
+                      e.projectId === projectId &&
+                      e.expenseMode === "Company Expense",
+                  )
+                  .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+                const autoCost =
+                  materialCost +
+                  labourCost +
+                  outsourceCost +
+                  transportCost +
+                  customCostExtra +
+                  pettyExpenseCost;
+                const manualAdjustments =
+                  projectCosting?.manualAdjustments || [];
+                const addCostTotal = manualAdjustments
+                  .filter((a) => a.type === "Add Cost")
+                  .reduce((s, a) => s + (Number(a.amount) || 0), 0);
+                const reduceCostTotal = manualAdjustments
+                  .filter((a) => a.type === "Reduce Cost")
+                  .reduce((s, a) => s + (Number(a.amount) || 0), 0);
+                const adjustedCost = autoCost + addCostTotal - reduceCostTotal;
+                const profit = totalRevenue - adjustedCost;
+                const profitPct =
+                  totalRevenue > 0 ? (profit / totalRevenue) * 100 : 0;
+                const isProfit = profit >= 0;
+                const hasAdjustments = addCostTotal > 0 || reduceCostTotal > 0;
+                // allProjectInvoices — hoisted to component scope above (see
+                // the comment there); this list is purely for visibility,
+                // showing every real invoice that exists for this project
+                // (including proforma — projectInvoices above deliberately
+                // excludes it, and that exclusion is correct real revenue-
+                // recognition logic, left untouched), matching what
+                // pages/Invoices.tsx itself would show if filtered to this
+                // project.
 
-              return (
-                <div className="space-y-4">
-                  {/* Revenue Card */}
-                  <Card>
-                    <CardHeader className="pb-2">
-                      <CardTitle className="text-sm text-muted-foreground uppercase tracking-wide">
-                        Total Revenue
-                      </CardTitle>
-                    </CardHeader>
-                    <CardContent>
-                      <p
-                        className="text-3xl font-bold text-success"
-                        data-ocid="project-detail.profit.revenue"
-                      >
-                        {fmt(totalRevenue)}
-                      </p>
-                      <p className="text-xs text-muted-foreground mt-1">
-                        From {projectInvoices.length} tax invoice
-                        {projectInvoices.length !== 1 ? "s" : ""}
-                      </p>
-                    </CardContent>
-                  </Card>
+                return (
+                  <div className="space-y-4">
+                    {/* Revenue Card */}
+                    <Card>
+                      <CardHeader className="pb-2">
+                        <CardTitle className="text-sm text-muted-foreground uppercase tracking-wide">
+                          Total Revenue
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        <p
+                          className="text-3xl font-bold text-success"
+                          data-ocid="project-detail.profit.revenue"
+                        >
+                          {fmt(totalRevenue)}
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          From {projectInvoices.length} tax invoice
+                          {projectInvoices.length !== 1 ? "s" : ""}
+                        </p>
+                      </CardContent>
+                    </Card>
 
-                  {/* Invoices — real per-invoice visibility (Model 3
+                    {/* Invoices — real per-invoice visibility (Model 3
                       Workspace comparison adoption). Every field/action
                       beyond status + balance + payment stays owned by
                       pages/Invoices.tsx / pages/Payments.tsx - this never
                       creates or edits an invoice, only pays one. */}
-                  <Card>
-                    <CardHeader className="pb-2">
-                      <div className="flex items-center justify-between">
-                        <CardTitle className="text-sm text-muted-foreground uppercase tracking-wide">
-                          Invoices
-                        </CardTitle>
-                        {onViewInvoices && allProjectInvoices.length > 0 && (
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="h-6 text-xs px-2"
-                            onClick={onViewInvoices}
-                            data-ocid="project-detail.invoices.view_all"
-                          >
-                            View all in Invoices →
-                          </Button>
-                        )}
-                      </div>
-                    </CardHeader>
-                    <CardContent className="space-y-2">
-                      {allProjectInvoices.length === 0 ? (
-                        <p className="text-xs text-muted-foreground">
-                          No invoices raised for this project yet.
-                        </p>
-                      ) : (
-                        allProjectInvoices.map((inv) => {
-                          const balance =
-                            (inv.totalAmount ?? 0) - (inv.paidAmount ?? 0);
-                          return (
-                            <div
-                              key={inv.id}
-                              className={cn(
-                                "rounded-md border border-border p-2.5",
-                                onViewInvoice &&
-                                  "cursor-pointer hover:bg-muted/40",
-                              )}
-                              role={onViewInvoice ? "button" : undefined}
-                              tabIndex={onViewInvoice ? 0 : undefined}
-                              onClick={
-                                onViewInvoice
-                                  ? () => onViewInvoice(inv.id)
-                                  : undefined
-                              }
-                              onKeyDown={
-                                onViewInvoice
-                                  ? (e) => {
-                                      if (e.key === "Enter" || e.key === " ") {
-                                        e.preventDefault();
-                                        onViewInvoice(inv.id);
-                                      }
-                                    }
-                                  : undefined
-                              }
-                              data-ocid={`project-detail.invoices.item.${inv.id}`}
+                    <Card>
+                      <CardHeader className="pb-2">
+                        <div className="flex items-center justify-between">
+                          <CardTitle className="text-sm text-muted-foreground uppercase tracking-wide">
+                            Invoices
+                          </CardTitle>
+                          {onViewInvoices && allProjectInvoices.length > 0 && (
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 text-xs px-2"
+                              onClick={onViewInvoices}
+                              data-ocid="project-detail.invoices.view_all"
                             >
-                              <div className="flex items-center justify-between gap-2">
-                                <div>
-                                  <p className="text-sm font-medium font-mono">
-                                    {inv.invoiceNumber || inv.invNo}
-                                    {inv.invoiceType === "proforma" && (
-                                      <span className="ml-1.5 text-[10px] font-sans text-muted-foreground">
-                                        Proforma
-                                      </span>
-                                    )}
-                                  </p>
-                                  <p className="text-[11px] text-muted-foreground">
-                                    Due {inv.dueDate || "—"}
-                                  </p>
-                                </div>
-                                <StatusBadge status={inv.status} />
-                              </div>
-                              <p className="text-xs text-muted-foreground mt-1.5">
-                                {fmt(inv.paidAmount ?? 0)} paid of{" "}
-                                {fmt(inv.totalAmount ?? 0)}
-                                {balance > 0 && (
-                                  <>
-                                    {" "}
-                                    — balance{" "}
-                                    <span className="text-warning font-medium">
-                                      {fmt(balance)}
-                                    </span>
-                                  </>
+                              View all in Invoices →
+                            </Button>
+                          )}
+                        </div>
+                      </CardHeader>
+                      <CardContent className="space-y-2">
+                        {allProjectInvoices.length === 0 ? (
+                          <p className="text-xs text-muted-foreground">
+                            No invoices raised for this project yet.
+                          </p>
+                        ) : (
+                          allProjectInvoices.map((inv) => {
+                            const balance =
+                              (inv.totalAmount ?? 0) - (inv.paidAmount ?? 0);
+                            return (
+                              <div
+                                key={inv.id}
+                                className={cn(
+                                  "rounded-md border border-border p-2.5",
+                                  onViewInvoice &&
+                                    "cursor-pointer hover:bg-muted/40",
                                 )}
-                              </p>
-                              {balance > 0 && pCreatePayment && (
-                                <div className="flex gap-2 mt-2">
-                                  <Input
-                                    type="number"
-                                    min={0}
-                                    placeholder="Amount"
-                                    className="h-7 text-xs"
-                                    value={payAmountByInvoiceId[inv.id] ?? ""}
-                                    onChange={(e) =>
-                                      setPayAmountByInvoiceId((p) => ({
-                                        ...p,
-                                        [inv.id]: e.target.value,
-                                      }))
-                                    }
-                                    data-ocid={`project-detail.invoices.pay_amount.${inv.id}`}
-                                  />
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    className="h-7 text-xs shrink-0"
-                                    disabled={payingInvoiceId === inv.id}
-                                    onClick={() =>
-                                      handleRecordPaymentInline(inv)
-                                    }
-                                    data-ocid={`project-detail.invoices.record_payment.${inv.id}`}
-                                  >
-                                    Record Payment
-                                  </Button>
+                                role={onViewInvoice ? "button" : undefined}
+                                tabIndex={onViewInvoice ? 0 : undefined}
+                                onClick={
+                                  onViewInvoice
+                                    ? () => onViewInvoice(inv.id)
+                                    : undefined
+                                }
+                                onKeyDown={
+                                  onViewInvoice
+                                    ? (e) => {
+                                        if (
+                                          e.key === "Enter" ||
+                                          e.key === " "
+                                        ) {
+                                          e.preventDefault();
+                                          onViewInvoice(inv.id);
+                                        }
+                                      }
+                                    : undefined
+                                }
+                                data-ocid={`project-detail.invoices.item.${inv.id}`}
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <div>
+                                    <p className="text-sm font-medium font-mono">
+                                      {inv.invoiceNumber || inv.invNo}
+                                      {inv.invoiceType === "proforma" && (
+                                        <span className="ml-1.5 text-[10px] font-sans text-muted-foreground">
+                                          Proforma
+                                        </span>
+                                      )}
+                                    </p>
+                                    <p className="text-[11px] text-muted-foreground">
+                                      Due {inv.dueDate || "—"}
+                                    </p>
+                                  </div>
+                                  <StatusBadge status={inv.status} />
                                 </div>
-                              )}
-                            </div>
-                          );
-                        })
-                      )}
-                    </CardContent>
-                  </Card>
+                                <p className="text-xs text-muted-foreground mt-1.5">
+                                  {fmt(inv.paidAmount ?? 0)} paid of{" "}
+                                  {fmt(inv.totalAmount ?? 0)}
+                                  {balance > 0 && (
+                                    <>
+                                      {" "}
+                                      — balance{" "}
+                                      <span className="text-warning font-medium">
+                                        {fmt(balance)}
+                                      </span>
+                                    </>
+                                  )}
+                                </p>
+                                {balance > 0 && pCreatePayment && (
+                                  <div className="flex gap-2 mt-2">
+                                    <Input
+                                      type="number"
+                                      min={0}
+                                      placeholder="Amount"
+                                      className="h-7 text-xs"
+                                      value={payAmountByInvoiceId[inv.id] ?? ""}
+                                      onChange={(e) =>
+                                        setPayAmountByInvoiceId((p) => ({
+                                          ...p,
+                                          [inv.id]: e.target.value,
+                                        }))
+                                      }
+                                      data-ocid={`project-detail.invoices.pay_amount.${inv.id}`}
+                                    />
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      className="h-7 text-xs shrink-0"
+                                      disabled={payingInvoiceId === inv.id}
+                                      onClick={() =>
+                                        handleRecordPaymentInline(inv)
+                                      }
+                                      data-ocid={`project-detail.invoices.record_payment.${inv.id}`}
+                                    >
+                                      Record Payment
+                                    </Button>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })
+                        )}
+                      </CardContent>
+                    </Card>
 
-                  {/* Quotations / Job Cards / Purchase Orders — remaining
+                    {/* Quotations / Job Cards / Purchase Orders — remaining
                       Phase 2 cross-module links (Master ERP Architecture).
                       Compact lists, same click-through row pattern as
                       Invoices above; each module still fully owns its own
                       create/edit/delete UI in its own page. */}
-                  {(() => {
-                    const projQuotations = quotations.filter(
-                      (q) => q.projectId === projectId,
-                    );
-                    const projJobCards = jobCards.filter(
-                      (jc) => jc.projectId === projectId,
-                    );
-                    const linkedSharedPoIds = new Set(
-                      (project?.pos || []).map((po) => po.sharedPoId),
-                    );
-                    const projPOs = masterPOs.filter((po) =>
-                      linkedSharedPoIds.has(po.sharedPoId),
-                    );
-                    return (
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                        <Card>
-                          <CardHeader className="pb-2">
-                            <CardTitle className="text-sm text-muted-foreground uppercase tracking-wide">
-                              Quotations
-                            </CardTitle>
-                          </CardHeader>
-                          <CardContent className="space-y-1.5">
-                            {projQuotations.length === 0 ? (
-                              <p className="text-xs text-muted-foreground">
-                                No quotations for this project.
-                              </p>
-                            ) : (
-                              projQuotations.map((q) => (
-                                <div
-                                  key={q.id}
-                                  className={cn(
-                                    "rounded-md border border-border p-2 text-xs",
-                                    onViewQuotation &&
-                                      "cursor-pointer hover:bg-muted/40",
-                                  )}
-                                  role={onViewQuotation ? "button" : undefined}
-                                  tabIndex={onViewQuotation ? 0 : undefined}
-                                  onClick={
-                                    onViewQuotation
-                                      ? () => onViewQuotation(q.id)
-                                      : undefined
-                                  }
-                                  onKeyDown={
-                                    onViewQuotation
-                                      ? (e) => {
-                                          if (
-                                            e.key === "Enter" ||
-                                            e.key === " "
-                                          ) {
-                                            e.preventDefault();
-                                            onViewQuotation(q.id);
+                    {(() => {
+                      const projQuotations = quotations.filter(
+                        (q) => q.projectId === projectId,
+                      );
+                      const projJobCards = jobCards.filter(
+                        (jc) => jc.projectId === projectId,
+                      );
+                      const linkedSharedPoIds = new Set(
+                        (project?.pos || []).map((po) => po.sharedPoId),
+                      );
+                      const projPOs = masterPOs.filter((po) =>
+                        linkedSharedPoIds.has(po.sharedPoId),
+                      );
+                      return (
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                          <Card>
+                            <CardHeader className="pb-2">
+                              <CardTitle className="text-sm text-muted-foreground uppercase tracking-wide">
+                                Quotations
+                              </CardTitle>
+                            </CardHeader>
+                            <CardContent className="space-y-1.5">
+                              {projQuotations.length === 0 ? (
+                                <p className="text-xs text-muted-foreground">
+                                  No quotations for this project.
+                                </p>
+                              ) : (
+                                projQuotations.map((q) => (
+                                  <div
+                                    key={q.id}
+                                    className={cn(
+                                      "rounded-md border border-border p-2 text-xs",
+                                      onViewQuotation &&
+                                        "cursor-pointer hover:bg-muted/40",
+                                    )}
+                                    role={
+                                      onViewQuotation ? "button" : undefined
+                                    }
+                                    tabIndex={onViewQuotation ? 0 : undefined}
+                                    onClick={
+                                      onViewQuotation
+                                        ? () => onViewQuotation(q.id)
+                                        : undefined
+                                    }
+                                    onKeyDown={
+                                      onViewQuotation
+                                        ? (e) => {
+                                            if (
+                                              e.key === "Enter" ||
+                                              e.key === " "
+                                            ) {
+                                              e.preventDefault();
+                                              onViewQuotation(q.id);
+                                            }
                                           }
-                                        }
-                                      : undefined
-                                  }
-                                  data-ocid={`project-detail.quotations.item.${q.id}`}
-                                >
-                                  <p className="font-mono font-medium">
-                                    {q.qtNo}
-                                  </p>
-                                  <p className="text-muted-foreground">
-                                    {fmt(q.totalAmount)} · {q.status}
-                                  </p>
-                                </div>
-                              ))
-                            )}
-                          </CardContent>
-                        </Card>
-                        <Card>
-                          <CardHeader className="pb-2">
-                            <CardTitle className="text-sm text-muted-foreground uppercase tracking-wide">
-                              Job Cards
-                            </CardTitle>
-                          </CardHeader>
-                          <CardContent className="space-y-1.5">
-                            {projJobCards.length === 0 ? (
-                              <p className="text-xs text-muted-foreground">
-                                No job cards for this project.
-                              </p>
-                            ) : (
-                              projJobCards.map((jc) => (
-                                <div
-                                  key={jc.id}
-                                  className={cn(
-                                    "rounded-md border border-border p-2 text-xs",
-                                    onViewJobCard &&
-                                      "cursor-pointer hover:bg-muted/40",
-                                  )}
-                                  role={onViewJobCard ? "button" : undefined}
-                                  tabIndex={onViewJobCard ? 0 : undefined}
-                                  onClick={
-                                    onViewJobCard
-                                      ? () => onViewJobCard(jc.id)
-                                      : undefined
-                                  }
-                                  onKeyDown={
-                                    onViewJobCard
-                                      ? (e) => {
-                                          if (
-                                            e.key === "Enter" ||
-                                            e.key === " "
-                                          ) {
-                                            e.preventDefault();
-                                            onViewJobCard(jc.id);
+                                        : undefined
+                                    }
+                                    data-ocid={`project-detail.quotations.item.${q.id}`}
+                                  >
+                                    <p className="font-mono font-medium">
+                                      {q.qtNo}
+                                    </p>
+                                    <p className="text-muted-foreground">
+                                      {fmt(q.totalAmount)} · {q.status}
+                                    </p>
+                                  </div>
+                                ))
+                              )}
+                            </CardContent>
+                          </Card>
+                          <Card>
+                            <CardHeader className="pb-2">
+                              <CardTitle className="text-sm text-muted-foreground uppercase tracking-wide">
+                                Job Cards
+                              </CardTitle>
+                            </CardHeader>
+                            <CardContent className="space-y-1.5">
+                              {projJobCards.length === 0 ? (
+                                <p className="text-xs text-muted-foreground">
+                                  No job cards for this project.
+                                </p>
+                              ) : (
+                                projJobCards.map((jc) => (
+                                  <div
+                                    key={jc.id}
+                                    className={cn(
+                                      "rounded-md border border-border p-2 text-xs",
+                                      onViewJobCard &&
+                                        "cursor-pointer hover:bg-muted/40",
+                                    )}
+                                    role={onViewJobCard ? "button" : undefined}
+                                    tabIndex={onViewJobCard ? 0 : undefined}
+                                    onClick={
+                                      onViewJobCard
+                                        ? () => onViewJobCard(jc.id)
+                                        : undefined
+                                    }
+                                    onKeyDown={
+                                      onViewJobCard
+                                        ? (e) => {
+                                            if (
+                                              e.key === "Enter" ||
+                                              e.key === " "
+                                            ) {
+                                              e.preventDefault();
+                                              onViewJobCard(jc.id);
+                                            }
                                           }
-                                        }
-                                      : undefined
-                                  }
-                                  data-ocid={`project-detail.job-cards.item.${jc.id}`}
-                                >
-                                  <p className="font-mono font-medium">
-                                    {jc.jobNo}
-                                  </p>
-                                  <p className="text-muted-foreground">
-                                    {jc.employeeName} · {jc.status}
-                                  </p>
-                                </div>
-                              ))
-                            )}
-                          </CardContent>
-                        </Card>
-                        <Card>
-                          <CardHeader className="pb-2">
-                            <CardTitle className="text-sm text-muted-foreground uppercase tracking-wide">
-                              Purchase Orders
-                            </CardTitle>
-                          </CardHeader>
-                          <CardContent className="space-y-1.5">
-                            {projPOs.length === 0 ? (
-                              <p className="text-xs text-muted-foreground">
-                                No purchase orders linked to this project.
-                              </p>
-                            ) : (
-                              projPOs.map((po) => (
-                                <div
-                                  key={po.id}
-                                  className={cn(
-                                    "rounded-md border border-border p-2 text-xs",
-                                    onViewPurchaseOrder &&
-                                      "cursor-pointer hover:bg-muted/40",
-                                  )}
-                                  role={
-                                    onViewPurchaseOrder ? "button" : undefined
-                                  }
-                                  tabIndex={onViewPurchaseOrder ? 0 : undefined}
-                                  onClick={
-                                    onViewPurchaseOrder
-                                      ? () => onViewPurchaseOrder(po.id)
-                                      : undefined
-                                  }
-                                  onKeyDown={
-                                    onViewPurchaseOrder
-                                      ? (e) => {
-                                          if (
-                                            e.key === "Enter" ||
-                                            e.key === " "
-                                          ) {
-                                            e.preventDefault();
-                                            onViewPurchaseOrder(po.id);
+                                        : undefined
+                                    }
+                                    data-ocid={`project-detail.job-cards.item.${jc.id}`}
+                                  >
+                                    <p className="font-mono font-medium">
+                                      {jc.jobNo}
+                                    </p>
+                                    <p className="text-muted-foreground">
+                                      {jc.employeeName} · {jc.status}
+                                    </p>
+                                  </div>
+                                ))
+                              )}
+                            </CardContent>
+                          </Card>
+                          <Card>
+                            <CardHeader className="pb-2">
+                              <CardTitle className="text-sm text-muted-foreground uppercase tracking-wide">
+                                Purchase Orders
+                              </CardTitle>
+                            </CardHeader>
+                            <CardContent className="space-y-1.5">
+                              {projPOs.length === 0 ? (
+                                <p className="text-xs text-muted-foreground">
+                                  No purchase orders linked to this project.
+                                </p>
+                              ) : (
+                                projPOs.map((po) => (
+                                  <div
+                                    key={po.id}
+                                    className={cn(
+                                      "rounded-md border border-border p-2 text-xs",
+                                      onViewPurchaseOrder &&
+                                        "cursor-pointer hover:bg-muted/40",
+                                    )}
+                                    role={
+                                      onViewPurchaseOrder ? "button" : undefined
+                                    }
+                                    tabIndex={
+                                      onViewPurchaseOrder ? 0 : undefined
+                                    }
+                                    onClick={
+                                      onViewPurchaseOrder
+                                        ? () => onViewPurchaseOrder(po.id)
+                                        : undefined
+                                    }
+                                    onKeyDown={
+                                      onViewPurchaseOrder
+                                        ? (e) => {
+                                            if (
+                                              e.key === "Enter" ||
+                                              e.key === " "
+                                            ) {
+                                              e.preventDefault();
+                                              onViewPurchaseOrder(po.id);
+                                            }
                                           }
-                                        }
-                                      : undefined
-                                  }
-                                  data-ocid={`project-detail.purchase-orders.item.${po.id}`}
-                                >
-                                  <p className="font-mono font-medium">
-                                    {po.poNumber}
-                                  </p>
-                                  <p className="text-muted-foreground">
-                                    {po.status}
-                                  </p>
-                                </div>
-                              ))
-                            )}
-                          </CardContent>
-                        </Card>
-                      </div>
-                    );
-                  })()}
+                                        : undefined
+                                    }
+                                    data-ocid={`project-detail.purchase-orders.item.${po.id}`}
+                                  >
+                                    <p className="font-mono font-medium">
+                                      {po.poNumber}
+                                    </p>
+                                    <p className="text-muted-foreground">
+                                      {po.status}
+                                    </p>
+                                  </div>
+                                ))
+                              )}
+                            </CardContent>
+                          </Card>
+                        </div>
+                      );
+                    })()}
 
-                  {/* Cost Breakdown */}
-                  <div>
-                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
-                      Cost Breakdown
-                    </p>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <Card>
-                        <CardContent className="pt-4">
-                          <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                            Material Cost
-                          </p>
-                          <p className="text-xl font-bold mt-1">
-                            {fmt(materialCost)}
-                          </p>
-                          <p className="text-[10px] text-muted-foreground mt-0.5">
-                            Based on material usage × last purchase price
-                          </p>
-                        </CardContent>
-                      </Card>
-                      <Card>
-                        <CardContent className="pt-4">
-                          <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                            Labour Cost
-                          </p>
-                          <p className="text-xl font-bold mt-1">
-                            {fmt(labourCost)}
-                          </p>
-                          {labourCost === 0 && (
-                            <p className="text-[10px] text-warning mt-0.5">
-                              Enter in Internal Costing tab
-                            </p>
-                          )}
-                        </CardContent>
-                      </Card>
-                      <Card>
-                        <CardContent className="pt-4">
-                          <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                            Outsource Cost
-                          </p>
-                          <p className="text-xl font-bold mt-1">
-                            {fmt(outsourceCost)}
-                          </p>
-                          <p className="text-[10px] text-muted-foreground mt-0.5">
-                            From {projOutsourced.length} outsourced work entries
-                          </p>
-                        </CardContent>
-                      </Card>
-                      <Card>
-                        <CardContent className="pt-4">
-                          <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                            Transport Cost
-                          </p>
-                          <p className="text-xl font-bold mt-1">
-                            {fmt(transportCost)}
-                          </p>
-                          {transportCost === 0 && (
-                            <p className="text-[10px] text-warning mt-0.5">
-                              Enter in Internal Costing tab
-                            </p>
-                          )}
-                        </CardContent>
-                      </Card>
-                      {customCostExtra > 0 && (
+                    {/* Cost Breakdown */}
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">
+                        Cost Breakdown
+                      </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <Card>
                           <CardContent className="pt-4">
                             <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                              Custom Costs
+                              Material Cost
                             </p>
                             <p className="text-xl font-bold mt-1">
-                              {fmt(customCostExtra)}
+                              {fmt(materialCost)}
                             </p>
                             <p className="text-[10px] text-muted-foreground mt-0.5">
-                              From {(projectCosting?.extraCosts || []).length}{" "}
-                              custom entries
+                              Based on material usage × last purchase price
                             </p>
                           </CardContent>
                         </Card>
-                      )}
-                      {pettyExpenseCost > 0 && (
                         <Card>
                           <CardContent className="pt-4">
                             <p className="text-xs text-muted-foreground uppercase tracking-wide">
-                              Petty Expenses
+                              Labour Cost
                             </p>
                             <p className="text-xl font-bold mt-1">
-                              {fmt(pettyExpenseCost)}
+                              {fmt(labourCost)}
+                            </p>
+                            {labourCost === 0 && (
+                              <p className="text-[10px] text-warning mt-0.5">
+                                Enter in Internal Costing tab
+                              </p>
+                            )}
+                          </CardContent>
+                        </Card>
+                        <Card>
+                          <CardContent className="pt-4">
+                            <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                              Outsource Cost
+                            </p>
+                            <p className="text-xl font-bold mt-1">
+                              {fmt(outsourceCost)}
                             </p>
                             <p className="text-[10px] text-muted-foreground mt-0.5">
-                              Company expenses for this project
+                              From {projOutsourced.length} outsourced work
+                              entries
                             </p>
                           </CardContent>
                         </Card>
-                      )}
+                        <Card>
+                          <CardContent className="pt-4">
+                            <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                              Transport Cost
+                            </p>
+                            <p className="text-xl font-bold mt-1">
+                              {fmt(transportCost)}
+                            </p>
+                            {transportCost === 0 && (
+                              <p className="text-[10px] text-warning mt-0.5">
+                                Enter in Internal Costing tab
+                              </p>
+                            )}
+                          </CardContent>
+                        </Card>
+                        {customCostExtra > 0 && (
+                          <Card>
+                            <CardContent className="pt-4">
+                              <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                                Custom Costs
+                              </p>
+                              <p className="text-xl font-bold mt-1">
+                                {fmt(customCostExtra)}
+                              </p>
+                              <p className="text-[10px] text-muted-foreground mt-0.5">
+                                From {(projectCosting?.extraCosts || []).length}{" "}
+                                custom entries
+                              </p>
+                            </CardContent>
+                          </Card>
+                        )}
+                        {pettyExpenseCost > 0 && (
+                          <Card>
+                            <CardContent className="pt-4">
+                              <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                                Petty Expenses
+                              </p>
+                              <p className="text-xl font-bold mt-1">
+                                {fmt(pettyExpenseCost)}
+                              </p>
+                              <p className="text-[10px] text-muted-foreground mt-0.5">
+                                Company expenses for this project
+                              </p>
+                            </CardContent>
+                          </Card>
+                        )}
+                      </div>
                     </div>
-                  </div>
 
-                  {/* Manual Adjustments Section */}
-                  <Card>
-                    <CardHeader className="pb-2">
-                      <div className="flex items-center justify-between">
-                        <CardTitle className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
-                          Manual Adjustments
-                        </CardTitle>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => setShowAdjForm((f) => !f)}
-                          data-ocid="project-detail.profit.open_modal_button"
-                        >
-                          <Plus className="w-3.5 h-3.5 mr-1" /> Add Adjustment
-                        </Button>
-                      </div>
-                    </CardHeader>
-                    <CardContent className="space-y-3">
-                      {showAdjForm && (
-                        <div className="flex flex-wrap gap-2 p-3 bg-muted/30 rounded-md items-end">
-                          <div className="flex-1 min-w-[140px] space-y-1">
-                            <Label className="text-xs">Name</Label>
-                            <Input
-                              placeholder="Adjustment name"
-                              value={adjForm.name}
-                              onChange={(e) =>
-                                setAdjForm((f) => ({
-                                  ...f,
-                                  name: e.target.value,
-                                }))
-                              }
-                              className="h-8"
-                              data-ocid="project-detail.profit.input"
-                            />
-                          </div>
-                          <div className="w-28 space-y-1">
-                            <Label className="text-xs">Amount (₹)</Label>
-                            <Input
-                              type="number"
-                              min={0}
-                              placeholder="0"
-                              value={adjForm.amount}
-                              onChange={(e) =>
-                                setAdjForm((f) => ({
-                                  ...f,
-                                  amount: e.target.value,
-                                }))
-                              }
-                              className="h-8"
-                            />
-                          </div>
-                          <div className="w-36 space-y-1">
-                            <Label className="text-xs">Type</Label>
-                            <Select
-                              value={adjForm.type}
-                              onValueChange={(v) =>
-                                setAdjForm((f) => ({
-                                  ...f,
-                                  type: v as "Add Cost" | "Reduce Cost",
-                                }))
-                              }
-                            >
-                              <SelectTrigger
-                                className="h-8"
-                                data-ocid="project-detail.profit.select"
-                              >
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="Add Cost">
-                                  Add Cost
-                                </SelectItem>
-                                <SelectItem value="Reduce Cost">
-                                  Reduce Cost
-                                </SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </div>
+                    {/* Manual Adjustments Section */}
+                    <Card>
+                      <CardHeader className="pb-2">
+                        <div className="flex items-center justify-between">
+                          <CardTitle className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">
+                            Manual Adjustments
+                          </CardTitle>
                           <Button
+                            variant="outline"
                             size="sm"
-                            className="h-8"
-                            data-ocid="project-detail.profit.submit_button"
-                            onClick={() => {
-                              if (
-                                !adjForm.name.trim() ||
-                                !adjForm.amount ||
-                                Number(adjForm.amount) <= 0
-                              ) {
-                                toast.error(
-                                  "Name and a positive amount are required.",
-                                );
-                                return;
-                              }
-                              const newAdj: ManualAdjustment = {
-                                id: crypto.randomUUID(),
-                                name: adjForm.name.trim(),
-                                amount: Number(adjForm.amount),
-                                type: adjForm.type,
-                              };
-                              const existing = internalCostings.find(
-                                (c) => c.projectId === projectId,
-                              );
-                              const updated = {
-                                ...(existing ?? {
-                                  id: `ic-${Date.now()}`,
-                                  projectId,
-                                  rawMaterialCost: 0,
-                                  cncCost: 0,
-                                  hardwareCost: 0,
-                                  powderCoatingCost: 0,
-                                  assemblyCost: 0,
-                                  packingCost: 0,
-                                }),
-                                manualAdjustments: [
-                                  ...(existing?.manualAdjustments || []),
-                                  newAdj,
-                                ],
-                              };
-                              upsertInternalCosting(updated);
-                              setAdjForm({
-                                name: "",
-                                amount: "",
-                                type: "Add Cost",
-                              });
-                              setShowAdjForm(false);
-                              toast.success("Adjustment added.");
-                            }}
+                            onClick={() => setShowAdjForm((f) => !f)}
+                            data-ocid="project-detail.profit.open_modal_button"
                           >
-                            Save
+                            <Plus className="w-3.5 h-3.5 mr-1" /> Add Adjustment
                           </Button>
                         </div>
-                      )}
-                      {manualAdjustments.length === 0 ? (
-                        <p
-                          className="text-xs text-muted-foreground text-center py-2"
-                          data-ocid="project-detail.profit.empty_state"
-                        >
-                          No adjustments yet.
-                        </p>
-                      ) : (
-                        <table className="w-full text-sm">
-                          <thead>
-                            <tr className="text-xs text-muted-foreground border-b">
-                              <th className="text-left pb-1">Name</th>
-                              <th className="text-right pb-1">Amount</th>
-                              <th className="text-center pb-1">Type</th>
-                              <th className="w-8 pb-1" />
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {manualAdjustments.map((adj, adjIdx) => (
-                              <tr
-                                key={adj.id}
-                                className="border-b border-border/50 last:border-0"
-                                data-ocid={`project-detail.profit.item.${adjIdx + 1}`}
+                      </CardHeader>
+                      <CardContent className="space-y-3">
+                        {showAdjForm && (
+                          <div className="flex flex-wrap gap-2 p-3 bg-muted/30 rounded-md items-end">
+                            <div className="flex-1 min-w-[140px] space-y-1">
+                              <Label className="text-xs">Name</Label>
+                              <Input
+                                placeholder="Adjustment name"
+                                value={adjForm.name}
+                                onChange={(e) =>
+                                  setAdjForm((f) => ({
+                                    ...f,
+                                    name: e.target.value,
+                                  }))
+                                }
+                                className="h-8"
+                                data-ocid="project-detail.profit.input"
+                              />
+                            </div>
+                            <div className="w-28 space-y-1">
+                              <Label className="text-xs">Amount (₹)</Label>
+                              <Input
+                                type="number"
+                                min={0}
+                                placeholder="0"
+                                value={adjForm.amount}
+                                onChange={(e) =>
+                                  setAdjForm((f) => ({
+                                    ...f,
+                                    amount: e.target.value,
+                                  }))
+                                }
+                                className="h-8"
+                              />
+                            </div>
+                            <div className="w-36 space-y-1">
+                              <Label className="text-xs">Type</Label>
+                              <Select
+                                value={adjForm.type}
+                                onValueChange={(v) =>
+                                  setAdjForm((f) => ({
+                                    ...f,
+                                    type: v as "Add Cost" | "Reduce Cost",
+                                  }))
+                                }
                               >
-                                <td className="py-1.5">{adj.name}</td>
-                                <td className="py-1.5 text-right font-medium">
-                                  {fmt(adj.amount)}
-                                </td>
-                                <td className="py-1.5 text-center">
-                                  <span
-                                    className={`text-xs px-2 py-0.5 rounded-full font-medium ${adj.type === "Add Cost" ? "bg-destructive/10 text-destructive" : "bg-success/10 text-success"}`}
-                                  >
-                                    {adj.type}
-                                  </span>
-                                </td>
-                                <td className="py-1.5 text-right">
-                                  <button
-                                    type="button"
-                                    data-ocid={`project-detail.profit.delete_button.${adjIdx + 1}`}
-                                    onClick={() => {
-                                      const existing = internalCostings.find(
-                                        (c) => c.projectId === projectId,
-                                      );
-                                      if (!existing) return;
-                                      upsertInternalCosting({
-                                        ...existing,
-                                        manualAdjustments: (
-                                          existing.manualAdjustments || []
-                                        ).filter((a) => a.id !== adj.id),
-                                      });
-                                      toast.success("Adjustment removed.");
-                                    }}
-                                    className="text-destructive hover:text-destructive/80"
-                                  >
-                                    <Trash2 className="w-3.5 h-3.5" />
-                                  </button>
-                                </td>
+                                <SelectTrigger
+                                  className="h-8"
+                                  data-ocid="project-detail.profit.select"
+                                >
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="Add Cost">
+                                    Add Cost
+                                  </SelectItem>
+                                  <SelectItem value="Reduce Cost">
+                                    Reduce Cost
+                                  </SelectItem>
+                                </SelectContent>
+                              </Select>
+                            </div>
+                            <Button
+                              size="sm"
+                              className="h-8"
+                              data-ocid="project-detail.profit.submit_button"
+                              onClick={() => {
+                                if (
+                                  !adjForm.name.trim() ||
+                                  !adjForm.amount ||
+                                  Number(adjForm.amount) <= 0
+                                ) {
+                                  toast.error(
+                                    "Name and a positive amount are required.",
+                                  );
+                                  return;
+                                }
+                                const newAdj: ManualAdjustment = {
+                                  id: crypto.randomUUID(),
+                                  name: adjForm.name.trim(),
+                                  amount: Number(adjForm.amount),
+                                  type: adjForm.type,
+                                };
+                                const existing = internalCostings.find(
+                                  (c) => c.projectId === projectId,
+                                );
+                                const updated = {
+                                  ...(existing ?? {
+                                    id: `ic-${Date.now()}`,
+                                    projectId,
+                                    rawMaterialCost: 0,
+                                    cncCost: 0,
+                                    hardwareCost: 0,
+                                    powderCoatingCost: 0,
+                                    assemblyCost: 0,
+                                    packingCost: 0,
+                                  }),
+                                  manualAdjustments: [
+                                    ...(existing?.manualAdjustments || []),
+                                    newAdj,
+                                  ],
+                                };
+                                upsertInternalCosting(updated);
+                                setAdjForm({
+                                  name: "",
+                                  amount: "",
+                                  type: "Add Cost",
+                                });
+                                setShowAdjForm(false);
+                                toast.success("Adjustment added.");
+                              }}
+                            >
+                              Save
+                            </Button>
+                          </div>
+                        )}
+                        {manualAdjustments.length === 0 ? (
+                          <p
+                            className="text-xs text-muted-foreground text-center py-2"
+                            data-ocid="project-detail.profit.empty_state"
+                          >
+                            No adjustments yet.
+                          </p>
+                        ) : (
+                          <table className="w-full text-sm">
+                            <thead>
+                              <tr className="text-xs text-muted-foreground border-b">
+                                <th className="text-left pb-1">Name</th>
+                                <th className="text-right pb-1">Amount</th>
+                                <th className="text-center pb-1">Type</th>
+                                <th className="w-8 pb-1" />
                               </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      )}
-                      {manualAdjustments.length > 0 && (
-                        <div className="flex justify-between text-xs pt-1 border-t">
-                          <span className="text-success">
-                            Reduce Cost: -{fmt(reduceCostTotal)}
-                          </span>
-                          <span className="text-destructive">
-                            Add Cost: +{fmt(addCostTotal)}
-                          </span>
-                          <span className="font-semibold">
-                            Net: {addCostTotal >= reduceCostTotal ? "+" : ""}
-                            {fmt(addCostTotal - reduceCostTotal)}
-                          </span>
-                        </div>
-                      )}
-                    </CardContent>
-                  </Card>
-
-                  {/* Summary */}
-                  <Card className="border-2">
-                    <CardContent className="pt-4 space-y-3">
-                      <div className="flex items-center justify-between py-2 border-b border-border">
-                        <span className="text-sm text-muted-foreground">
-                          Auto Cost
-                        </span>
-                        <span className="text-lg font-bold">
-                          {fmt(autoCost)}
-                        </span>
-                      </div>
-                      {hasAdjustments && (
-                        <>
-                          <div className="flex items-center justify-between py-1 text-sm">
-                            <span className="text-muted-foreground">
-                              + Adjustments (Add)
+                            </thead>
+                            <tbody>
+                              {manualAdjustments.map((adj, adjIdx) => (
+                                <tr
+                                  key={adj.id}
+                                  className="border-b border-border/50 last:border-0"
+                                  data-ocid={`project-detail.profit.item.${adjIdx + 1}`}
+                                >
+                                  <td className="py-1.5">{adj.name}</td>
+                                  <td className="py-1.5 text-right font-medium">
+                                    {fmt(adj.amount)}
+                                  </td>
+                                  <td className="py-1.5 text-center">
+                                    <span
+                                      className={`text-xs px-2 py-0.5 rounded-full font-medium ${adj.type === "Add Cost" ? "bg-destructive/10 text-destructive" : "bg-success/10 text-success"}`}
+                                    >
+                                      {adj.type}
+                                    </span>
+                                  </td>
+                                  <td className="py-1.5 text-right">
+                                    <button
+                                      type="button"
+                                      data-ocid={`project-detail.profit.delete_button.${adjIdx + 1}`}
+                                      onClick={() => {
+                                        const existing = internalCostings.find(
+                                          (c) => c.projectId === projectId,
+                                        );
+                                        if (!existing) return;
+                                        upsertInternalCosting({
+                                          ...existing,
+                                          manualAdjustments: (
+                                            existing.manualAdjustments || []
+                                          ).filter((a) => a.id !== adj.id),
+                                        });
+                                        toast.success("Adjustment removed.");
+                                      }}
+                                      className="text-destructive hover:text-destructive/80"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        )}
+                        {manualAdjustments.length > 0 && (
+                          <div className="flex justify-between text-xs pt-1 border-t">
+                            <span className="text-success">
+                              Reduce Cost: -{fmt(reduceCostTotal)}
                             </span>
                             <span className="text-destructive">
-                              +{fmt(addCostTotal)}
+                              Add Cost: +{fmt(addCostTotal)}
+                            </span>
+                            <span className="font-semibold">
+                              Net: {addCostTotal >= reduceCostTotal ? "+" : ""}
+                              {fmt(addCostTotal - reduceCostTotal)}
                             </span>
                           </div>
-                          <div className="flex items-center justify-between py-1 text-sm border-b">
-                            <span className="text-muted-foreground">
-                              - Adjustments (Reduce)
+                        )}
+                      </CardContent>
+                    </Card>
+
+                    {/* Summary */}
+                    <Card className="border-2">
+                      <CardContent className="pt-4 space-y-3">
+                        <div className="flex items-center justify-between py-2 border-b border-border">
+                          <span className="text-sm text-muted-foreground">
+                            Auto Cost
+                          </span>
+                          <span className="text-lg font-bold">
+                            {fmt(autoCost)}
+                          </span>
+                        </div>
+                        {hasAdjustments && (
+                          <>
+                            <div className="flex items-center justify-between py-1 text-sm">
+                              <span className="text-muted-foreground">
+                                + Adjustments (Add)
+                              </span>
+                              <span className="text-destructive">
+                                +{fmt(addCostTotal)}
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between py-1 text-sm border-b">
+                              <span className="text-muted-foreground">
+                                - Adjustments (Reduce)
+                              </span>
+                              <span className="text-success">
+                                -{fmt(reduceCostTotal)}
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between py-1 text-sm border-b">
+                              <span className="font-medium">Adjusted Cost</span>
+                              <span
+                                className="font-bold"
+                                data-ocid="project-detail.profit.total_cost"
+                              >
+                                {fmt(adjustedCost)}
+                              </span>
+                            </div>
+                          </>
+                        )}
+                        {!hasAdjustments && (
+                          <div className="flex items-center justify-between py-2 border-b border-border">
+                            <span className="text-sm text-muted-foreground">
+                              Total Cost
                             </span>
-                            <span className="text-success">
-                              -{fmt(reduceCostTotal)}
-                            </span>
-                          </div>
-                          <div className="flex items-center justify-between py-1 text-sm border-b">
-                            <span className="font-medium">Adjusted Cost</span>
                             <span
-                              className="font-bold"
+                              className="text-lg font-bold"
                               data-ocid="project-detail.profit.total_cost"
                             >
                               {fmt(adjustedCost)}
                             </span>
                           </div>
-                        </>
-                      )}
-                      {!hasAdjustments && (
-                        <div className="flex items-center justify-between py-2 border-b border-border">
-                          <span className="text-sm text-muted-foreground">
-                            Total Cost
+                        )}
+                        <div className="flex items-center justify-between py-2">
+                          <span className="text-sm font-semibold">
+                            {isProfit ? "Profit" : "Loss"}
                           </span>
                           <span
-                            className="text-lg font-bold"
-                            data-ocid="project-detail.profit.total_cost"
+                            className={`text-2xl font-bold ${isProfit ? "text-success" : "text-destructive"}`}
+                            data-ocid="project-detail.profit.profit_value"
                           >
-                            {fmt(adjustedCost)}
+                            {isProfit ? "+" : "-"}
+                            {fmt(Math.abs(profit))}
                           </span>
                         </div>
-                      )}
-                      <div className="flex items-center justify-between py-2">
-                        <span className="text-sm font-semibold">
-                          {isProfit ? "Profit" : "Loss"}
-                        </span>
-                        <span
-                          className={`text-2xl font-bold ${isProfit ? "text-success" : "text-destructive"}`}
-                          data-ocid="project-detail.profit.profit_value"
-                        >
-                          {isProfit ? "+" : "-"}
-                          {fmt(Math.abs(profit))}
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between py-2 bg-muted/30 rounded-md px-3">
-                        <span className="text-sm text-muted-foreground">
-                          Profit %
-                        </span>
-                        <span
-                          className={`text-xl font-bold ${isProfit ? "text-success" : "text-destructive"}`}
-                          data-ocid="project-detail.profit.profit_pct"
-                        >
-                          {totalRevenue > 0
-                            ? `${profitPct.toFixed(1)}%`
-                            : "N/A"}
-                        </span>
-                      </div>
-                      {totalRevenue === 0 && (
-                        <p className="text-xs text-muted-foreground text-center py-1">
-                          No invoices raised yet — revenue will appear once tax
-                          invoices are created.
-                        </p>
-                      )}
-                    </CardContent>
-                  </Card>
-                </div>
-              );
-            })()}
-          </section>
+                        <div className="flex items-center justify-between py-2 bg-muted/30 rounded-md px-3">
+                          <span className="text-sm text-muted-foreground">
+                            Profit %
+                          </span>
+                          <span
+                            className={`text-xl font-bold ${isProfit ? "text-success" : "text-destructive"}`}
+                            data-ocid="project-detail.profit.profit_pct"
+                          >
+                            {totalRevenue > 0
+                              ? `${profitPct.toFixed(1)}%`
+                              : "N/A"}
+                          </span>
+                        </div>
+                        {totalRevenue === 0 && (
+                          <p className="text-xs text-muted-foreground text-center py-1">
+                            No invoices raised yet — revenue will appear once
+                            tax invoices are created.
+                          </p>
+                        )}
+                      </CardContent>
+                    </Card>
+                  </div>
+                );
+              })()}
+            </section>
+          )}
 
           {/* Timeline Tab */}
-          <section id="section-timeline" className="mt-4 scroll-mt-24">
-            {(() => {
-              const activities = [...(project.activityLog || [])].sort(
-                (a, b) => b.timestamp - a.timestamp,
-              );
-              const ACTIVITY_ICONS: Record<string, string> = {
-                project_created: "🗂",
-                quotation_created: "📋",
-                quotation_approved: "✅",
-                po_received: "📦",
-                production_started: "⚙️",
-                production_stage_update: "🔄",
-                material_purchased: "🛒",
-                material_requisition: "📝",
-                qc_passed: "✔️",
-                qc_failed: "❌",
-                dispatch: "🚛",
-                invoice_generated: "🧾",
-                payment_received: "💰",
-                machine_breakdown: "⚠️",
-                report_exported: "📊",
-                deadline_updated: "📅",
-                note: "💬",
-              };
-              return (
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h2 className="text-sm font-semibold">
-                        Project Timeline
-                      </h2>
-                      <p className="text-xs text-muted-foreground mt-0.5">
-                        {activities.length} event
-                        {activities.length !== 1 ? "s" : ""} recorded
-                      </p>
-                    </div>
-                    {pEdit && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => {
-                          const note = window.prompt(
-                            "Add a note to this project's timeline:",
-                          );
-                          if (note?.trim()) {
-                            addProjectActivity(
-                              projectId,
-                              "note",
-                              note.trim(),
-                              currentUser?.username ?? "unknown",
+          {activeTab === "timeline" && (
+            <section id="section-timeline" className="mt-4 scroll-mt-24">
+              {(() => {
+                const activities = [...(project.activityLog || [])].sort(
+                  (a, b) => b.timestamp - a.timestamp,
+                );
+                const ACTIVITY_ICONS: Record<string, string> = {
+                  project_created: "🗂",
+                  quotation_created: "📋",
+                  quotation_approved: "✅",
+                  po_received: "📦",
+                  production_started: "⚙️",
+                  production_stage_update: "🔄",
+                  material_purchased: "🛒",
+                  material_requisition: "📝",
+                  qc_passed: "✔️",
+                  qc_failed: "❌",
+                  dispatch: "🚛",
+                  invoice_generated: "🧾",
+                  payment_received: "💰",
+                  machine_breakdown: "⚠️",
+                  report_exported: "📊",
+                  deadline_updated: "📅",
+                  note: "💬",
+                };
+                return (
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <h2 className="text-sm font-semibold">
+                          Project Timeline
+                        </h2>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          {activities.length} event
+                          {activities.length !== 1 ? "s" : ""} recorded
+                        </p>
+                      </div>
+                      {pEdit && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            const note = window.prompt(
+                              "Add a note to this project's timeline:",
                             );
-                          }
-                        }}
-                      >
-                        + Add Note
-                      </Button>
-                    )}
-                  </div>
-                  {activities.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center py-16 text-center border rounded-lg bg-muted/20">
-                      <span className="text-3xl mb-3">📋</span>
-                      <p className="text-sm font-medium text-muted-foreground">
-                        No activity recorded yet.
-                      </p>
-                      <p className="text-xs text-muted-foreground mt-1">
-                        Activity is logged automatically as the project
-                        progresses.
-                      </p>
+                            if (note?.trim()) {
+                              addProjectActivity(
+                                projectId,
+                                "note",
+                                note.trim(),
+                                currentUser?.username ?? "unknown",
+                              );
+                            }
+                          }}
+                        >
+                          + Add Note
+                        </Button>
+                      )}
                     </div>
-                  ) : (
-                    <div className="relative">
-                      <div className="absolute left-4 top-0 bottom-0 w-0.5 bg-border" />
-                      <div className="space-y-0">
-                        {activities.map((act) => (
-                          <div
-                            key={act.id}
-                            className="relative flex gap-4 pb-4"
-                          >
-                            <div className="relative z-10 flex items-center justify-center w-8 h-8 rounded-full bg-card border-2 border-border text-sm shrink-0">
-                              {ACTIVITY_ICONS[act.type] ?? "•"}
-                            </div>
-                            <div className="flex-1 min-w-0 bg-card border rounded-lg px-3 py-2.5">
-                              <p className="text-xs font-medium">
-                                {act.description}
-                              </p>
-                              <div className="flex items-center gap-2 mt-1">
-                                <span className="text-[11px] text-muted-foreground">
-                                  {new Date(act.timestamp).toLocaleDateString(
-                                    "en-IN",
-                                    {
-                                      day: "numeric",
-                                      month: "short",
-                                      year: "numeric",
-                                      hour: "2-digit",
-                                      minute: "2-digit",
-                                    },
-                                  )}
-                                </span>
-                                {act.performedBy && (
+                    {activities.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center py-16 text-center border rounded-lg bg-muted/20">
+                        <span className="text-3xl mb-3">📋</span>
+                        <p className="text-sm font-medium text-muted-foreground">
+                          No activity recorded yet.
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Activity is logged automatically as the project
+                          progresses.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="relative">
+                        <div className="absolute left-4 top-0 bottom-0 w-0.5 bg-border" />
+                        <div className="space-y-0">
+                          {activities.map((act) => (
+                            <div
+                              key={act.id}
+                              className="relative flex gap-4 pb-4"
+                            >
+                              <div className="relative z-10 flex items-center justify-center w-8 h-8 rounded-full bg-card border-2 border-border text-sm shrink-0">
+                                {ACTIVITY_ICONS[act.type] ?? "•"}
+                              </div>
+                              <div className="flex-1 min-w-0 bg-card border rounded-lg px-3 py-2.5">
+                                <p className="text-xs font-medium">
+                                  {act.description}
+                                </p>
+                                <div className="flex items-center gap-2 mt-1">
                                   <span className="text-[11px] text-muted-foreground">
-                                    · {act.performedBy}
+                                    {new Date(act.timestamp).toLocaleDateString(
+                                      "en-IN",
+                                      {
+                                        day: "numeric",
+                                        month: "short",
+                                        year: "numeric",
+                                        hour: "2-digit",
+                                        minute: "2-digit",
+                                      },
+                                    )}
                                   </span>
-                                )}
+                                  {act.performedBy && (
+                                    <span className="text-[11px] text-muted-foreground">
+                                      · {act.performedBy}
+                                    </span>
+                                  )}
+                                </div>
                               </div>
                             </div>
-                          </div>
-                        ))}
-                        {/* Project creation as last item */}
-                        <div className="relative flex gap-4 pb-4">
-                          <div className="relative z-10 flex items-center justify-center w-8 h-8 rounded-full bg-info/10 border-2 border-info/30 text-sm shrink-0">
-                            🗂
-                          </div>
-                          <div className="flex-1 min-w-0 bg-info/10 border border-info/30 rounded-lg px-3 py-2.5">
-                            <p className="text-xs font-medium text-info">
-                              Project created — {project.projectNo}
-                            </p>
-                            <p className="text-[11px] text-info/80 mt-1">
-                              {new Date(project.createdAt).toLocaleDateString(
-                                "en-IN",
-                                {
-                                  day: "numeric",
-                                  month: "short",
-                                  year: "numeric",
-                                },
-                              )}
-                            </p>
+                          ))}
+                          {/* Project creation as last item */}
+                          <div className="relative flex gap-4 pb-4">
+                            <div className="relative z-10 flex items-center justify-center w-8 h-8 rounded-full bg-info/10 border-2 border-info/30 text-sm shrink-0">
+                              🗂
+                            </div>
+                            <div className="flex-1 min-w-0 bg-info/10 border border-info/30 rounded-lg px-3 py-2.5">
+                              <p className="text-xs font-medium text-info">
+                                Project created — {project.projectNo}
+                              </p>
+                              <p className="text-[11px] text-info/80 mt-1">
+                                {new Date(project.createdAt).toLocaleDateString(
+                                  "en-IN",
+                                  {
+                                    day: "numeric",
+                                    month: "short",
+                                    year: "numeric",
+                                  },
+                                )}
+                              </p>
+                            </div>
                           </div>
                         </div>
                       </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })()}
-          </section>
+                    )}
+                  </div>
+                );
+              })()}
+            </section>
+          )}
         </div>
       </div>
 

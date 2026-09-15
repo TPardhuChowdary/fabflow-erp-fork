@@ -43,7 +43,9 @@
 // "Reprocess" button, never "Process with AI", once status is already
 // 'ready', so reaching this endpoint with a 'ready' row already IS the
 // explicit reprocess request; no extra flag is needed in the request
-// body, which stays exactly `{ photoId }` per the approved architecture).
+// body, which is `{ photoId, backgroundColor? }` — backgroundColor is
+// the only addition Phase 4 makes to this shape, see that phase's own
+// header comment above for what it does).
 //
 // Orphan safety on reprocess: the new processed image is uploaded under
 // a FRESH path first; only after the DB row is updated to point at it
@@ -52,6 +54,26 @@
 // processed_storage_path/processed_filename are left completely
 // untouched — a prior good processed image is never wiped by a failed
 // reprocess attempt.
+//
+// Phase 4 — AI/manual background color. The images/edits endpoint
+// returns pixels only, no structured text alongside them, so it can't
+// itself report back "which palette color did I use" for us to store.
+// Rather than trust free-text parsing of a color the edit model claims
+// to have picked, the choice is always made BEFORE the edit call and
+// then told to the edit model as an explicit, deterministic instruction
+// — the same mechanism serves both paths:
+//   - Manual override: the caller's own (allowlist-validated) choice.
+//   - "AI Recommended": one lightweight vision classification call
+//     (gpt-5.6-luna via /v1/responses — the same model
+//     _shared/openaiProvider.ts already uses live for vision input;
+//     reused here as a plain literal via raw fetch, never importing
+//     that file, keeping this function's existing isolation) asks the
+//     model to pick a palette option number after analyzing the
+//     product's brightness/color/material — never freeform text.
+// Either way, the exact chosen {name, hex} is known server-side before
+// the edit call, so it can be embedded verbatim in the edit prompt AND
+// stored in processed_background_color — no parsing of the edit
+// response required, no chance of the edit model silently drifting.
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
@@ -76,7 +98,135 @@ function jsonResponse(body: unknown, status: number): Response {
 // photographed product, change only the background).
 const OPENAI_IMAGE_EDIT_URL = "https://api.openai.com/v1/images/edits";
 const OPENAI_IMAGE_MODEL = "gpt-image-2.5-sunburst";
+// Vision classification call for the "AI Recommended" path only — same
+// endpoint/model _shared/openaiProvider.ts already uses live for real
+// vision input (see that file's own header), reused here as a literal.
+const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
+const OPENAI_CLASSIFY_MODEL = "gpt-5.6-luna";
 const ASSET_PHOTOS_BUCKET = "asset-photos";
+
+// The ONLY backgrounds this feature will ever produce or accept — every
+// value that reaches the image-edit prompt or the database comes from
+// this list, never a frontend- or model-supplied string taken at face
+// value. Order matters only for the classification prompt's numbering.
+const APPROVED_BACKGROUNDS: ReadonlyArray<{ name: string; hex: string }> = [
+  { name: "Pure White", hex: "#FFFFFF" },
+  { name: "Warm White", hex: "#FAF9F6" },
+  { name: "Light Gray", hex: "#F1F3F5" },
+  { name: "Cool Gray", hex: "#E9EEF2" },
+  { name: "Soft Blue-Gray", hex: "#E8F0F5" },
+  { name: "Soft Beige", hex: "#F3EDE3" },
+  { name: "Very Light Slate", hex: "#E5E7EB" },
+];
+
+function findApprovedBackground(hex: unknown): { name: string; hex: string } | undefined {
+  if (typeof hex !== "string") return undefined;
+  const normalized = hex.trim().toUpperCase();
+  return APPROVED_BACKGROUNDS.find((b) => b.hex === normalized);
+}
+
+function buildEditPrompt(bg: { name: string; hex: string }): string {
+  return `You are editing a real photograph of a physical manufactured product or customer sample product, for use as a professional catalog/cover image.
+
+Task: isolate the primary physical product in this photo and completely remove the original background. Replace it with a clean, fully opaque background using EXACTLY this color: ${bg.name} (${bg.hex}). Do not use any other color, shade, gradient, or pattern for the background — this exact color is a fixed requirement, not a suggestion.
+
+Strict requirements — the product itself must look exactly as photographed:
+- Preserve the product's exact geometry, proportions, and dimensions.
+- Preserve its exact colors, finishes, and textures.
+- Preserve every visible detail: holes, welds, edges, hardware, fasteners, labels, and markings.
+- Do NOT redesign, recolor, or reshape the product in any way.
+- Do NOT add any component that is not in the original photo.
+- Do NOT remove any legitimate component that is in the original photo.
+- Do NOT hallucinate or invent any missing geometry or detail.
+- Do NOT alter or invent any branding, text, or labels.
+- The background must be fully opaque — never transparent — and must be exactly ${bg.hex} (${bg.name}).
+- A subtle, natural grounding shadow beneath the product is acceptable if it looks realistic.
+- The only change should be the background. Do not beautify or otherwise alter the product's physical appearance.`;
+}
+
+// Picks one palette option for the "AI Recommended" path by asking a
+// real vision-capable model to look at the actual product photo — never
+// a guess, never defaults to white. Constrained to respond with only an
+// option number (1-7) rather than free-text color names/hex, which
+// keeps parsing trivial and impossible to confuse with prose.
+async function chooseBackgroundViaAI(
+  // deno-lint-ignore no-explicit-any
+  serviceClient: any,
+  storagePath: string,
+  apiKey: string,
+): Promise<{ name: string; hex: string }> {
+  const { data: signed, error: signError } = await serviceClient.storage
+    .from(ASSET_PHOTOS_BUCKET)
+    .createSignedUrl(storagePath, 300);
+  if (signError || !signed) {
+    throw new Error("Could not prepare the photo for background analysis.");
+  }
+
+  const optionsList = APPROVED_BACKGROUNDS.map((b, i) => `${i + 1}. ${b.name} (${b.hex})`).join("\n");
+  const prompt = `You are choosing a professional product-photography background color for a physical manufactured product shown in the attached photo.
+
+Analyze the product's dominant colors, brightness, material, and visual characteristics. Choose the ONE option below that gives the product the clearest, most professional contrast and visibility:
+- If the product itself is white or very light-colored, do NOT choose a white/near-white background — choose one with enough contrast instead (e.g. a light gray, cool gray, blue-gray, or beige option).
+- If the product is dark-colored, prefer a white/warm-white/light neutral option.
+- If the product has multiple strong colors, prefer the most neutral option that won't visually compete with it.
+
+Approved options:
+${optionsList}
+
+Respond with ONLY the number of your chosen option (1-7). No other words, punctuation, or explanation.`;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 30_000);
+  let res: Response;
+  try {
+    res = await fetch(OPENAI_RESPONSES_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: OPENAI_CLASSIFY_MODEL,
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [
+              { type: "input_text", text: prompt },
+              { type: "input_image", image_url: signed.signedUrl },
+            ],
+          },
+        ],
+        max_output_tokens: 16,
+        store: false,
+      }),
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  const parsed = await res.json().catch(() => null);
+  if (!res.ok || !parsed) {
+    throw new Error(parsed?.error?.message ?? `Background analysis request failed (${res.status}).`);
+  }
+  // deno-lint-ignore no-explicit-any
+  const output = (parsed as any)?.output;
+  let text = "";
+  if (Array.isArray(output)) {
+    for (const item of output) {
+      if (item?.type === "message" && Array.isArray(item.content)) {
+        const block = item.content.find((c: { type?: string }) => c?.type === "output_text");
+        if (block?.text) {
+          text = String(block.text);
+          break;
+        }
+      }
+    }
+  }
+  const match = text.match(/[1-7]/);
+  if (!match) {
+    throw new Error("Background analysis did not return a valid selection.");
+  }
+  return APPROVED_BACKGROUNDS[Number(match[0]) - 1];
+}
 
 // Same 3-minute stale threshold specified in the approved architecture;
 // same reasoning as emailSyncLock.ts's LOCK_LEASE_MS — comfortably
@@ -84,24 +234,6 @@ const ASSET_PHOTOS_BUCKET = "asset-photos";
 // genuinely crashed attempt self-heals promptly rather than wedging the
 // photo.
 const STALE_PROCESSING_MS = 3 * 60_000;
-
-const EDIT_PROMPT = `You are editing a real photograph of a physical manufactured product or customer sample product, for use as a professional catalog/cover image.
-
-Task: isolate the primary physical product in this photo and completely remove the original background. Replace it with a clean, opaque, soft white / very light neutral pastel background suitable for a professional industrial product photograph.
-
-Strict requirements — the product itself must look exactly as photographed:
-- Preserve the product's exact geometry, proportions, and dimensions.
-- Preserve its exact colors, finishes, and textures.
-- Preserve every visible detail: holes, welds, edges, hardware, fasteners, labels, and markings.
-- Do NOT redesign the product in any way.
-- Do NOT add any component that is not in the original photo.
-- Do NOT remove any legitimate component that is in the original photo.
-- Do NOT hallucinate or invent any missing geometry or detail.
-- Do NOT alter or invent any branding, text, or labels.
-- The background must be fully opaque — never transparent.
-- The background must be a plain, soft white or very light neutral pastel tone — no strong colors, gradients, patterns, scenery, people, machinery, or rooms.
-- A subtle, natural grounding shadow beneath the product is acceptable if it looks realistic.
-- The only change should be the background. Do not beautify or otherwise alter the product's physical appearance.`;
 
 interface AssetPhotoRow {
   id: string;
@@ -176,7 +308,7 @@ Deno.serve(async (req: Request) => {
     return jsonResponse({ error: "Not authenticated." }, 401);
   }
 
-  let body: { photoId?: string };
+  let body: { photoId?: string; backgroundColor?: string };
   try {
     body = await req.json();
   } catch {
@@ -185,6 +317,21 @@ Deno.serve(async (req: Request) => {
   const photoId = body.photoId;
   if (!photoId || typeof photoId !== "string") {
     return jsonResponse({ error: "photoId is required." }, 400);
+  }
+  // Manual override is optional — omitted means "AI Recommended" (the
+  // model chooses via chooseBackgroundViaAI below). When present, it
+  // must be one of the fixed approved hex values; the frontend only
+  // ever sends values from that same list, but this is the actual
+  // authorization boundary — never trust it without re-checking here.
+  let manualBackground: { name: string; hex: string } | undefined;
+  if (body.backgroundColor !== undefined) {
+    manualBackground = findApprovedBackground(body.backgroundColor);
+    if (!manualBackground) {
+      return jsonResponse(
+        { error: "Invalid background color. Must be one of the approved palette values." },
+        400,
+      );
+    }
   }
 
   // RLS (on userClient) is the real authorization check for READ access
@@ -269,6 +416,26 @@ Deno.serve(async (req: Request) => {
     return jsonResponse({ error: "Could not read the original photo." }, 502);
   }
 
+  // The background is chosen BEFORE the edit call (see this file's own
+  // header comment for why): the caller's validated manual choice, or
+  // one real vision analysis of the actual product photo. Either way
+  // it's a concrete {name, hex} by the time the edit prompt is built —
+  // never decided by, or parsed out of, the edit call itself.
+  let chosenBackground: { name: string; hex: string };
+  if (manualBackground) {
+    chosenBackground = manualBackground;
+  } else {
+    try {
+      chosenBackground = await chooseBackgroundViaAI(serviceClient, photoRow.storage_path, OPENAI_API_KEY);
+    } catch (err) {
+      await markFailed(serviceClient, photoId);
+      return jsonResponse(
+        { error: safeErrorMessage(err, "Could not analyze the product to choose a background.") },
+        502,
+      );
+    }
+  }
+
   let editedBytes: Uint8Array;
   try {
     const form = new FormData();
@@ -279,7 +446,7 @@ Deno.serve(async (req: Request) => {
         type: photoRow.mime_type || "image/png",
       }),
     );
-    form.append("prompt", EDIT_PROMPT);
+    form.append("prompt", buildEditPrompt(chosenBackground));
     form.append("background", "opaque"); // never transparent, per the API's own documented enum
     // input_fidelity omitted: live-tested against the real API and
     // gpt-image-2.5-sunburst rejects it ("does not support the
@@ -336,6 +503,7 @@ Deno.serve(async (req: Request) => {
     .update({
       processed_storage_path: newProcessedPath,
       processed_filename: newProcessedFilename,
+      processed_background_color: chosenBackground.hex,
       processing_status: "ready",
       updated_at: new Date().toISOString(),
     })
@@ -361,7 +529,13 @@ Deno.serve(async (req: Request) => {
   }
 
   return jsonResponse(
-    { status: "ready", processedStoragePath: newProcessedPath, processedFilename: newProcessedFilename },
+    {
+      status: "ready",
+      processedStoragePath: newProcessedPath,
+      processedFilename: newProcessedFilename,
+      processedBackgroundColor: chosenBackground.hex,
+      processedBackgroundName: chosenBackground.name,
+    },
     200,
   );
 });

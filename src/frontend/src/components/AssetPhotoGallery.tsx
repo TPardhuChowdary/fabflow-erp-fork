@@ -18,7 +18,9 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  BACKGROUND_PALETTE,
   deleteAssetPhoto,
+  findBackgroundByHex,
   getAssetPhotoSignedUrl,
   requestProjectPhotoProcessing,
   setPhotoCoverVariant,
@@ -95,6 +97,14 @@ export function AssetPhotoGallery({
     null,
   );
   const [viewingProcessed, setViewingProcessed] = useState(false);
+  // Phase 4 — manual background override. showBackgroundPicker reveals
+  // the swatch row ("Change Background"); selectedBackground is the
+  // pending choice within it until "Reprocess with Selected Background"
+  // is actually clicked — picking a swatch alone never triggers a call.
+  const [showBackgroundPicker, setShowBackgroundPicker] = useState(false);
+  const [selectedBackground, setSelectedBackground] = useState<string | null>(
+    null,
+  );
 
   const photos = useMemo(
     () =>
@@ -243,10 +253,19 @@ export function AssetPhotoGallery({
   // (the whole OpenAI + Storage + DB round trip happens inside that one
   // request), so the final outcome is already known when it resolves —
   // no polling loop is needed here.
-  async function handleProcess(photo: AssetPhoto) {
+  // Phase 4 — backgroundColor omitted means "AI Recommended" (the Edge
+  // Function analyzes the product and picks a palette color itself);
+  // passed means "Reprocess with Selected Background" (deterministic —
+  // see requestProjectPhotoProcessing's own comment). Either way the
+  // real response tells us which color was actually used, so the local
+  // state update never has to guess.
+  async function handleProcess(photo: AssetPhoto, backgroundColor?: string) {
     setProcessingPhotoId(photo.id);
     try {
-      const result = await requestProjectPhotoProcessing(photo.id);
+      const result = await requestProjectPhotoProcessing(
+        photo.id,
+        backgroundColor,
+      );
       if (result.status !== "success" || !result.data) {
         toast.error(`AI processing failed: ${result.error ?? "unknown error"}`);
         // The Edge Function's own claim already flips processing_status
@@ -266,9 +285,14 @@ export function AssetPhotoGallery({
         processingStatus: "ready",
         processedStoragePath: result.data.processedStoragePath,
         processedFilename: result.data.processedFilename,
+        processedBackgroundColor: result.data.processedBackgroundColor,
       });
+      setShowBackgroundPicker(false);
+      setSelectedBackground(null);
       toast.success(
-        "AI processing complete — review the result before using it as the cover.",
+        result.data.processedBackgroundName
+          ? `AI selected: ${result.data.processedBackgroundName}`
+          : "AI processing complete — review the result before using it as the cover.",
       );
     } finally {
       setProcessingPhotoId(null);
@@ -338,6 +362,8 @@ export function AssetPhotoGallery({
   // biome-ignore lint/correctness/useExhaustiveDependencies: only previewIndex should reset this
   useEffect(() => {
     setViewingProcessed(false);
+    setShowBackgroundPicker(false);
+    setSelectedBackground(null);
   }, [previewIndex]);
   const primaryIndex = photos.findIndex((p) => p.isPrimary);
   const heroIndex =
@@ -680,22 +706,99 @@ export function AssetPhotoGallery({
                       </Button>
                     )}
                     {previewPhoto.processingStatus === "ready" && (
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        disabled={processingPhotoId === previewPhoto.id}
-                        onClick={() => handleProcess(previewPhoto)}
-                        data-ocid={
-                          dataOcid
-                            ? `${dataOcid}.ai.reprocess_button`
-                            : undefined
-                        }
-                      >
-                        <RotateCw className="w-3.5 h-3.5 mr-1" />{" "}
-                        {processingPhotoId === previewPhoto.id
-                          ? "Processing…"
-                          : "Reprocess"}
-                      </Button>
+                      <>
+                        {/* Phase 4 — which palette background this
+                            processed image actually used. undefined
+                            covers every processed image made before
+                            this phase existed — a generic label, never
+                            an error, per the backward-compat
+                            requirement. */}
+                        <span className="text-xs text-muted-foreground w-full basis-full">
+                          Background:{" "}
+                          {findBackgroundByHex(
+                            previewPhoto.processedBackgroundColor,
+                          )?.name ?? "AI selected / Existing"}
+                        </span>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={processingPhotoId === previewPhoto.id}
+                          onClick={() => handleProcess(previewPhoto)}
+                          data-ocid={
+                            dataOcid
+                              ? `${dataOcid}.ai.reprocess_button`
+                              : undefined
+                          }
+                        >
+                          <RotateCw className="w-3.5 h-3.5 mr-1" />{" "}
+                          {processingPhotoId === previewPhoto.id
+                            ? "Processing…"
+                            : "Reprocess"}
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={processingPhotoId === previewPhoto.id}
+                          onClick={() => setShowBackgroundPicker((v) => !v)}
+                          data-ocid={
+                            dataOcid
+                              ? `${dataOcid}.ai.change_background_button`
+                              : undefined
+                          }
+                        >
+                          {showBackgroundPicker
+                            ? "Cancel"
+                            : "Change Background"}
+                        </Button>
+                        {showBackgroundPicker && (
+                          <div className="w-full basis-full flex flex-wrap items-center gap-2 pt-1">
+                            {BACKGROUND_PALETTE.map((bg) => (
+                              <button
+                                key={bg.hex}
+                                type="button"
+                                title={bg.hex}
+                                onClick={() => setSelectedBackground(bg.hex)}
+                                className={`flex items-center gap-1.5 rounded-md border px-1.5 py-1 text-[11px] ${
+                                  selectedBackground === bg.hex
+                                    ? "border-primary ring-1 ring-primary"
+                                    : "hover:border-foreground/40"
+                                }`}
+                                data-ocid={
+                                  dataOcid
+                                    ? `${dataOcid}.ai.swatch.${bg.hex}`
+                                    : undefined
+                                }
+                              >
+                                <span
+                                  className="w-4 h-4 rounded-full border shrink-0"
+                                  style={{ backgroundColor: bg.hex }}
+                                />
+                                {bg.name}
+                              </button>
+                            ))}
+                            <Button
+                              size="sm"
+                              disabled={
+                                !selectedBackground ||
+                                processingPhotoId === previewPhoto.id
+                              }
+                              onClick={() =>
+                                selectedBackground &&
+                                handleProcess(previewPhoto, selectedBackground)
+                              }
+                              data-ocid={
+                                dataOcid
+                                  ? `${dataOcid}.ai.reprocess_with_selected_button`
+                                  : undefined
+                              }
+                            >
+                              {processingPhotoId === previewPhoto.id
+                                ? "Processing…"
+                                : "Reprocess with Selected Background"}
+                            </Button>
+                          </div>
+                        )}
+                      </>
                     )}
                     {/* Phase 3 — Project Photos cover variant. Only for
                         the cover row itself (isPrimary) once a

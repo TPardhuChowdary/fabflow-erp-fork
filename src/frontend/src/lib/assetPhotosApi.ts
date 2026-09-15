@@ -104,7 +104,41 @@ function rowToAssetPhoto(row: Record<string, unknown>): AssetPhoto {
     processedStoragePath: (row.processed_storage_path as string) ?? undefined,
     processedFilename: (row.processed_filename as string) ?? undefined,
     coverUsesProcessed: row.cover_uses_processed as boolean,
+    processedBackgroundColor:
+      (row.processed_background_color as string) ?? undefined,
   };
+}
+
+// Phase 4 — the ONE allowlist this whole feature is built around: every
+// swatch the UI can show, every value requestProjectPhotoProcessing can
+// send, and every value the Edge Function will accept comes from this
+// exact list (mirrored server-side in
+// supabase/functions/process-project-photo/index.ts's own
+// APPROVED_BACKGROUNDS — kept in sync by hand since the frontend can't
+// import Deno function code, same reasoning the Edge Function's own
+// header gives for staying isolated from openaiProvider.ts). Never
+// construct a background value any other way.
+export const BACKGROUND_PALETTE: ReadonlyArray<{ name: string; hex: string }> =
+  [
+    { name: "Pure White", hex: "#FFFFFF" },
+    { name: "Warm White", hex: "#FAF9F6" },
+    { name: "Light Gray", hex: "#F1F3F5" },
+    { name: "Cool Gray", hex: "#E9EEF2" },
+    { name: "Soft Blue-Gray", hex: "#E8F0F5" },
+    { name: "Soft Beige", hex: "#F3EDE3" },
+    { name: "Very Light Slate", hex: "#E5E7EB" },
+  ];
+
+/** Looks up a palette entry by hex (case-insensitive) — used to render
+ * "AI selected: {name}" from a stored processedBackgroundColor. Returns
+ * undefined for a processed image from before this phase, which the UI
+ * shows as a generic label rather than treating as an error. */
+export function findBackgroundByHex(
+  hex: string | undefined,
+): { name: string; hex: string } | undefined {
+  if (!hex) return undefined;
+  const normalized = hex.trim().toUpperCase();
+  return BACKGROUND_PALETTE.find((b) => b.hex === normalized);
 }
 
 /** Uploads one photo for the given asset and inserts its asset_photos
@@ -313,6 +347,10 @@ export interface PhotoProcessingResult {
   status: "ready" | "processing";
   processedStoragePath?: string;
   processedFilename?: string;
+  /** Phase 4 — the palette hex actually used for this run (AI-chosen or
+   * the caller's own manual choice echoed back). */
+  processedBackgroundColor?: string;
+  processedBackgroundName?: string;
   message?: string;
 }
 
@@ -322,16 +360,28 @@ export interface PhotoProcessingResult {
  * row's current processing_status) is what distinguishes them, not a
  * flag here. A 409 "already processing" response is not an error — it
  * comes back as a normal success with status: "processing" so the UI
- * can show "already processing" instead of a failure toast. */
+ * can show "already processing" instead of a failure toast.
+ *
+ * `backgroundColor` is optional and, when passed, MUST be one of
+ * BACKGROUND_PALETTE's own hex values — this is the "Reprocess with
+ * Selected Background" / manual-override path (Phase 4). Omitted means
+ * "AI Recommended": the Edge Function analyzes the product itself and
+ * picks a palette color server-side. The Edge Function re-validates
+ * this value against its own allowlist regardless — this check here is
+ * a cheap early reject, never the actual authorization boundary. */
 export async function requestProjectPhotoProcessing(
   photoId: string,
+  backgroundColor?: string,
 ): Promise<WriteResult<PhotoProcessingResult>> {
   const gate = await requireSession();
   if (!gate.ok) return gate.result;
+  if (backgroundColor !== undefined && !findBackgroundByHex(backgroundColor)) {
+    return { status: "error", error: "Invalid background color." };
+  }
 
   const { data, error } = await gate.client.functions.invoke<
     PhotoProcessingResult & { error?: string }
-  >("process-project-photo", { body: { photoId } });
+  >("process-project-photo", { body: { photoId, backgroundColor } });
 
   if (error) {
     const context = (

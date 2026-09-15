@@ -1916,6 +1916,15 @@ export interface AssetPhoto {
    * Never implied by processingStatus — AI processing alone never
    * changes this. See supabase/migrations/20260916090000_asset_photos_cover_variant.sql. */
   coverUsesProcessed?: boolean;
+  /** Project Photos only (Phase 4) — hex of the approved palette color
+   * the processed derivative's background was rendered in (AI-chosen or
+   * user-chosen — the row doesn't distinguish which). undefined for
+   * every processed image made before this phase and for every
+   * non-project owner type; the UI falls back to a generic label rather
+   * than treating that as an error. See
+   * supabase/migrations/20260916140000_asset_photos_processed_background_color.sql
+   * and BACKGROUND_PALETTE in lib/assetPhotosApi.ts for the allowlist. */
+  processedBackgroundColor?: string;
 }
 
 // ── Machine / Service Revenue (§17-28) ──────────────────────────

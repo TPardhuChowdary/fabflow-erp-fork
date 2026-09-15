@@ -20,6 +20,8 @@ import {
 import {
   deleteAssetPhoto,
   getAssetPhotoSignedUrl,
+  requestProjectPhotoProcessing,
+  setPhotoCoverVariant,
   uploadAssetPhoto,
 } from "@/lib/assetPhotosApi";
 import { setPrimaryAssetPhoto } from "@/lib/assetPhotosApi";
@@ -30,6 +32,9 @@ import {
   ChevronRight,
   Download,
   ImagePlus,
+  Loader2,
+  RotateCw,
+  Sparkles,
   Star,
   Trash2,
 } from "lucide-react";
@@ -79,6 +84,17 @@ export function AssetPhotoGallery({
   const [signedUrls, setSignedUrls] = useState<Record<string, string>>({});
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [isBusy, setIsBusy] = useState(false);
+  // Phase 2 — Project Photos AI background removal. project-only; every
+  // other ownerType never sets processingStatus, so all of this stays
+  // completely inert (no extra network calls, no UI change) for
+  // Machine/Die/Tool/Inventory Item/Job Card photos.
+  const [processedSignedUrls, setProcessedSignedUrls] = useState<
+    Record<string, string>
+  >({});
+  const [processingPhotoId, setProcessingPhotoId] = useState<string | null>(
+    null,
+  );
+  const [viewingProcessed, setViewingProcessed] = useState(false);
 
   const photos = useMemo(
     () =>
@@ -112,6 +128,39 @@ export function AssetPhotoGallery({
       );
       if (cancelled) return;
       setSignedUrls((prev) => {
+        const next = { ...prev };
+        for (const [id, url] of entries) if (url) next[id] = url;
+        return next;
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [photos]);
+
+  // Same shape as the original-photo signed-URL effect above, applied to
+  // whichever photos have a processed derivative (project photos only —
+  // every other owner type's processedStoragePath is always undefined,
+  // so `withProcessed` is always empty for them and this never fires).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: see the original-photo effect's own comment — processedSignedUrls must stay out of the deps for the same reason
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const withProcessed = photos.filter(
+        (p) => p.processedStoragePath && !processedSignedUrls[p.id],
+      );
+      if (withProcessed.length === 0) return;
+      const entries = await Promise.all(
+        withProcessed.map(
+          async (p) =>
+            [
+              p.id,
+              await getAssetPhotoSignedUrl(p.processedStoragePath as string),
+            ] as const,
+        ),
+      );
+      if (cancelled) return;
+      setProcessedSignedUrls((prev) => {
         const next = { ...prev };
         for (const [id, url] of entries) if (url) next[id] = url;
         return next;
@@ -187,6 +236,73 @@ export function AssetPhotoGallery({
     }
   }
 
+  // Phase 2 — Project Photos AI background removal. Same call whether
+  // this is the first "Process with AI" click or an explicit
+  // "Reprocess" — see requestProjectPhotoProcessing's own comment for
+  // why no extra flag is needed. The Edge Function call is synchronous
+  // (the whole OpenAI + Storage + DB round trip happens inside that one
+  // request), so the final outcome is already known when it resolves —
+  // no polling loop is needed here.
+  async function handleProcess(photo: AssetPhoto) {
+    setProcessingPhotoId(photo.id);
+    try {
+      const result = await requestProjectPhotoProcessing(photo.id);
+      if (result.status !== "success" || !result.data) {
+        toast.error(`AI processing failed: ${result.error ?? "unknown error"}`);
+        // The Edge Function's own claim already flips processing_status
+        // to 'processing' before it does anything else, and marks it
+        // 'failed' on any error — reflect that locally now rather than
+        // waiting for a reload, so Retry appears immediately.
+        updateAssetPhotoLocal({ ...photo, processingStatus: "failed" });
+        return;
+      }
+      if (result.data.status === "processing") {
+        toast(result.data.message ?? "This photo is already being processed.");
+        updateAssetPhotoLocal({ ...photo, processingStatus: "processing" });
+        return;
+      }
+      updateAssetPhotoLocal({
+        ...photo,
+        processingStatus: "ready",
+        processedStoragePath: result.data.processedStoragePath,
+        processedFilename: result.data.processedFilename,
+      });
+      toast.success(
+        "AI processing complete — review the result before using it as the cover.",
+      );
+    } finally {
+      setProcessingPhotoId(null);
+    }
+  }
+
+  // Phase 3 — Project Photos cover variant. Never touches is_primary —
+  // this photo is already the cover (that's why the action is only
+  // shown when previewPhoto.isPrimary); it only changes which of this
+  // row's two images the cover displays.
+  async function handleSetCoverVariant(
+    photo: AssetPhoto,
+    useProcessed: boolean,
+  ) {
+    setIsBusy(true);
+    try {
+      const result = await setPhotoCoverVariant(photo.id, useProcessed);
+      if (result.status !== "success") {
+        toast.error(
+          `Could not update cover: ${result.error ?? "unknown error"}`,
+        );
+        return;
+      }
+      updateAssetPhotoLocal({ ...photo, coverUsesProcessed: useProcessed });
+      toast.success(
+        useProcessed
+          ? "Using processed image as cover"
+          : "Using original as cover",
+      );
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
   async function handleDelete(photo: AssetPhoto) {
     setIsBusy(true);
     try {
@@ -217,6 +333,12 @@ export function AssetPhotoGallery({
   }
 
   const previewPhoto = previewIndex !== null ? photos[previewIndex] : null;
+  // Always land on the original when opening/switching a preview — never
+  // silently show a processed image the user didn't ask to see.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: only previewIndex should reset this
+  useEffect(() => {
+    setViewingProcessed(false);
+  }, [previewIndex]);
   const primaryIndex = photos.findIndex((p) => p.isPrimary);
   const heroIndex =
     primaryIndex >= 0 ? primaryIndex : photos.length > 0 ? 0 : -1;
@@ -410,18 +532,55 @@ export function AssetPhotoGallery({
           ) : (
             previewPhoto && (
               <div className="space-y-3">
+                {/* Phase 2 — Project Photos AI background removal. Only
+                    ever renders for ownerType "project" with a
+                    processed derivative — every other case leaves this
+                    exactly as it always looked. Never silently shows
+                    the processed image; "Original"/"Processed" is
+                    always explicit. */}
+                {previewPhoto.processedStoragePath && (
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="font-medium text-muted-foreground">
+                      Viewing:
+                    </span>
+                    <div className="inline-flex rounded-md border overflow-hidden">
+                      <button
+                        type="button"
+                        onClick={() => setViewingProcessed(false)}
+                        className={`px-2.5 py-1 ${!viewingProcessed ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}
+                      >
+                        Original
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setViewingProcessed(true)}
+                        className={`px-2.5 py-1 border-l ${viewingProcessed ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}
+                      >
+                        Processed (AI)
+                      </button>
+                    </div>
+                  </div>
+                )}
                 <div className="relative">
-                  {signedUrls[previewPhoto.id] && (
-                    <img
-                      src={signedUrls[previewPhoto.id]}
-                      alt={
-                        previewPhoto.caption ||
-                        previewPhoto.originalFilename ||
-                        "Asset photo"
-                      }
-                      className="w-full max-h-[70vh] object-contain rounded"
-                    />
-                  )}
+                  {(() => {
+                    const showingUrl =
+                      viewingProcessed && previewPhoto.processedStoragePath
+                        ? processedSignedUrls[previewPhoto.id]
+                        : signedUrls[previewPhoto.id];
+                    return (
+                      showingUrl && (
+                        <img
+                          src={showingUrl}
+                          alt={
+                            previewPhoto.caption ||
+                            previewPhoto.originalFilename ||
+                            "Asset photo"
+                          }
+                          className="w-full max-h-[70vh] object-contain rounded"
+                        />
+                      )
+                    );
+                  })()}
                   {photos.length > 1 && (
                     <>
                       <button
@@ -453,13 +612,13 @@ export function AssetPhotoGallery({
                     </>
                   )}
                 </div>
-                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground flex-wrap">
                   <span>
                     {previewPhoto.originalFilename}
                     {photos.length > 1 &&
                       ` — ${(previewIndex ?? 0) + 1} of ${photos.length}`}
                   </span>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <Button
                       variant="outline"
                       size="sm"
@@ -491,6 +650,122 @@ export function AssetPhotoGallery({
                     )}
                   </div>
                 </div>
+
+                {/* Phase 2 — Project Photos AI background removal.
+                    ownerType-gated: Machine/Die/Tool/Inventory Item/Job
+                    Card photos never render any of this. */}
+                {ownerType === "project" && canEdit && (
+                  <div
+                    className="flex items-center gap-2 flex-wrap border-t pt-3"
+                    data-ocid={dataOcid ? `${dataOcid}.ai` : undefined}
+                  >
+                    {!previewPhoto.processingStatus && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={processingPhotoId === previewPhoto.id}
+                        onClick={() => handleProcess(previewPhoto)}
+                        data-ocid={
+                          dataOcid ? `${dataOcid}.ai.process_button` : undefined
+                        }
+                      >
+                        <Sparkles className="w-3.5 h-3.5 mr-1" /> Process with
+                        AI
+                      </Button>
+                    )}
+                    {previewPhoto.processingStatus === "processing" && (
+                      <Button variant="outline" size="sm" disabled>
+                        <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />{" "}
+                        Processing…
+                      </Button>
+                    )}
+                    {previewPhoto.processingStatus === "ready" && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={processingPhotoId === previewPhoto.id}
+                        onClick={() => handleProcess(previewPhoto)}
+                        data-ocid={
+                          dataOcid
+                            ? `${dataOcid}.ai.reprocess_button`
+                            : undefined
+                        }
+                      >
+                        <RotateCw className="w-3.5 h-3.5 mr-1" />{" "}
+                        {processingPhotoId === previewPhoto.id
+                          ? "Processing…"
+                          : "Reprocess"}
+                      </Button>
+                    )}
+                    {/* Phase 3 — Project Photos cover variant. Only for
+                        the cover row itself (isPrimary) once a
+                        processed image is actually ready — never
+                        offered for a non-primary photo or a
+                        processing/failed one. Never changes isPrimary. */}
+                    {previewPhoto.isPrimary &&
+                      previewPhoto.processingStatus === "ready" &&
+                      previewPhoto.processedStoragePath &&
+                      (previewPhoto.coverUsesProcessed ? (
+                        <>
+                          <span className="text-xs text-muted-foreground">
+                            Using Processed as Cover
+                          </span>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={isBusy}
+                            onClick={() =>
+                              handleSetCoverVariant(previewPhoto, false)
+                            }
+                            data-ocid={
+                              dataOcid
+                                ? `${dataOcid}.ai.use_original_cover_button`
+                                : undefined
+                            }
+                          >
+                            Use Original as Cover
+                          </Button>
+                        </>
+                      ) : (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={isBusy}
+                          onClick={() =>
+                            handleSetCoverVariant(previewPhoto, true)
+                          }
+                          data-ocid={
+                            dataOcid
+                              ? `${dataOcid}.ai.use_processed_cover_button`
+                              : undefined
+                          }
+                        >
+                          Use Processed as Cover
+                        </Button>
+                      ))}
+                    {previewPhoto.processingStatus === "failed" && (
+                      <>
+                        <span className="text-xs text-destructive">
+                          AI processing failed.
+                        </span>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={processingPhotoId === previewPhoto.id}
+                          onClick={() => handleProcess(previewPhoto)}
+                          data-ocid={
+                            dataOcid ? `${dataOcid}.ai.retry_button` : undefined
+                          }
+                        >
+                          <RotateCw className="w-3.5 h-3.5 mr-1" />{" "}
+                          {processingPhotoId === previewPhoto.id
+                            ? "Processing…"
+                            : "Retry"}
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                )}
               </div>
             )
           )}

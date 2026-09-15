@@ -99,6 +99,11 @@ function rowToAssetPhoto(row: Record<string, unknown>): AssetPhoto {
     uploadedBy: (row.uploaded_by as string) ?? undefined,
     createdAt: new Date(row.created_at as string).getTime(),
     updatedAt: new Date(row.updated_at as string).getTime(),
+    processingStatus:
+      (row.processing_status as AssetPhoto["processingStatus"]) ?? undefined,
+    processedStoragePath: (row.processed_storage_path as string) ?? undefined,
+    processedFilename: (row.processed_filename as string) ?? undefined,
+    coverUsesProcessed: row.cover_uses_processed as boolean,
   };
 }
 
@@ -181,8 +186,25 @@ export async function getAssetPhotoSignedUrl(
   return data.signedUrl;
 }
 
+/** Which storage path a cover photo should display — shared by
+ * ProjectDetail.tsx and Projects.tsx so the fallback rule (Phase 3:
+ * cover_uses_processed=true but no processedStoragePath yet/anymore ->
+ * never show a broken cover, fall back to the original) lives in one
+ * place instead of being reimplemented at each call site. */
+export function resolveCoverStoragePath(
+  photo: Pick<
+    AssetPhoto,
+    "storagePath" | "processedStoragePath" | "coverUsesProcessed"
+  >,
+): string {
+  if (photo.coverUsesProcessed && photo.processedStoragePath) {
+    return photo.processedStoragePath;
+  }
+  return photo.storagePath;
+}
+
 export async function deleteAssetPhoto(
-  photo: Pick<AssetPhoto, "id" | "storagePath">,
+  photo: Pick<AssetPhoto, "id" | "storagePath" | "processedStoragePath">,
 ): Promise<WriteResult<never>> {
   const gate = await requireSession();
   if (!gate.ok) return gate.result;
@@ -202,9 +224,12 @@ export async function deleteAssetPhoto(
   // Best-effort — the DB row is the source of truth for what's "still a
   // photo"; a Storage object orphaned by a failed remove() here is a
   // harmless leftover, never masks the successful delete just reported.
-  await gate.client.storage
-    .from(ASSET_PHOTOS_BUCKET)
-    .remove([photo.storagePath]);
+  // The row's processed derivative (if any — Project Photos AI
+  // processing, Phase 2) is deleted the same way: once the row is gone
+  // there is nothing left that could ever reference that object again.
+  const paths = [photo.storagePath];
+  if (photo.processedStoragePath) paths.push(photo.processedStoragePath);
+  await gate.client.storage.from(ASSET_PHOTOS_BUCKET).remove(paths);
   return { status: "success" };
 }
 
@@ -241,4 +266,104 @@ export async function setPrimaryAssetPhoto(
     };
   }
   return { status: "success" };
+}
+
+// Phase 3 — Project Photos cover variant (original vs. processed).
+// Deliberately its own single-purpose writer, not a generic "update any
+// asset_photos column" API — same one-writer-per-concern shape as
+// setPrimaryAssetPhoto() above. Only ever called for owner_type
+// 'project' (enforced by the .eq below, defense in depth alongside the
+// UI's own ownerType === "project" gating in AssetPhotoGallery.tsx).
+// Never touches is_primary, storage_path, or processed_storage_path —
+// RLS (asset_photos_update: has_asset_permission(owner_type, 'edit') +
+// organization_id = current_organization_id()) is the actual
+// authorization boundary, same as every other write in this file.
+export async function setPhotoCoverVariant(
+  photoId: string,
+  useProcessed: boolean,
+): Promise<WriteResult<never>> {
+  const gate = await requireSession();
+  if (!gate.ok) return gate.result;
+  const { data, error } = await gate.client
+    .from("asset_photos")
+    .update({ cover_uses_processed: useProcessed })
+    .eq("id", photoId)
+    .eq("owner_type", "project")
+    .select("id");
+  if (error) return { status: "error", error: error.message };
+  const rows = (data as unknown as { id: string }[]) ?? [];
+  if (rows.length === 0) {
+    return {
+      status: "denied",
+      error:
+        "No row was updated (blocked by RLS, not a project photo, or the photo does not exist)",
+    };
+  }
+  return { status: "success" };
+}
+
+// Phase 2 — Project Photos AI background removal. Dedicated Edge
+// Function (supabase/functions/process-project-photo/index.ts), never
+// the ChatProvider/agent-chat relay — see that function's own header
+// for why. Same request shape as every other Edge Function invocation
+// in this codebase (lib/accountRecoveryApi.ts's own invoke() helper is
+// the model this mirrors, adapted for this function's own response
+// shape rather than that file's `{ success, error }` convention).
+export interface PhotoProcessingResult {
+  status: "ready" | "processing";
+  processedStoragePath?: string;
+  processedFilename?: string;
+  message?: string;
+}
+
+/** Requests AI background processing for one project photo. Same call
+ * whether this is the first "Process with AI" or an explicit
+ * "Reprocess" — the Edge Function's own atomic claim (keyed off the
+ * row's current processing_status) is what distinguishes them, not a
+ * flag here. A 409 "already processing" response is not an error — it
+ * comes back as a normal success with status: "processing" so the UI
+ * can show "already processing" instead of a failure toast. */
+export async function requestProjectPhotoProcessing(
+  photoId: string,
+): Promise<WriteResult<PhotoProcessingResult>> {
+  const gate = await requireSession();
+  if (!gate.ok) return gate.result;
+
+  const { data, error } = await gate.client.functions.invoke<
+    PhotoProcessingResult & { error?: string }
+  >("process-project-photo", { body: { photoId } });
+
+  if (error) {
+    const context = (
+      error as { context?: { json?: () => Promise<Record<string, unknown>> } }
+    ).context;
+    if (context?.json) {
+      try {
+        const errBody = await context.json();
+        if (errBody.status === "processing") {
+          return {
+            status: "success",
+            data: {
+              status: "processing",
+              message: (errBody.message as string) ?? "Already processing.",
+            },
+          };
+        }
+        return {
+          status: "error",
+          error: (errBody.error as string) || error.message,
+        };
+      } catch {
+        // fall through to the generic error below
+      }
+    }
+    return { status: "error", error: error.message };
+  }
+  if (!data) {
+    return {
+      status: "error",
+      error: "No response from the AI processing service.",
+    };
+  }
+  return { status: "success", data };
 }

@@ -1837,12 +1837,17 @@ export interface MachineDie {
 // photos - reuses AssetPhotoGallery/assetPhotosApi.ts unmodified (see
 // database/phase-62, which widens asset_photos_owner_type_check and
 // has_asset_permission() to match).
+// "project" added for Project Photos + Project Cover (see
+// supabase/migrations/20260915130000_project_photos.sql, same widening
+// pattern as "job_card") - reuses AssetPhotoGallery/assetPhotosApi.ts
+// unmodified too.
 export type AssetOwnerType =
   | "machine"
   | "die"
   | "tool"
   | "inventory_item"
-  | "job_card";
+  | "job_card"
+  | "project";
 
 // Phase 51 (Group 2) — universal usage-event log for Machine/Die/Tool,
 // one reusable table (asset_usage_events) rather than three. Mirrors
@@ -1895,6 +1900,22 @@ export interface AssetPhoto {
   uploadedBy?: string;
   createdAt: number;
   updatedAt: number;
+  /** Optional AI background-removal derivative (Project Photos only so
+   * far — see supabase/migrations/20260915130000_project_photos.sql).
+   * undefined/null for every photo that never requested processing,
+   * which is every row for every other owner type. The Phase 2 AI
+   * Edge Function is NOT implemented yet - these fields exist now only
+   * so the schema/types/hydration are in place ahead of it; nothing in
+   * this phase writes a non-null processingStatus. */
+  processingStatus?: "processing" | "ready" | "failed";
+  processedStoragePath?: string;
+  processedFilename?: string;
+  /** Project Photos only (Phase 3) — explicit user choice of which
+   * image this row's cover shows. false (default) = original; true =
+   * processedStoragePath, falling back to original if that's not set.
+   * Never implied by processingStatus — AI processing alone never
+   * changes this. See supabase/migrations/20260916090000_asset_photos_cover_variant.sql. */
+  coverUsesProcessed?: boolean;
 }
 
 // ── Machine / Service Revenue (§17-28) ──────────────────────────

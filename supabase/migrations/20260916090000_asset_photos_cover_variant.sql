@@ -1,0 +1,31 @@
+-- =====================================================================
+-- APPLIED — explicitly approved and applied to the live database via
+-- the established controlled procedure (supabase db query --linked
+-- --file), confirmed live in Phase 3 QA.
+-- =====================================================================
+--
+-- Project Photos — Phase 3: Processed Image as Project Cover.
+--
+-- Read-only architecture audit (prior session, approved) concluded
+-- is_primary alone cannot represent "which image *within* the cover
+-- row" (original vs. its AI-processed derivative) as an explicit,
+-- unambiguous state. Approved fix: one additive boolean on the same
+-- row, exactly the same shape as processing_status/processed_*
+-- from the prior migration (20260915130000_project_photos.sql) —
+-- a derived-display-state column on the photo's own row, not a new
+-- entity, not a projects-table column, not a new table.
+--
+-- Default false preserves today's behavior for every existing row of
+-- every owner_type (machine/die/tool/inventory_item/job_card/project)
+-- with zero backfill: false already means "show storage_path", which
+-- is exactly what every reader does today before this column exists.
+--
+-- No other schema object changes: is_primary, uq_asset_photos_one_primary,
+-- processing_status, processed_storage_path, processed_filename,
+-- owner_type check constraint, RLS policies, permissions, and the
+-- asset-photos Storage bucket are all untouched. The existing
+-- asset_photos_update RLS policy (has_asset_permission(owner_type,
+-- 'edit') + org match) already covers this new column like every
+-- other column on the table — no policy change needed.
+alter table public.asset_photos
+  add column if not exists cover_uses_processed boolean not null default false;

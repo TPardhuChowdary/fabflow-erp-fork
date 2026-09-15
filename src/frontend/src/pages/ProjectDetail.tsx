@@ -1,3 +1,4 @@
+import { AssetPhotoGallery } from "@/components/AssetPhotoGallery";
 import {
   CostingLineItemsTable,
   createBlankLineItemRow,
@@ -52,6 +53,7 @@ import {
   Eye,
   FileText,
   FolderKanban,
+  ImageIcon,
   Paperclip,
   Pencil,
   Plus,
@@ -76,6 +78,10 @@ import { loadPdf } from "../drawingEditor/lib/pdfRenderer";
 import { composeLatestView } from "../drawingEditor/lib/workOrderPreview";
 import { useDrawingEditorStore } from "../drawingEditor/store/useDrawingEditorStore";
 import type { DrawingDocument } from "../drawingEditor/types";
+import {
+  getAssetPhotoSignedUrl,
+  resolveCoverStoragePath,
+} from "../lib/assetPhotosApi";
 import {
   createBomItemRemote,
   deleteBomItemRemote,
@@ -516,6 +522,7 @@ export function ProjectDetail({
   const {
     projects,
     customers,
+    assetPhotos,
     designFiles,
     internalCostings,
     materialPurchases,
@@ -864,6 +871,32 @@ export function ProjectDetail({
   const project = projects.find((p) => p.id === projectId);
   const customer = customers.find((c) => c.id === project?.customerId);
 
+  // Project Cover (see AssetPhoto in types.ts / assetPhotosApi.ts) — the
+  // asset_photos row for this project with is_primary=true, resolved to
+  // a fresh signed URL exactly like AssetPhotoGallery's own internal
+  // resolution below does for the full gallery. Read directly from the
+  // already-hydrated `assetPhotos` store slice (org-wide, one query at
+  // app load) rather than a second per-project query.
+  const projectCoverPhoto = assetPhotos.find(
+    (p) => p.ownerType === "project" && p.ownerId === projectId && p.isPrimary,
+  );
+  const [projectCoverUrl, setProjectCoverUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    if (!projectCoverPhoto) {
+      setProjectCoverUrl(null);
+      return;
+    }
+    getAssetPhotoSignedUrl(resolveCoverStoragePath(projectCoverPhoto)).then(
+      (url) => {
+        if (!cancelled) setProjectCoverUrl(url);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [projectCoverPhoto]);
+
   const projDesignFiles = designFiles.filter((f) => f.projectId === projectId);
   const [previewFile, setPreviewFile] = useState<DesignFile | null>(null);
   const [previewWorkDrawing, setPreviewWorkDrawing] =
@@ -1171,7 +1204,7 @@ export function ProjectDetail({
 
   const [expandedStage, setExpandedStage] = useState<number | null>(0);
 
-  // Real section/view switch (not scroll-to-anchor): exactly one of the 14
+  // Real section/view switch (not scroll-to-anchor): exactly one of the 15
   // <section id="section-{activeTab}"> blocks below is ever mounted at a
   // time, each wrapped in `{activeTab === "<id>" && (...)}` — clicking a
   // different nav chip un-mounts the old section's JSX entirely and mounts
@@ -2333,6 +2366,24 @@ export function ProjectDetail({
         >
           <ArrowLeft className="w-4 h-4 mr-1" /> Back
         </Button>
+        {/* Project Cover — small header thumbnail. Prominent but not
+            page-bloating (see full gallery further down for the large
+            view). Derived from projectCoverUrl above; a plain neutral
+            placeholder when no cover exists yet, never a broken image. */}
+        <div
+          className="w-14 h-14 rounded-lg border bg-muted/40 shrink-0 overflow-hidden flex items-center justify-center mt-0.5"
+          data-ocid="project-detail.cover.thumbnail"
+        >
+          {projectCoverUrl ? (
+            <img
+              src={projectCoverUrl}
+              alt={`${getCustomerVisibleName(project)} cover`}
+              className="w-full h-full object-cover"
+            />
+          ) : (
+            <ImageIcon className="w-5 h-5 text-muted-foreground/50" />
+          )}
+        </div>
         <div className="flex-1">
           <div className="flex items-center gap-2">
             <span className="text-xs font-mono text-muted-foreground">
@@ -2479,6 +2530,12 @@ export function ProjectDetail({
             <SectionChip
               id="design"
               label="Design Files"
+              onClick={scrollToSection}
+              active={activeTab}
+            />
+            <SectionChip
+              id="photos"
+              label="Photos"
               onClick={scrollToSection}
               active={activeTab}
             />
@@ -3853,6 +3910,33 @@ export function ProjectDetail({
                   companyName: settings?.companyName || "Your Company",
                   companyLogoDataUrl: settings?.companyLogo || undefined,
                 }}
+              />
+            </section>
+          )}
+
+          {/* Project Photos + Project Cover — reuses the existing
+              asset_photos subsystem (AssetPhoto in types.ts,
+              assetPhotosApi.ts, AssetPhotoGallery.tsx) already built for
+              Machines/Dies/Tools/Inventory Items/Job Cards, widened here
+              to owner_type "project" (see
+              supabase/migrations/20260915130000_project_photos.sql) -
+              no second gallery component, no second storage bucket. The
+              gallery's own "star" control is Set Cover (is_primary),
+              already DB-enforced to at most one primary per project via
+              uq_asset_photos_one_primary. */}
+          {activeTab === "photos" && (
+            <section
+              id="section-photos"
+              className="mt-4 space-y-4 scroll-mt-24"
+            >
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold">Project Photos</h2>
+              </div>
+              <AssetPhotoGallery
+                ownerType="project"
+                ownerId={project.id}
+                canEdit={pEdit}
+                data-ocid="project-detail.photos"
               />
             </section>
           )}

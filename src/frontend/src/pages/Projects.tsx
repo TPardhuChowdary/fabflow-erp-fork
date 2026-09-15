@@ -25,9 +25,16 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
-import { FolderKanban, Pencil, Plus, Search, Trash2 } from "lucide-react";
+import {
+  FolderKanban,
+  ImageIcon,
+  Pencil,
+  Plus,
+  Search,
+  Trash2,
+} from "lucide-react";
 import { ShieldOff } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
 import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
@@ -35,6 +42,10 @@ import { CustomerSelect } from "../components/CustomerSelect";
 import { DeadlineIndicator } from "../components/DeadlineIndicator";
 import { QuickAddCustomerDialog } from "../components/QuickAddCustomerDialog";
 import { useUpdateProjectDeadline } from "../hooks/useUpdateProjectDeadline";
+import {
+  getAssetPhotoSignedUrl,
+  resolveCoverStoragePath,
+} from "../lib/assetPhotosApi";
 import { compareByDeadlinePriority } from "../lib/deadlinePriority";
 import {
   createProjectRemote,
@@ -78,6 +89,7 @@ export function Projects({ onViewProject }: Props) {
   const {
     customers,
     projects,
+    assetPhotos,
     addProject,
     updateProject,
     generateDocNo,
@@ -87,6 +99,42 @@ export function Projects({ onViewProject }: Props) {
   const pEdit = canEdit(currentUser, "projects");
   const pDelete = canDelete(currentUser, "projects");
   const pView = canView(currentUser, "projects");
+
+  // Project Cover thumbnails (see AssetPhoto in types.ts). `assetPhotos`
+  // above is already hydrated org-wide in one query at app load — this
+  // is a client-side filter over that existing data, not a second
+  // database query per row. Signed URLs still have to be resolved one
+  // per cover photo (Storage API call, not a DB read) since they're
+  // never cached/stored, same as every AssetPhotoGallery instance does.
+  const [coverUrls, setCoverUrls] = useState<Record<string, string>>({});
+  // biome-ignore lint/correctness/useExhaustiveDependencies: coverUrls is read only to compute `missing` (already-resolved URLs must not re-trigger this effect, or every resolved URL would immediately refetch everything again — same reasoning as AssetPhotoGallery's own signed-URL effect)
+  useEffect(() => {
+    const covers = (assetPhotos || []).filter(
+      (p) => p.ownerType === "project" && p.isPrimary,
+    );
+    const missing = covers.filter((p) => !coverUrls[p.ownerId]);
+    if (missing.length === 0) return;
+    let cancelled = false;
+    Promise.all(
+      missing.map(
+        async (p) =>
+          [
+            p.ownerId,
+            await getAssetPhotoSignedUrl(resolveCoverStoragePath(p)),
+          ] as const,
+      ),
+    ).then((entries) => {
+      if (cancelled) return;
+      setCoverUrls((prev) => {
+        const next = { ...prev };
+        for (const [projectId, url] of entries) if (url) next[projectId] = url;
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [assetPhotos]);
   // Master ERP Architecture — "Add Customer" from inside Add Project
   // still creates a real customer row, so it stays gated on the
   // customer module's own create permission, not the project one.
@@ -466,17 +514,36 @@ export function Projects({ onViewProject }: Props) {
               data-ocid={`projects.card.${i + 1}`}
             >
               <div className="flex items-start justify-between gap-2">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <span className="text-sm font-medium truncate">
-                      {getCustomerVisibleName(p)}
-                    </span>
-                    {p.projectType === "REPEAT_ORDER" &&
-                      p.internalOrderCode && (
-                        <span className="font-mono text-[10px] text-info bg-info/10 border border-info/30 px-1.5 py-0.5 rounded shrink-0">
-                          Repeat · {p.internalOrderCode}
-                        </span>
-                      )}
+                <div className="flex items-start gap-2 min-w-0">
+                  {/* Project Cover thumbnail — same compact neutral
+                      placeholder as the desktop table when no cover
+                      exists yet. */}
+                  <div
+                    className="w-9 h-9 rounded border bg-muted/40 shrink-0 overflow-hidden flex items-center justify-center"
+                    data-ocid={`projects.card.${i + 1}.cover`}
+                  >
+                    {coverUrls[p.id] ? (
+                      <img
+                        src={coverUrls[p.id]}
+                        alt=""
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <ImageIcon className="w-4 h-4 text-muted-foreground/50" />
+                    )}
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-sm font-medium truncate">
+                        {getCustomerVisibleName(p)}
+                      </span>
+                      {p.projectType === "REPEAT_ORDER" &&
+                        p.internalOrderCode && (
+                          <span className="font-mono text-[10px] text-info bg-info/10 border border-info/30 px-1.5 py-0.5 rounded shrink-0">
+                            Repeat · {p.internalOrderCode}
+                          </span>
+                        )}
+                    </div>
                   </div>
                   {/* Real focusable control, same reasoning as the desktop
                       table's primary cell above — keyboard/screen-reader
@@ -573,6 +640,9 @@ export function Projects({ onViewProject }: Props) {
           <Table>
             <TableHeader>
               <TableRow className="bg-muted/40">
+                <TableHead className="text-xs font-semibold w-12">
+                  <span className="sr-only">Cover</span>
+                </TableHead>
                 <TableHead className="text-xs font-semibold">
                   Project No
                 </TableHead>
@@ -604,6 +674,25 @@ export function Projects({ onViewProject }: Props) {
                     onClick={() => onViewProject(p.id)}
                     data-ocid={`projects.item.${i + 1}`}
                   >
+                    <TableCell>
+                      {/* Project Cover thumbnail — compact neutral
+                          placeholder (never a broken image) when no
+                          cover exists yet. */}
+                      <div
+                        className="w-8 h-8 rounded border bg-muted/40 shrink-0 overflow-hidden flex items-center justify-center"
+                        data-ocid={`projects.item.${i + 1}.cover`}
+                      >
+                        {coverUrls[p.id] ? (
+                          <img
+                            src={coverUrls[p.id]}
+                            alt=""
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <ImageIcon className="w-3.5 h-3.5 text-muted-foreground/50" />
+                        )}
+                      </div>
+                    </TableCell>
                     <TableCell className="text-xs font-mono font-semibold text-primary">
                       {/* Global record-navigation rule (§1) — the primary
                           identity cell is a real focusable control, so

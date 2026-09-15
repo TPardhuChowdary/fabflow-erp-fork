@@ -536,10 +536,16 @@ export async function hydrateMachineDies(): Promise<
 // types.ts for why one shared table covers machine/die/tool/
 // inventory_item rather than four). Wholesale-replaced on hydration,
 // same as every other org-wide domain list here.
+// "project" owner_type + the three processing_*/processed_* columns
+// added by supabase/migrations/20260915130000_project_photos.sql
+// (Project Photos + Project Cover) - see AssetPhoto in types.ts. NULL
+// for every row of every owner_type that never requests AI processing,
+// which this phase never does (Phase 2, not implemented yet).
 const ASSET_PHOTO_COLUMNS =
   "id, owner_type, owner_id, storage_path, original_filename, mime_type, " +
   "size_bytes, display_order, caption, is_primary, uploaded_by, " +
-  "created_at, updated_at";
+  "created_at, updated_at, processing_status, processed_storage_path, " +
+  "processed_filename, cover_uses_processed";
 
 interface AssetPhotoRow {
   id: string;
@@ -555,6 +561,10 @@ interface AssetPhotoRow {
   uploaded_by: string | null;
   created_at: string;
   updated_at: string;
+  processing_status: string | null;
+  processed_storage_path: string | null;
+  processed_filename: string | null;
+  cover_uses_processed: boolean;
 }
 
 function rowToAssetPhoto(row: AssetPhotoRow): AssetPhoto {
@@ -572,6 +582,11 @@ function rowToAssetPhoto(row: AssetPhotoRow): AssetPhoto {
     uploadedBy: row.uploaded_by ?? undefined,
     createdAt: new Date(row.created_at).getTime(),
     updatedAt: new Date(row.updated_at).getTime(),
+    processingStatus:
+      (row.processing_status as AssetPhoto["processingStatus"]) ?? undefined,
+    processedStoragePath: row.processed_storage_path ?? undefined,
+    processedFilename: row.processed_filename ?? undefined,
+    coverUsesProcessed: row.cover_uses_processed,
   };
 }
 

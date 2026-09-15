@@ -35,8 +35,10 @@ import {
   Layers,
   Plus,
   Printer,
+  Receipt,
   Share2,
   Trash2,
+  Truck,
   X,
 } from "lucide-react";
 import { ShieldOff } from "lucide-react";
@@ -46,6 +48,10 @@ import { createRoot } from "react-dom/client";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
 import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
+import {
+  QuotationToDcDialog,
+  QuotationToInvoiceDialog,
+} from "../components/ConversionDialogs";
 import { CustomerSelect } from "../components/CustomerSelect";
 import { ProjectMultiSelect } from "../components/ProjectMultiSelect";
 import { QuotationPrintView } from "../components/QuotationPrintView";
@@ -178,6 +184,8 @@ export function Quotations({
     addQuotationPurchaseOrder,
     addProjectPO,
     addMasterPO,
+    addDeliveryChallan,
+    addInvoice,
     settings,
   } = useStore();
   const { currentUser } = useAuth();
@@ -190,6 +198,14 @@ export function Quotations({
   const pPrint = canPrint(currentUser, "quotations");
   const pDownload = canDownload(currentUser, "quotations");
   const pShare = canShare(currentUser, "quotations");
+  // Phase 3 — Document Conversion UI. Matches the RPCs' own permission
+  // checks exactly (see convert_quotation_to_dc/convert_quotation_to_
+  // invoice in the Phase 2 migration): quotations.view is already
+  // implied by pView above (the whole page is gated on it), so the only
+  // additional checks needed here are the target document's own create
+  // permission.
+  const pConvertToDc = canCreate(currentUser, "delivery_challans");
+  const pConvertToInvoice = canCreate(currentUser, "invoices");
 
   const [open, setOpen] = useState(false);
   const [form, setForm] = useState(emptyForm());
@@ -277,6 +293,12 @@ export function Quotations({
   const [selectedQuotation, setSelectedQuotation] = useState<Quotation | null>(
     null,
   );
+  // Phase 3 — Document Conversion UI dialog state.
+  const [convertToDcTarget, setConvertToDcTarget] = useState<Quotation | null>(
+    null,
+  );
+  const [convertToInvoiceTarget, setConvertToInvoiceTarget] =
+    useState<Quotation | null>(null);
 
   useEffect(() => {
     if (!highlightQuotationId) return;
@@ -1049,6 +1071,30 @@ export function Quotations({
                   icon: Copy,
                   onClick: () => openDuplicate(q),
                   "data-ocid": `quotations.duplicate_button.${i + 1}`,
+                },
+              ]
+            : []),
+          // Phase 3 — Document Conversion UI. Real, lineage-tracked
+          // conversions (via the Phase 2 RPCs) — distinct from
+          // "Duplicate" above, which just copies field values with no
+          // persisted relationship or quantity consumption.
+          ...(pConvertToDc
+            ? [
+                {
+                  label: "Create Delivery Challan",
+                  icon: Truck,
+                  onClick: () => setConvertToDcTarget(q),
+                  "data-ocid": `quotations.convert_to_dc.button.${i + 1}`,
+                },
+              ]
+            : []),
+          ...(pConvertToInvoice
+            ? [
+                {
+                  label: "Create Invoice",
+                  icon: Receipt,
+                  onClick: () => setConvertToInvoiceTarget(q),
+                  "data-ocid": `quotations.convert_to_invoice.button.${i + 1}`,
                 },
               ]
             : []),
@@ -2337,6 +2383,20 @@ export function Quotations({
           </form>
         </DialogContent>
       </Dialog>
+
+      {/* Phase 3 — Document Conversion UI */}
+      <QuotationToDcDialog
+        quotation={convertToDcTarget}
+        open={!!convertToDcTarget}
+        onClose={() => setConvertToDcTarget(null)}
+        onCreated={(dc) => addDeliveryChallan(dc)}
+      />
+      <QuotationToInvoiceDialog
+        quotation={convertToInvoiceTarget}
+        open={!!convertToInvoiceTarget}
+        onClose={() => setConvertToInvoiceTarget(null)}
+        onCreated={(inv) => addInvoice(inv)}
+      />
 
       <ConfirmDeleteDialog
         open={!!deleteQuotationTarget}

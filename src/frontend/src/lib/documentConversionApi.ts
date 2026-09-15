@@ -226,6 +226,94 @@ export interface DcToInvoiceInput {
   termsAndConditions?: string;
 }
 
+// Phase 3 — UI layer read-only helpers. Never cached, never trusted as
+// authoritative: computed live from the same source-of-truth the Phase 1
+// triggers themselves use (quotations.line_items / delivery_challans.
+// project_entries for totals, the lineage tables for consumption), every
+// time a conversion dialog opens. The database (via the RPCs' own
+// triggers) remains the only real enforcement point — this is purely for
+// showing the user a number before they submit, so they aren't guessing.
+export interface RemainingQuantity {
+  total: number;
+  consumed: number;
+  remaining: number;
+}
+
+function sumJsonbQty(rows: unknown, key: string): number {
+  if (!Array.isArray(rows)) return 0;
+  return rows.reduce((sum: number, row) => {
+    const v = (row as Record<string, unknown>)?.[key];
+    return sum + (typeof v === "number" ? v : Number(v) || 0);
+  }, 0);
+}
+
+export async function getQuotationRemainingRemote(
+  quotationId: string,
+): Promise<ConversionResult<RemainingQuantity>> {
+  const gate = await requireSession();
+  if (!gate.ok) return gate.result;
+
+  const { data: qt, error: qtError } = await gate.client
+    .from("quotations")
+    .select("line_items")
+    .eq("id", quotationId)
+    .single();
+  if (qtError) return { status: "error", error: qtError.message };
+
+  const total = sumJsonbQty(qt?.line_items, "qty");
+
+  const [dcqRes, qiRes] = await Promise.all([
+    gate.client
+      .from("delivery_challan_quotations")
+      .select("quantity")
+      .eq("quotation_id", quotationId),
+    gate.client
+      .from("quotation_invoices")
+      .select("quantity")
+      .eq("quotation_id", quotationId),
+  ]);
+  if (dcqRes.error) return { status: "error", error: dcqRes.error.message };
+  if (qiRes.error) return { status: "error", error: qiRes.error.message };
+
+  const consumed =
+    (dcqRes.data ?? []).reduce((s, r) => s + Number(r.quantity), 0) +
+    (qiRes.data ?? []).reduce((s, r) => s + Number(r.quantity), 0);
+
+  return {
+    status: "success",
+    data: { total, consumed, remaining: total - consumed },
+  };
+}
+
+export async function getDcRemainingRemote(
+  dcId: string,
+): Promise<ConversionResult<RemainingQuantity>> {
+  const gate = await requireSession();
+  if (!gate.ok) return gate.result;
+
+  const { data: dc, error: dcError } = await gate.client
+    .from("delivery_challans")
+    .select("project_entries")
+    .eq("id", dcId)
+    .single();
+  if (dcError) return { status: "error", error: dcError.message };
+
+  const total = sumJsonbQty(dc?.project_entries, "dispatchQty");
+
+  const { data: idc, error: idcError } = await gate.client
+    .from("invoice_delivery_challans")
+    .select("quantity")
+    .eq("delivery_challan_id", dcId);
+  if (idcError) return { status: "error", error: idcError.message };
+
+  const consumed = (idc ?? []).reduce((s, r) => s + Number(r.quantity), 0);
+
+  return {
+    status: "success",
+    data: { total, consumed, remaining: total - consumed },
+  };
+}
+
 export async function convertDcToInvoiceRemote(
   input: DcToInvoiceInput,
 ): Promise<ConversionResult<Invoice>> {

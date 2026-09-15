@@ -30,6 +30,7 @@ import {
   Pencil,
   Plus,
   Printer,
+  Receipt,
   Share2,
   ShieldOff,
   Trash2,
@@ -41,6 +42,7 @@ import { createRoot } from "react-dom/client";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
 import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
+import { DcToInvoiceDialog } from "../components/ConversionDialogs";
 import { DeliveryChallanPrintView } from "../components/DeliveryChallanPrintView";
 import { StatusBadge } from "../components/StatusBadge";
 import { RowActions } from "../components/ui/row-actions";
@@ -185,6 +187,10 @@ export function DeliveryChallans() {
   const pPrint = canPrint(currentUser, "delivery_challans");
   const pDownload = canDownload(currentUser, "delivery_challans");
   const pShare = canShare(currentUser, "delivery_challans");
+  // Phase 3 — Document Conversion UI. Matches convert_dc_to_invoice()'s
+  // own permission check (delivery_challans.view + invoices.create);
+  // view is already implied by reaching this page at all.
+  const pConvertToInvoice = canCreate(currentUser, "invoices");
 
   const {
     deliveryChallans,
@@ -192,12 +198,16 @@ export function DeliveryChallans() {
     customers,
     invoices,
     addDeliveryChallan,
+    addInvoice,
     updateDeliveryChallan,
     deleteDeliveryChallan,
     settings,
   } = useStore();
 
   const [open, setOpen] = useState(false);
+  // Phase 3 — Document Conversion UI dialog state.
+  const [convertToInvoiceTarget, setConvertToInvoiceTarget] =
+    useState<DeliveryChallan | null>(null);
   const [form, setForm] = useState<DCForm>(emptyForm());
   const [qtyErrors, setQtyErrors] = useState<Record<string, string>>({});
 
@@ -955,6 +965,20 @@ export function DeliveryChallans() {
                                     icon: Share2,
                                     onClick: () => handleShare(dc),
                                     "data-ocid": `delivery_challans.share.button.${i + 1}`,
+                                  },
+                                ]
+                              : []),
+                            // Phase 3 — Document Conversion UI. Real,
+                            // lineage-tracked conversion via
+                            // convert_dc_to_invoice().
+                            ...(pConvertToInvoice
+                              ? [
+                                  {
+                                    label: "Create Invoice",
+                                    icon: Receipt,
+                                    onClick: () =>
+                                      setConvertToInvoiceTarget(dc),
+                                    "data-ocid": `delivery_challans.convert_to_invoice.button.${i + 1}`,
                                   },
                                 ]
                               : []),
@@ -1932,6 +1956,22 @@ export function DeliveryChallans() {
           </form>
         </DialogContent>
       </Dialog>
+
+      {/* Phase 3 — Document Conversion UI. otherEligibleDcs is just "same
+          customer, not the one already targeted" — a lightweight
+          candidate list; the dialog itself fetches each one's real
+          remaining quantity live before it can be selected/submitted. */}
+      <DcToInvoiceDialog
+        primaryDc={convertToInvoiceTarget}
+        otherEligibleDcs={(deliveryChallans || []).filter(
+          (d) =>
+            d.id !== convertToInvoiceTarget?.id &&
+            d.customerId === convertToInvoiceTarget?.customerId,
+        )}
+        open={!!convertToInvoiceTarget}
+        onClose={() => setConvertToInvoiceTarget(null)}
+        onCreated={(inv) => addInvoice(inv)}
+      />
 
       <ConfirmDeleteDialog
         open={!!deleteDCTarget}

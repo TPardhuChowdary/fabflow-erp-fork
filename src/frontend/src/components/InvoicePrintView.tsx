@@ -7,10 +7,17 @@ import {
 } from "@/components/ui/dialog";
 import { X } from "lucide-react";
 import type React from "react";
+import { useEffect, useState } from "react";
 
+import {
+  type RelatedDocument,
+  getInvoiceRelatedDocumentsRemote,
+} from "../lib/documentConversionApi";
 import { useStore } from "../store";
 import type { Customer, Invoice } from "../types";
 import { EwayBillIndicator } from "./EwayBillIndicator";
+import type { RelatedDocumentGroup } from "./RelatedDocuments";
+import { RelatedDocuments } from "./RelatedDocuments";
 
 interface Props {
   invoice: Invoice | null;
@@ -23,6 +30,10 @@ interface Props {
    * these and the buttons don't render — never a dead/fake link. */
   onViewProject?: (projectId: string) => void;
   onViewCustomer?: (customerId: string) => void;
+  /** Phase 4 — Related Documents. Same optional-callback rule as
+   * onViewProject/onViewCustomer above. */
+  onViewQuotation?: (quotationId: string) => void;
+  onViewDeliveryChallan?: (dcId: string) => void;
 }
 
 const fmt = (n: number) => `₹${n.toLocaleString("en-IN")}`;
@@ -103,8 +114,52 @@ export function InvoicePrintView({
   onClose,
   onViewProject,
   onViewCustomer,
+  onViewQuotation,
+  onViewDeliveryChallan,
 }: Props) {
   const { settings } = useStore();
+
+  // Phase 4 — Related Documents. Fetched fresh via the lineage tables
+  // every time this preview opens on a different invoice — never
+  // cached, never derived from doc numbers/customer/dates/quantities.
+  // invoice.dcId (legacy single-DC field) is passed through as a
+  // fallback for invoices created before the lineage tables existed —
+  // see getInvoiceRelatedDocumentsRemote's own comment.
+  const [relatedDocsLoading, setRelatedDocsLoading] = useState(false);
+  const [relatedDocGroups, setRelatedDocGroups] = useState<
+    RelatedDocumentGroup[]
+  >([]);
+  useEffect(() => {
+    if (!open || !invoice) {
+      setRelatedDocGroups([]);
+      return;
+    }
+    let cancelled = false;
+    setRelatedDocsLoading(true);
+    getInvoiceRelatedDocumentsRemote(invoice.id, invoice.dcId).then((res) => {
+      if (cancelled) return;
+      setRelatedDocsLoading(false);
+      if (res.status === "success" && res.data) {
+        setRelatedDocGroups([
+          { label: "Source Quotations", docs: res.data.quotations },
+          {
+            label: "Source Delivery Challans",
+            docs: res.data.deliveryChallans,
+          },
+        ]);
+      } else {
+        setRelatedDocGroups([]);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, invoice]);
+
+  function openRelatedDocument(doc: RelatedDocument) {
+    if (doc.type === "quotation") onViewQuotation?.(doc.id);
+    else if (doc.type === "delivery_challan") onViewDeliveryChallan?.(doc.id);
+  }
 
   if (!invoice) return null;
 
@@ -180,6 +235,19 @@ export function InvoicePrintView({
           >
             <X className="w-4 h-4" />
           </Button>
+        </div>
+
+        {/* Phase 4 — Related Documents (read-only, never printed) */}
+        <div className="no-print px-1 pb-2">
+          <RelatedDocuments
+            loading={relatedDocsLoading}
+            groups={relatedDocGroups}
+            onOpen={
+              onViewQuotation || onViewDeliveryChallan
+                ? openRelatedDocument
+                : undefined
+            }
+          />
         </div>
 
         {/* ===== PRINT AREA ===== */}

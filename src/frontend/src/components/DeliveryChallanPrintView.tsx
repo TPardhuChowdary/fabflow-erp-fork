@@ -6,9 +6,16 @@ import {
 } from "@/components/ui/dialog";
 import { X } from "lucide-react";
 import type React from "react";
+import { useEffect, useState } from "react";
 
+import {
+  type RelatedDocument,
+  getDcRelatedDocumentsRemote,
+} from "../lib/documentConversionApi";
 import { useStore } from "../store";
 import type { Customer, DeliveryChallan, Project } from "../types";
+import type { RelatedDocumentGroup } from "./RelatedDocuments";
+import { RelatedDocuments } from "./RelatedDocuments";
 
 interface Props {
   challan: DeliveryChallan | null;
@@ -16,6 +23,12 @@ interface Props {
   projects: Project[];
   open: boolean;
   onClose: () => void;
+  /** Universal cross-module linking (Master ERP Architecture, Phase 2).
+   * Optional: callers that don't have anywhere to navigate to simply
+   * omit these and the "Related Documents" rows render as non-clickable
+   * info instead of a dead/fake link. */
+  onViewQuotation?: (quotationId: string) => void;
+  onViewInvoice?: (invoiceId: string) => void;
 }
 
 export function DeliveryChallanPrintView({
@@ -24,8 +37,46 @@ export function DeliveryChallanPrintView({
   projects,
   open,
   onClose,
+  onViewQuotation,
+  onViewInvoice,
 }: Props) {
   const { settings } = useStore();
+
+  // Phase 4 — Related Documents. Fetched fresh via the lineage tables
+  // every time this preview opens on a different DC — never cached,
+  // never derived from doc numbers/customer/dates/quantities.
+  const [relatedDocsLoading, setRelatedDocsLoading] = useState(false);
+  const [relatedDocGroups, setRelatedDocGroups] = useState<
+    RelatedDocumentGroup[]
+  >([]);
+  useEffect(() => {
+    if (!open || !challan) {
+      setRelatedDocGroups([]);
+      return;
+    }
+    let cancelled = false;
+    setRelatedDocsLoading(true);
+    getDcRelatedDocumentsRemote(challan.id).then((res) => {
+      if (cancelled) return;
+      setRelatedDocsLoading(false);
+      if (res.status === "success" && res.data) {
+        setRelatedDocGroups([
+          { label: "Source Quotations", docs: res.data.quotations },
+          { label: "Invoices", docs: res.data.invoices },
+        ]);
+      } else {
+        setRelatedDocGroups([]);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, challan]);
+
+  function openRelatedDocument(doc: RelatedDocument) {
+    if (doc.type === "quotation") onViewQuotation?.(doc.id);
+    else if (doc.type === "invoice") onViewInvoice?.(doc.id);
+  }
 
   if (!challan) return null;
 
@@ -79,6 +130,17 @@ export function DeliveryChallanPrintView({
           >
             <X className="w-4 h-4" />
           </button>
+        </div>
+
+        {/* Phase 4 — Related Documents (read-only, never printed) */}
+        <div className="no-print px-1 pb-2">
+          <RelatedDocuments
+            loading={relatedDocsLoading}
+            groups={relatedDocGroups}
+            onOpen={
+              onViewQuotation || onViewInvoice ? openRelatedDocument : undefined
+            }
+          />
         </div>
 
         {/* ===== PRINT AREA ===== */}

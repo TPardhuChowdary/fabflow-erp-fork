@@ -55,9 +55,15 @@ import {
 import { CustomerSelect } from "../components/CustomerSelect";
 import { ProjectMultiSelect } from "../components/ProjectMultiSelect";
 import { QuotationPrintView } from "../components/QuotationPrintView";
+import type { RelatedDocumentGroup } from "../components/RelatedDocuments";
+import { RelatedDocuments } from "../components/RelatedDocuments";
 import ShareButton from "../components/ShareButton";
 import { StatusBadge } from "../components/StatusBadge";
 import { RowActions } from "../components/ui/row-actions";
+import {
+  type RelatedDocument,
+  getQuotationRelatedDocumentsRemote,
+} from "../lib/documentConversionApi";
 import { QuotationDocContent } from "../lib/documentRenderers";
 import {
   openShareModalV2,
@@ -163,11 +169,19 @@ interface QuotationsProps {
    * page's own local dialog state below. */
   highlightQuotationId?: string;
   onViewProject?: (projectId: string) => void;
+  /** Phase 4 — Related Documents. Same cross-module navigation
+   * mechanism as onViewProject above (App.tsx's navigateToRecord),
+   * used only by the read-only "Related Documents" section in the
+   * detail dialog below — omitted, rows render as non-clickable info. */
+  onViewDeliveryChallan?: (dcId: string) => void;
+  onViewInvoice?: (invoiceId: string) => void;
 }
 
 export function Quotations({
   highlightQuotationId,
   onViewProject,
+  onViewDeliveryChallan,
+  onViewInvoice,
 }: QuotationsProps = {}) {
   const {
     quotations,
@@ -305,6 +319,46 @@ export function Quotations({
     const match = quotations.find((q) => q.id === highlightQuotationId);
     if (match) setSelectedQuotation(match);
   }, [highlightQuotationId, quotations]);
+
+  // Phase 4 — Related Documents. Fetched fresh via the lineage tables
+  // every time the detail dialog opens on a different quotation — never
+  // cached, never derived from doc numbers/customer/dates/quantities.
+  const [relatedDocsLoading, setRelatedDocsLoading] = useState(false);
+  const [relatedDocGroups, setRelatedDocGroups] = useState<
+    RelatedDocumentGroup[]
+  >([]);
+  useEffect(() => {
+    if (!selectedQuotation) {
+      setRelatedDocGroups([]);
+      return;
+    }
+    let cancelled = false;
+    setRelatedDocsLoading(true);
+    getQuotationRelatedDocumentsRemote(selectedQuotation.id).then((res) => {
+      if (cancelled) return;
+      setRelatedDocsLoading(false);
+      if (res.status === "success" && res.data) {
+        setRelatedDocGroups([
+          {
+            label: "Delivery Challans",
+            docs: res.data.deliveryChallans,
+          },
+          { label: "Invoices", docs: res.data.invoices },
+        ]);
+      } else {
+        setRelatedDocGroups([]);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedQuotation]);
+
+  function openRelatedDocument(doc: RelatedDocument) {
+    if (doc.type === "delivery_challan") onViewDeliveryChallan?.(doc.id);
+    else if (doc.type === "invoice") onViewInvoice?.(doc.id);
+  }
+
   const [showRecordPO, setShowRecordPO] = useState(false);
   const [deleteQuotationTarget, setDeleteQuotationTarget] =
     useState<Quotation | null>(null);
@@ -2158,6 +2212,19 @@ export function Quotations({
                         <span>{fmt(selectedQuotation.totalAmount)}</span>
                       </div>
                     </div>
+                  </div>
+
+                  {/* Phase 4 — Related Documents (read-only) */}
+                  <div className="border-t pt-3">
+                    <RelatedDocuments
+                      loading={relatedDocsLoading}
+                      groups={relatedDocGroups}
+                      onOpen={
+                        onViewDeliveryChallan || onViewInvoice
+                          ? openRelatedDocument
+                          : undefined
+                      }
+                    />
                   </div>
 
                   {/* Revision History */}

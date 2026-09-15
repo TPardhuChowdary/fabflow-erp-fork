@@ -345,3 +345,206 @@ export async function convertDcToInvoiceRemote(
 
   return fetchFullInvoice(gate.client, invoiceId as string);
 }
+
+// ── Phase 4 — Related Documents (read-only traceability) ──────────
+// Reuses the exact same lineage tables Phase 1's triggers and Phase 2's
+// RPCs already write to — never a second relationship model, and never
+// inferred from doc numbers/customer/dates/quantities. RLS on all three
+// lineage tables (and on quotations/delivery_challans/invoices
+// themselves) already enforces organization scoping + the relevant
+// module's view permission server-side (see
+// supabase/migrations/20260915110000_document_conversion_lineage.sql:
+// every SELECT policy requires both has_permission(module,'view') and
+// organization_id = current_organization_id()) — these functions do no
+// client-side org/permission filtering of their own, exactly like every
+// other read in this file. Each query embeds its FK join in one request
+// (no N+1 per row).
+
+export type RelatedDocType = "quotation" | "delivery_challan" | "invoice";
+
+export interface RelatedDocument {
+  id: string;
+  docNo: string;
+  type: RelatedDocType;
+  date: string | null;
+  status: string | null;
+  /** The lineage row's own quantity — distinct from the related
+   * document's total line-item/dispatch quantity. Absent for the
+   * legacy dc_id fallback link in getInvoiceRelatedDocumentsRemote,
+   * which predates the lineage tables and has no typed quantity. */
+  relationshipQty?: number;
+}
+
+export async function getQuotationRelatedDocumentsRemote(
+  quotationId: string,
+): Promise<
+  ConversionResult<{
+    deliveryChallans: RelatedDocument[];
+    invoices: RelatedDocument[];
+  }>
+> {
+  const gate = await requireSession();
+  if (!gate.ok) return gate.result;
+
+  const [dcRes, invRes] = await Promise.all([
+    gate.client
+      .from("delivery_challan_quotations")
+      .select("quantity, delivery_challans(id, dc_no, dispatch_date, status)")
+      .eq("quotation_id", quotationId),
+    gate.client
+      .from("quotation_invoices")
+      .select("quantity, invoices(id, inv_no, invoice_date, status)")
+      .eq("quotation_id", quotationId),
+  ]);
+  if (dcRes.error) return { status: "error", error: dcRes.error.message };
+  if (invRes.error) return { status: "error", error: invRes.error.message };
+
+  const deliveryChallans: RelatedDocument[] = (dcRes.data ?? [])
+    .filter((r: any) => r.delivery_challans)
+    .map((r: any) => ({
+      id: r.delivery_challans.id,
+      docNo: r.delivery_challans.dc_no,
+      type: "delivery_challan" as const,
+      date: r.delivery_challans.dispatch_date,
+      status: r.delivery_challans.status,
+      relationshipQty: Number(r.quantity),
+    }));
+
+  const invoices: RelatedDocument[] = (invRes.data ?? [])
+    .filter((r: any) => r.invoices)
+    .map((r: any) => ({
+      id: r.invoices.id,
+      docNo: r.invoices.inv_no,
+      type: "invoice" as const,
+      date: r.invoices.invoice_date,
+      status: r.invoices.status,
+      relationshipQty: Number(r.quantity),
+    }));
+
+  return { status: "success", data: { deliveryChallans, invoices } };
+}
+
+export async function getDcRelatedDocumentsRemote(dcId: string): Promise<
+  ConversionResult<{
+    quotations: RelatedDocument[];
+    invoices: RelatedDocument[];
+  }>
+> {
+  const gate = await requireSession();
+  if (!gate.ok) return gate.result;
+
+  const [qtRes, invRes] = await Promise.all([
+    gate.client
+      .from("delivery_challan_quotations")
+      .select("quantity, quotations(id, qt_no, quotation_date, status)")
+      .eq("delivery_challan_id", dcId),
+    gate.client
+      .from("invoice_delivery_challans")
+      .select("quantity, invoices(id, inv_no, invoice_date, status)")
+      .eq("delivery_challan_id", dcId),
+  ]);
+  if (qtRes.error) return { status: "error", error: qtRes.error.message };
+  if (invRes.error) return { status: "error", error: invRes.error.message };
+
+  const quotations: RelatedDocument[] = (qtRes.data ?? [])
+    .filter((r: any) => r.quotations)
+    .map((r: any) => ({
+      id: r.quotations.id,
+      docNo: r.quotations.qt_no,
+      type: "quotation" as const,
+      date: r.quotations.quotation_date,
+      status: r.quotations.status,
+      relationshipQty: Number(r.quantity),
+    }));
+
+  const invoices: RelatedDocument[] = (invRes.data ?? [])
+    .filter((r: any) => r.invoices)
+    .map((r: any) => ({
+      id: r.invoices.id,
+      docNo: r.invoices.inv_no,
+      type: "invoice" as const,
+      date: r.invoices.invoice_date,
+      status: r.invoices.status,
+      relationshipQty: Number(r.quantity),
+    }));
+
+  return { status: "success", data: { quotations, invoices } };
+}
+
+export async function getInvoiceRelatedDocumentsRemote(
+  invoiceId: string,
+  /** The invoice's own dc_id, already available on the loaded invoice
+   * object in every caller — passed in rather than re-fetched, avoiding
+   * an extra round trip. Only used as a legacy fallback (see below). */
+  legacyDcId?: string | null,
+): Promise<
+  ConversionResult<{
+    quotations: RelatedDocument[];
+    deliveryChallans: RelatedDocument[];
+  }>
+> {
+  const gate = await requireSession();
+  if (!gate.ok) return gate.result;
+
+  const [qtRes, dcRes] = await Promise.all([
+    gate.client
+      .from("quotation_invoices")
+      .select("quantity, quotations(id, qt_no, quotation_date, status)")
+      .eq("invoice_id", invoiceId),
+    gate.client
+      .from("invoice_delivery_challans")
+      .select("quantity, delivery_challans(id, dc_no, dispatch_date, status)")
+      .eq("invoice_id", invoiceId),
+  ]);
+  if (qtRes.error) return { status: "error", error: qtRes.error.message };
+  if (dcRes.error) return { status: "error", error: dcRes.error.message };
+
+  const quotations: RelatedDocument[] = (qtRes.data ?? [])
+    .filter((r: any) => r.quotations)
+    .map((r: any) => ({
+      id: r.quotations.id,
+      docNo: r.quotations.qt_no,
+      type: "quotation" as const,
+      date: r.quotations.quotation_date,
+      status: r.quotations.status,
+      relationshipQty: Number(r.quantity),
+    }));
+
+  const deliveryChallans: RelatedDocument[] = (dcRes.data ?? [])
+    .filter((r: any) => r.delivery_challans)
+    .map((r: any) => ({
+      id: r.delivery_challans.id,
+      docNo: r.delivery_challans.dc_no,
+      type: "delivery_challan" as const,
+      date: r.delivery_challans.dispatch_date,
+      status: r.delivery_challans.status,
+      relationshipQty: Number(r.quantity),
+    }));
+
+  // Legacy fallback: invoices created via the plain Invoices.tsx form
+  // (selecting a DC from a dropdown, not through convert_dc_to_invoice)
+  // can have dc_id set with no invoice_delivery_challans row at all,
+  // since that table postdates them. Only surfaced when no lineage row
+  // already covers the same DC, so a Phase-2-created invoice (which
+  // populates both) never shows a duplicate — see Phase 4 chat notes.
+  // No relationshipQty: there was never a typed per-relationship
+  // quantity for this legacy link, only the invoice's own line items.
+  if (legacyDcId && !deliveryChallans.some((d) => d.id === legacyDcId)) {
+    const { data: legacyDc, error: legacyErr } = await gate.client
+      .from("delivery_challans")
+      .select("id, dc_no, dispatch_date, status")
+      .eq("id", legacyDcId)
+      .maybeSingle();
+    if (!legacyErr && legacyDc) {
+      deliveryChallans.push({
+        id: legacyDc.id,
+        docNo: legacyDc.dc_no,
+        type: "delivery_challan",
+        date: legacyDc.dispatch_date,
+        status: legacyDc.status,
+      });
+    }
+  }
+
+  return { status: "success", data: { quotations, deliveryChallans } };
+}

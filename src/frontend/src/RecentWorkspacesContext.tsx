@@ -44,6 +44,7 @@ export type WorkspaceRecordType =
   | "tender"
   | "invoice"
   | "quotation"
+  | "deliveryChallan"
   | "jobCard"
   | "purchaseOrder"
   | "inventoryUsage";
@@ -149,6 +150,12 @@ function resolveDisplay(
       if (!q) return null;
       const cust = s.customers.find((c) => c.id === q.customerId);
       return { label: q.qtNo, secondary: cust?.name ?? "Quotation" };
+    }
+    case "deliveryChallan": {
+      const dc = s.deliveryChallans.find((x) => x.id === id);
+      if (!dc) return null;
+      const cust = s.customers.find((c) => c.id === dc.customerId);
+      return { label: dc.dcNo, secondary: cust?.name ?? "Delivery Challan" };
     }
     case "jobCard": {
       const jc = s.jobCards.find((x) => x.id === id);

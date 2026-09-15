@@ -29,6 +29,7 @@ import {
   Settings,
   ShoppingCart,
   Store,
+  Truck,
   UserCircle2,
   Wrench,
 } from "lucide-react";
@@ -61,6 +62,7 @@ const WORKSPACE_ICON: Record<WorkspaceRecordType, typeof FolderKanban> = {
   tender: ClipboardList,
   invoice: Receipt,
   quotation: FileText,
+  deliveryChallan: Truck,
   jobCard: ClipboardCheck,
   purchaseOrder: ShoppingCart,
   inventoryUsage: Boxes,

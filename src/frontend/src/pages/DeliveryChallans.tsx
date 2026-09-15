@@ -36,7 +36,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { toast } from "sonner";
@@ -179,7 +179,24 @@ function buildDispatchFields(
   };
 }
 
-export function DeliveryChallans() {
+interface DeliveryChallansProps {
+  /** Universal cross-module linking (Master ERP Architecture, Phase 2)
+   * — same moduleNavContext.highlightId pattern Quotations.tsx/
+   * Invoices.tsx already use: App.tsx's navigateToRecord("deliveryChallan",
+   * id) lands here and opens the existing preview dialog, no second UI. */
+  highlightDcId?: string;
+  /** Phase 4 — Related Documents. Used only by the read-only "Related
+   * Documents" section in the preview dialog below — omitted, rows
+   * render as non-clickable info. */
+  onViewQuotation?: (quotationId: string) => void;
+  onViewInvoice?: (invoiceId: string) => void;
+}
+
+export function DeliveryChallans({
+  highlightDcId,
+  onViewQuotation,
+  onViewInvoice,
+}: DeliveryChallansProps = {}) {
   const { currentUser } = useAuth();
   const pCreate = canCreate(currentUser, "delivery_challans");
   const pEdit = canEdit(currentUser, "delivery_challans");
@@ -317,6 +334,19 @@ export function DeliveryChallans() {
   function handleClosePreview() {
     setShowPreview(false);
   }
+
+  // Universal cross-module linking (Master ERP Architecture, Phase 2) —
+  // same highlightId pattern Quotations.tsx/Invoices.tsx already use:
+  // lands here and opens the real DC in the same preview dialog a
+  // manual row click already uses, never a second UI.
+  useEffect(() => {
+    if (!highlightDcId) return;
+    const match = safeChallans.find((dc) => dc.id === highlightDcId);
+    if (match) {
+      setSelectedChallan(match);
+      setShowPreview(true);
+    }
+  }, [highlightDcId, safeChallans]);
 
   async function handleDownload(dc: DeliveryChallan) {
     const container = document.createElement("div");
@@ -1066,6 +1096,8 @@ export function DeliveryChallans() {
         projects={safeProjects}
         open={showPreview}
         onClose={handleClosePreview}
+        onViewQuotation={onViewQuotation}
+        onViewInvoice={onViewInvoice}
       />
 
       {/* ── Edit Dialog ──────────────────────────────────────────── */}

@@ -177,6 +177,7 @@ function AppInner() {
       page !== "vendors" &&
       page !== "invoices" &&
       page !== "quotations" &&
+      page !== "delivery-challans" &&
       page !== "job-cards" &&
       page !== "purchase-orders" &&
       moduleNavContext
@@ -259,6 +260,14 @@ function AppInner() {
       case "quotation":
         setModuleNavContext({ highlightId: id });
         setPage("quotations");
+        break;
+      case "deliveryChallan":
+        // Phase 4 — Related Documents. Same "land on this list page,
+        // open this exact record" pattern as "invoice"/"quotation"
+        // above — DeliveryChallans.tsx is a dialog/list page with no
+        // separate detail route.
+        setModuleNavContext({ highlightId: id });
+        setPage("delivery-challans");
         break;
       case "jobCard":
         setModuleNavContext({ highlightId: id });
@@ -441,6 +450,10 @@ function AppInner() {
               page === "quotations" ? moduleNavContext?.highlightId : undefined
             }
             onViewProject={(id) => navigateToRecord("project", id)}
+            onViewDeliveryChallan={(id) =>
+              navigateToRecord("deliveryChallan", id)
+            }
+            onViewInvoice={(id) => navigateToRecord("invoice", id)}
           />
         );
       case "purchase-orders":
@@ -478,7 +491,17 @@ function AppInner() {
         if (!canView(currentUser, "material_requisitions")) return accessDenied;
         return <MaterialRequisitions />;
       case "delivery-challans":
-        return <DeliveryChallans />;
+        return (
+          <DeliveryChallans
+            highlightDcId={
+              page === "delivery-challans"
+                ? moduleNavContext?.highlightId
+                : undefined
+            }
+            onViewQuotation={(id) => navigateToRecord("quotation", id)}
+            onViewInvoice={(id) => navigateToRecord("invoice", id)}
+          />
+        );
       case "invoices":
         return (
           <Invoices
@@ -487,6 +510,10 @@ function AppInner() {
             }
             onViewProject={(id) => navigateToRecord("project", id)}
             onViewCustomer={(id) => navigateToRecord("customer", id)}
+            onViewQuotation={(id) => navigateToRecord("quotation", id)}
+            onViewDeliveryChallan={(id) =>
+              navigateToRecord("deliveryChallan", id)
+            }
           />
         );
       case "eway-bills":

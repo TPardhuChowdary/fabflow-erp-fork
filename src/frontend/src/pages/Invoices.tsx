@@ -129,12 +129,20 @@ interface InvoicesProps {
   highlightInvoiceId?: string;
   onViewProject?: (projectId: string) => void;
   onViewCustomer?: (customerId: string) => void;
+  /** Phase 4 — Related Documents. Same cross-module navigation
+   * mechanism as onViewProject/onViewCustomer above, used only by the
+   * read-only "Related Documents" section in InvoicePrintView —
+   * omitted, rows render as non-clickable info. */
+  onViewQuotation?: (quotationId: string) => void;
+  onViewDeliveryChallan?: (dcId: string) => void;
 }
 
 export function Invoices({
   highlightInvoiceId,
   onViewProject,
   onViewCustomer,
+  onViewQuotation,
+  onViewDeliveryChallan,
 }: InvoicesProps = {}) {
   function daysBetween(date?: string): number {
     if (!date) return 0;
@@ -1098,6 +1106,8 @@ export function Invoices({
         }}
         onViewProject={onViewProject}
         onViewCustomer={onViewCustomer}
+        onViewQuotation={onViewQuotation}
+        onViewDeliveryChallan={onViewDeliveryChallan}
       />
 
       <Dialog

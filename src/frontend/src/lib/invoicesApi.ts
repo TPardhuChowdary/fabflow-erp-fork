@@ -22,10 +22,19 @@
 // Phase 9's own migration doc) - maintained by paymentsApi.ts instead.
 //
 // Excluded from InvoiceWritable (confirmed dead / not DB columns):
-// bankDetails, termsAndConditions (zero write-side usage - always
-// settings-driven at print time), invoiceNumber (UI-form-only duplicate of
-// invNo), soId (zero occurrences anywhere in Invoices.tsx/Payments.tsx/
-// store.ts, same dead-legacy-field shape as DeliveryChallan.soId/.jobId).
+// bankDetails, invoiceNumber (UI-form-only duplicate of invNo), soId (zero
+// occurrences anywhere in Invoices.tsx/Payments.tsx/store.ts, same
+// dead-legacy-field shape as DeliveryChallan.soId/.jobId).
+//
+// termsAndConditions is now real and writable (invoices.terms_and_conditions
+// column) - a per-invoice snapshot of the Terms & Conditions actually
+// printed, mirroring the existing company_pos.terms_and_conditions /
+// quotations.terms pattern. Settings.companyTerms is only ever consulted
+// as the one-time starting value when a NEW invoice is opened
+// (Invoices.tsx), never read again after that - see InvoicePrintView.tsx /
+// documentRenderers.tsx's existing
+// invoice.termsAndConditions || settings.companyTerms || DEFAULT_TERMS
+// fallback, unchanged by this.
 //
 // Phase D.1 - inv_no now carries a real UNIQUE (organization_id, inv_no)
 // constraint (see database/phase-d1/), mirroring uq_delivery_challans_org_dcno
@@ -71,12 +80,7 @@ export interface WriteResult<T> {
 
 export type InvoiceWritable = Omit<
   Invoice,
-  | "id"
-  | "createdAt"
-  | "soId"
-  | "invoiceNumber"
-  | "bankDetails"
-  | "termsAndConditions"
+  "id" | "createdAt" | "soId" | "invoiceNumber" | "bankDetails"
 >;
 
 function toInvoiceFields(v: InvoiceWritable) {
@@ -115,6 +119,7 @@ function toInvoiceFields(v: InvoiceWritable) {
     reminder_count: v.reminderCount ?? 0,
     next_reminder_custom_date: v.nextReminderCustomDate ?? null,
     selected_email: v.selectedEmail || null,
+    terms_and_conditions: v.termsAndConditions || null,
   };
 }
 

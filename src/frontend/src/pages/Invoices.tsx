@@ -24,6 +24,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
 import {
   Download,
   Pencil,
@@ -116,6 +117,7 @@ const emptyForm = () => ({
   reminderFrequencyDays: 5,
   invoiceNumber: "",
   selectedEmail: "",
+  termsAndConditions: "",
 });
 
 interface InvoicesProps {
@@ -363,6 +365,10 @@ export function Invoices({
       reminderFrequencyDays: (inv as any).reminderFrequencyDays ?? 5,
       invoiceNumber: inv.invNo ?? "",
       selectedEmail: inv.selectedEmail ?? "",
+      // Terms & Conditions fix — load the invoice's own saved snapshot,
+      // never the current company default (same openEdit() pattern
+      // CompanyPOs.tsx already uses).
+      termsAndConditions: inv.termsAndConditions ?? "",
     });
     setEditingInvoice(inv);
     setOpen(true);
@@ -481,6 +487,7 @@ export function Invoices({
           lastReminderSentAt: editingInvoice.lastReminderSentAt,
           reminderCount: editingInvoice.reminderCount,
           nextReminderCustomDate: editingInvoice.nextReminderCustomDate,
+          termsAndConditions: form.termsAndConditions,
         });
 
         if (result.status === "unauthenticated") {
@@ -536,6 +543,7 @@ export function Invoices({
             lastReminderSentAt: null,
             reminderCount: 0,
             nextReminderCustomDate: null,
+            termsAndConditions: form.termsAndConditions,
           },
           // Unlike DeliveryChallans.tsx's dcNumber (a separate state that
           // genuinely stays "" until the user types), the "New Invoice"
@@ -747,7 +755,16 @@ export function Invoices({
           <Button
             size="sm"
             onClick={() => {
-              setForm({ ...emptyForm(), invoiceNumber: previewInvNo() });
+              // Terms & Conditions fix — new invoice starts from the
+              // company's current default (one-time snapshot, same
+              // openNew() pattern CompanyPOs.tsx already uses for
+              // termsAndConditions/companyPOTerms). Never re-read after
+              // this; the invoice owns its own copy from here on.
+              setForm({
+                ...emptyForm(),
+                invoiceNumber: previewInvNo(),
+                termsAndConditions: settings.companyTerms || "",
+              });
               setOpen(true);
             }}
             data-ocid="invoices.create.primary_button"
@@ -1776,6 +1793,26 @@ export function Invoices({
                     />
                   </div>
                 </div>
+              </div>
+              {/* Terms & Conditions fix — per-invoice snapshot, same
+                  pattern as CompanyPOs.tsx's Terms & Conditions field.
+                  Pre-filled from settings.companyTerms only at "New
+                  Invoice" time (see onClick above); editing here never
+                  touches the company default. */}
+              <div>
+                <Label>Terms & Conditions</Label>
+                <Textarea
+                  data-ocid="invoices.form.terms.textarea"
+                  rows={3}
+                  value={form.termsAndConditions}
+                  onChange={(e) =>
+                    setForm((p) => ({
+                      ...p,
+                      termsAndConditions: e.target.value,
+                    }))
+                  }
+                  placeholder="Payment terms, warranty, delivery conditions, etc."
+                />
               </div>
             </div>
             {/* end modal-body */}

@@ -3230,7 +3230,7 @@ export const INVOICE_COLUMNS =
   "invoice_type, reminder_enabled, reminder_interval_days, " +
   "reminder_frequency_days, next_reminder_at, last_reminder_sent_at, " +
   "reminder_count, next_reminder_custom_date, selected_email, " +
-  "eway_bill_document, created_at";
+  "eway_bill_document, terms_and_conditions, created_at";
 
 export const INVOICE_ITEM_COLUMNS =
   "id, invoice_id, description, hsn, quantity, price, project_id, created_at";
@@ -3307,6 +3307,7 @@ export interface InvoiceRow {
   next_reminder_custom_date: string | null;
   selected_email: string | null;
   eway_bill_document: PurchaseAttachment | null;
+  terms_and_conditions: string | null;
   created_at: string;
   invoice_items?: InvoiceItemRow[];
   invoice_purchase_orders?: InvoicePurchaseOrderRow[];
@@ -3378,6 +3379,7 @@ export function transformInvoiceRow(row: InvoiceRow): Invoice {
     // hydrate it from invNo so the edit form's field starts populated.
     invoiceNumber: row.inv_no ?? "",
     ewayBillDocument: row.eway_bill_document ?? undefined,
+    termsAndConditions: row.terms_and_conditions ?? undefined,
   };
 }
 

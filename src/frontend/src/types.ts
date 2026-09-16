@@ -315,6 +315,24 @@ export interface JobCard {
   currentRunStartedAt?: string;
   status: JobCardStatus;
   notes?: string;
+  /** Job Card print/layout options (see chat) — which of this Job
+   * Card's own asset_photos rows (owner_type='job_card', owner_id=this
+   * card) is its "Work Reference" photo: a visual work instruction for
+   * the expected result, NOT an evidence/completion photo (those stay
+   * exactly as they were, selected via CompleteJobCardDialog's own
+   * is_primary flag — deliberately a different field, see the
+   * migration's own comment for why). undefined when none is selected. */
+  referencePhotoId?: string;
+  /** Persisted (never localStorage-only) per-card print option: include
+   * the Work Reference photo as a dedicated large Page 2 when printing.
+   * Only meaningful when referencePhotoId is set. Defaults false —
+   * printing it is opt-in. */
+  printReferencePhoto: boolean;
+  /** Persisted per-card print option: include this card's linked
+   * engineering Drawing (drawing_links, linked_type='job_card') as
+   * Page 3+ using the Drawing Editor's own existing print format. Only
+   * meaningful when a Drawing is actually linked. Defaults false. */
+  printDrawing: boolean;
   createdAt: number;
   updatedAt: number;
 }

@@ -7,8 +7,11 @@
 // existing primitives (Table, Dialog, RowActions, EmployeeSelect,
 // ProjectSelect, StatusBadge-style inline badge) — no new visual
 // language, matching the frozen UX.
+import { AssetPhotoGallery } from "@/components/AssetPhotoGallery";
+import { DrawingLinkPicker } from "@/components/DrawingLinkPicker";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -35,6 +38,9 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
+import { findWorkingDrawing } from "@/drawingEditor/lib/drawingTree";
+import { composeLatestView } from "@/drawingEditor/lib/workOrderPreview";
+import { useDrawingEditorStore } from "@/drawingEditor/store/useDrawingEditorStore";
 import {
   ClipboardList,
   Pencil,
@@ -58,7 +64,10 @@ import {
   formatJobCardTimestamp,
   useJobCardTimer,
 } from "../hooks/useJobCardTimer";
-import { getAssetPhotoSignedUrl } from "../lib/assetPhotosApi";
+import {
+  getAssetPhotoSignedUrl,
+  resolveCoverStoragePath,
+} from "../lib/assetPhotosApi";
 import { getEvidenceRequirements } from "../lib/companySettingsApi";
 import { JobCardDocContent } from "../lib/documentRenderers";
 import { setJobCardExceptionStatusRemote } from "../lib/jobCardExceptionsApi";
@@ -131,6 +140,14 @@ const emptyForm = {
   // field can never reset or destroy them.
   status: "NotStarted" as JobCardStatus,
   notes: "",
+  // Job Card print/layout options (see chat) — edit-only (Section 8's own
+  // scope decision: a not-yet-saved Job Card has no id to attach
+  // asset_photos/drawing_links rows to). "" means "no Reference Photo
+  // selected", matching the emptyForm string-field convention used
+  // throughout this file (e.g. stageId) rather than undefined.
+  referencePhotoId: "",
+  printReferencePhoto: false,
+  printDrawing: false,
 };
 
 interface JobCardsProps {
@@ -198,6 +215,29 @@ export function JobCards({
   const [isSaving, setIsSaving] = useState(false);
   const [form, setForm] = useState(emptyForm);
 
+  // Job Card Drawing Link (Section 4, see chat) — same Drawing Repository
+  // store Dies.tsx/MachineDetail.tsx/ProjectDetail.tsx already use, now
+  // also linking through linkedType "job_card" (drawingEditor/types.ts).
+  // Edit-only, matching the Reference Photo's own scope decision above.
+  const {
+    links: drawingLinks,
+    linksLoaded,
+    loadLinks,
+    addLink: addDrawingLink,
+    removeLink: removeDrawingLink,
+  } = useDrawingEditorStore();
+  // biome-ignore lint/correctness/useExhaustiveDependencies: load once on mount
+  useEffect(() => {
+    if (!linksLoaded) loadLinks();
+  }, [linksLoaded]);
+  const linkedDrawingIdsForEdit = editCard
+    ? (drawingLinks || [])
+        .filter(
+          (l) => l.linkedType === "job_card" && l.linkedId === editCard.id,
+        )
+        .map((l) => l.drawingId)
+    : [];
+
   // Live-ticking Active Time for the View dialog's persisted Start/End
   // block below — called unconditionally (Rules of Hooks) with a no-op
   // fallback while the dialog is closed, so it stays in sync with
@@ -207,6 +247,38 @@ export function JobCards({
     activeSeconds: viewCard?.activeSeconds ?? 0,
     currentRunStartedAt: viewCard?.currentRunStartedAt,
   });
+
+  // Project Reference Photo (Section 1, see chat) — small, identifies
+  // "the product/project you are working on", NOT evidence. Resolved
+  // from the Project's own primary asset_photos row (never copied into
+  // the Job Card's own photos), same processed/original preference
+  // Projects.tsx's own cover thumbnails use via resolveCoverStoragePath.
+  const [viewProjectPhotoUrl, setViewProjectPhotoUrl] = useState<string | null>(
+    null,
+  );
+  useEffect(() => {
+    if (!viewCard) {
+      setViewProjectPhotoUrl(null);
+      return;
+    }
+    const photo = (assetPhotos || []).find(
+      (p) =>
+        p.ownerType === "project" &&
+        p.ownerId === viewCard.projectId &&
+        p.isPrimary,
+    );
+    if (!photo) {
+      setViewProjectPhotoUrl(null);
+      return;
+    }
+    let cancelled = false;
+    getAssetPhotoSignedUrl(resolveCoverStoragePath(photo)).then((url) => {
+      if (!cancelled) setViewProjectPhotoUrl(url);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [viewCard, assetPhotos]);
 
   // Job Card live timer (Start/Pause/Resume/Complete) — same evidence
   // policy read and Complete flow as My Jobs (MyJobs.tsx), reused via
@@ -281,6 +353,9 @@ export function JobCards({
       reworkQty: String(jc.reworkQty),
       status: jc.status,
       notes: jc.notes ?? "",
+      referencePhotoId: jc.referencePhotoId ?? "",
+      printReferencePhoto: jc.printReferencePhoto,
+      printDrawing: jc.printDrawing,
     });
   };
 
@@ -322,27 +397,66 @@ export function JobCards({
   // and nothing here writes to the Job Card or any other table — it only
   // reads the same fields the View dialog above already reads.
   async function handlePrintJobCard(jc: JobCard) {
-    // Feature: optional photo on the printed Job Card (see chat) — the
-    // same asset_photos-backed primary photo AssetPhotoGallery already
-    // shows for this job_card (Evidence Photos section), never a
-    // separate photo record. Resolved to a real signed URL BEFORE the
-    // synchronous flushSync render below: an <img> written into a popup
-    // via innerHTML has no chance to await anything itself, same
-    // reasoning settings.companyLogo is already a ready-to-use value by
-    // the time it reaches JobCardDocContent. Prefers the processed
-    // derivative when one exists (per requirement — job_card photos
-    // have no cover_uses_processed UI of their own to consult), falls
-    // back to the original, and is entirely absent (undefined) for a
-    // Job Card with no photo — existing Job Cards print exactly as
-    // before, nothing here is required.
-    const primaryPhoto = (assetPhotos || []).find(
-      (p) => p.ownerType === "job_card" && p.ownerId === jc.id && p.isPrimary,
+    // Job Card print/layout (see chat, Sections 1/3/4/5/9) — resolves
+    // THREE independent, optional images, all BEFORE the synchronous
+    // flushSync render below (an <img> written into a popup via
+    // innerHTML has no chance to await anything itself, same reasoning
+    // settings.companyLogo is already ready-to-use by the time it
+    // reaches JobCardDocContent):
+    //
+    // 1. Project Reference Photo — always resolved when the Project has
+    //    one (Page 1, small); never duplicated into the Job Card's own
+    //    asset_photos, read straight from the Project's own primary
+    //    photo via the exact same resolveCoverStoragePath rule
+    //    Projects.tsx/ProjectDetail.tsx already use for cover photos.
+    const projectPhoto = (assetPhotos || []).find(
+      (p) =>
+        p.ownerType === "project" && p.ownerId === jc.projectId && p.isPrimary,
     );
-    const photoUrl = primaryPhoto
-      ? await getAssetPhotoSignedUrl(
-          primaryPhoto.processedStoragePath ?? primaryPhoto.storagePath,
-        )
+    const projectPhotoUrl = projectPhoto
+      ? await getAssetPhotoSignedUrl(resolveCoverStoragePath(projectPhoto))
       : null;
+
+    // 2. Job Card Reference Photo ("Work Reference") — only resolved
+    //    when both a photo is selected AND printReferencePhoto is on;
+    //    otherwise Page 2 simply never renders (no blank page).
+    const referencePhoto =
+      jc.printReferencePhoto && jc.referencePhotoId
+        ? (assetPhotos || []).find((p) => p.id === jc.referencePhotoId)
+        : undefined;
+    const referencePhotoUrl = referencePhoto
+      ? await getAssetPhotoSignedUrl(resolveCoverStoragePath(referencePhoto))
+      : null;
+
+    // 3. Linked Drawing — reuses the Drawing Editor's own existing
+    //    composeLatestView (no second drawing renderer, no duplicated
+    //    drawing data), same Original -> Working Drawing resolution
+    //    DrawingEditorPage.tsx's own handlePrintDrawing performs before
+    //    printing. Only attempted when printDrawing is on AND a link
+    //    exists; a drawing that was never saved (composeLatestView
+    //    returns null) just means no Page 3, not an error.
+    let drawingImageDataUrl: string | undefined;
+    if (jc.printDrawing) {
+      const link = (drawingLinks || []).find(
+        (l) => l.linkedType === "job_card" && l.linkedId === jc.id,
+      );
+      const drawing = link
+        ? (useDrawingEditorStore.getState().drawings || []).find(
+            (d) => d.id === link.drawingId,
+          )
+        : undefined;
+      if (drawing) {
+        const working = findWorkingDrawing(
+          drawing.id,
+          useDrawingEditorStore.getState().drawings,
+        );
+        const canvas = await composeLatestView(working ?? drawing, {
+          companyName: settings.companyName || "Your Company",
+          companyLogoDataUrl: settings.companyLogo || undefined,
+        });
+        if (canvas) drawingImageDataUrl = canvas.toDataURL("image/png");
+      }
+    }
 
     const container = document.createElement("div");
     container.style.cssText =
@@ -363,7 +477,9 @@ export function JobCards({
           stageLabel={stageName(jc.stageId) ?? null}
           settings={settings as unknown as Record<string, string>}
           printedAt={printedAt}
-          photoUrl={photoUrl ?? undefined}
+          projectPhotoUrl={projectPhotoUrl ?? undefined}
+          referencePhotoUrl={referencePhotoUrl ?? undefined}
+          drawingImageDataUrl={drawingImageDataUrl}
         />,
       );
     });
@@ -438,6 +554,13 @@ export function JobCards({
           endTime: undefined,
           status: form.status,
           notes: form.notes.trim() || undefined,
+          // Reference Photo/Drawing Link are edit-only (Section 8 scope
+          // decision, see chat) — a new Job Card has no id yet to attach
+          // asset_photos/drawing_links rows to, so it always starts with
+          // none selected and both print options off.
+          referencePhotoId: undefined,
+          printReferencePhoto: false,
+          printDrawing: false,
         },
         { autoRenumberOnConflict: true },
       );
@@ -487,6 +610,9 @@ export function JobCards({
         endTime: editCard.endTime,
         status: form.status,
         notes: form.notes.trim() || undefined,
+        referencePhotoId: form.referencePhotoId || undefined,
+        printReferencePhoto: form.printReferencePhoto,
+        printDrawing: form.printDrawing,
       });
       if (result.status === "unauthenticated") {
         toast.error("You must be signed in to edit a Job Card");
@@ -712,6 +838,122 @@ export function JobCards({
           rows={2}
         />
       </div>
+
+      {/* Job Card print/layout (Sections 2/3/4/8, see chat) — edit-only:
+          Reference Photo/Drawing Link need a real job_cards.id to attach
+          asset_photos/drawing_links rows to (see emptyForm's own
+          comment). A not-yet-saved Add dialog simply doesn't show this
+          section — nothing to select yet. */}
+      {editCard && (
+        <div className="space-y-3 rounded-md border p-3">
+          <div className="space-y-1">
+            <Label className="text-xs">
+              Reference Photo
+              <span className="text-muted-foreground font-normal">
+                {" "}
+                — the expected visual result for this operation, not an
+                evidence/completion photo
+              </span>
+            </Label>
+            <AssetPhotoGallery
+              ownerType="job_card"
+              ownerId={editCard.id}
+              canEdit={pEdit}
+              data-ocid="jobcards.form.reference_photo_gallery"
+            />
+            {(assetPhotos || []).filter(
+              (p) => p.ownerType === "job_card" && p.ownerId === editCard.id,
+            ).length > 0 && (
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                {(assetPhotos || [])
+                  .filter(
+                    (p) =>
+                      p.ownerType === "job_card" && p.ownerId === editCard.id,
+                  )
+                  .map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      className={`text-xs rounded-md border px-2 py-1 ${
+                        form.referencePhotoId === p.id
+                          ? "border-primary bg-primary/10 font-semibold"
+                          : "border-input"
+                      }`}
+                      onClick={() =>
+                        setForm((f) => ({
+                          ...f,
+                          referencePhotoId:
+                            f.referencePhotoId === p.id ? "" : p.id,
+                        }))
+                      }
+                      data-ocid={`jobcards.form.reference_photo_select.${p.id}`}
+                    >
+                      {form.referencePhotoId === p.id ? "✓ " : ""}
+                      {p.originalFilename ?? p.id.slice(0, 8)}
+                    </button>
+                  ))}
+              </div>
+            )}
+          </div>
+          <div className="space-y-1.5">
+            <Label className="text-xs">
+              Linked Drawing
+              <span className="text-muted-foreground font-normal">
+                {" "}
+                — Drawing Repository is the source of truth
+              </span>
+            </Label>
+            <DrawingLinkPicker
+              linkedDrawingIds={linkedDrawingIdsForEdit}
+              onAdd={(drawingId) =>
+                addDrawingLink(drawingId, "job_card", editCard.id)
+              }
+              onRemove={(drawingId) => {
+                const link = (drawingLinks || []).find(
+                  (l) =>
+                    l.linkedType === "job_card" &&
+                    l.linkedId === editCard.id &&
+                    l.drawingId === drawingId,
+                );
+                if (link) removeDrawingLink(link.id);
+              }}
+              data-ocid="jobcards.form.drawing_link_picker"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label className="text-xs">Print Options</Label>
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="jc-print-reference"
+                checked={form.printReferencePhoto}
+                disabled={!form.referencePhotoId}
+                onCheckedChange={(v) =>
+                  setForm((f) => ({ ...f, printReferencePhoto: v === true }))
+                }
+              />
+              <Label
+                htmlFor="jc-print-reference"
+                className="text-xs font-normal"
+              >
+                Print Reference Photo (adds a dedicated page)
+              </Label>
+            </div>
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="jc-print-drawing"
+                checked={form.printDrawing}
+                disabled={linkedDrawingIdsForEdit.length === 0}
+                onCheckedChange={(v) =>
+                  setForm((f) => ({ ...f, printDrawing: v === true }))
+                }
+              />
+              <Label htmlFor="jc-print-drawing" className="text-xs font-normal">
+                Print Drawing (adds the linked drawing as additional pages)
+              </Label>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 
@@ -1018,6 +1260,18 @@ export function JobCards({
                   </Button>
                 </div>
               </DialogHeader>
+              {/* Project Reference Photo — small, identifies the
+                  product/project (Section 1, see chat), not an evidence
+                  photo. Entirely absent when the Project has no photo —
+                  no empty/broken image, no space-consuming placeholder. */}
+              {viewProjectPhotoUrl && (
+                <img
+                  src={viewProjectPhotoUrl}
+                  alt="Project reference"
+                  className="w-full max-h-32 object-contain rounded-md border"
+                  data-ocid="jobcards.view.project_photo"
+                />
+              )}
               {/* Feature: Printable Job Card — physical/paper copy for a
                   shop-floor employee without a phone/login. Reuses this
                   exact Job Card's own data; nothing here writes to it. */}

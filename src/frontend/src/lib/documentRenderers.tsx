@@ -2013,13 +2013,39 @@ interface JobCardDocProps {
    * comment) — a value the caller computes fresh per print, not a field
    * read off `jobCard`. */
   printedAt: number;
-  /** Optional — a real, already-resolved signed URL for this Job
-   * Card's primary asset_photos photo (processed derivative preferred
-   * over the original when one exists), resolved by the caller before
-   * render (see handlePrintJobCard's own comment for why). undefined
-   * for a Job Card with no photo, which prints exactly as it always
-   * has — this section simply doesn't render. */
-  photoUrl?: string;
+  /** Job Card print/layout (see chat) — three DIFFERENT photo/drawing
+   * concepts (Section 6 of the spec), never to be mixed:
+   *
+   * projectPhotoUrl: the PROJECT's own reference photo (identifies the
+   * overall product/project this Job Card belongs to) — small, always
+   * on Page 1, whenever the Project has one. This REPLACES the old
+   * per-Job-Card "Product / Result Photo" block that used to sit here
+   * (that was the employee's own evidence photo, which conflated
+   * evidence with a work instruction — CompleteJobCardDialog/MyJobs.tsx
+   * still capture and show that evidence photo exactly as before, it
+   * just no longer auto-prints on Page 1).
+   *
+   * referencePhotoUrl: THIS Job Card's own selected "Work Reference"
+   * photo — the expected visual result of the operation, admin-picked
+   * via reference_photo_id. Large, dedicated Page 2, only when the
+   * caller resolved one AND the Job Card's printReferencePhoto flag is
+   * on (the caller is responsible for that gate — this component only
+   * renders what it's given).
+   *
+   * drawingImageDataUrl: the existing linked engineering Drawing,
+   * already composed into its own established print layout by
+   * drawingEditor's own composeLatestView — this component embeds it
+   * as a flat image, it does not render or know anything about
+   * drawings itself (no second drawing renderer). Page 3+, same
+   * caller-side gating as above (printDrawing flag + a link existing).
+   *
+   * All three are optional and independent; each section simply does
+   * not render when its URL is undefined — a Job Card with none of
+   * them prints byte-for-byte the same single-page layout as before
+   * this feature existed. */
+  projectPhotoUrl?: string;
+  referencePhotoUrl?: string;
+  drawingImageDataUrl?: string;
 }
 
 function formatPrintedOn(ms: number): string {
@@ -2049,7 +2075,9 @@ export function JobCardDocContent({
   stageLabel,
   settings,
   printedAt,
-  photoUrl,
+  projectPhotoUrl,
+  referencePhotoUrl,
+  drawingImageDataUrl,
 }: JobCardDocProps) {
   const activeTimeDisplay = formatJobCardDuration(
     getJobCardActiveSeconds(jobCard),
@@ -2177,15 +2205,14 @@ export function JobCardDocContent({
         </div>
       </div>
 
-      {/* PHOTO — optional (requirement 8, see chat). Entirely absent
-          when photoUrl is undefined (no photo attached, or this Job
-          Card predates the feature) — an existing Job Card without a
-          photo prints byte-for-byte the same layout as before this
-          section was added. Deliberately small/bounded (max 120px
-          tall) so a photo can never dominate or push the rest of the
-          sheet onto another page; object-fit: contain keeps the whole
-          product visible rather than cropping it. */}
-      {photoUrl && (
+      {/* PROJECT REFERENCE PHOTO — identifies the product/project this
+          Job Card belongs to (Section 1, see chat); NOT an evidence or
+          completion photo. Entirely absent when the caller resolved no
+          usable Project photo — an existing Job Card prints exactly as
+          before. Deliberately small/bounded (max 120px tall) so it can
+          never push the rest of Page 1 onto another page; object-fit:
+          contain keeps the whole product visible rather than cropping. */}
+      {projectPhotoUrl && (
         <div
           style={{
             border: "1px solid #999",
@@ -2194,10 +2221,10 @@ export function JobCardDocContent({
             marginBottom: "16px",
           }}
         >
-          <div style={JOB_CARD_LABEL_STYLE}>Product / Result Photo</div>
+          <div style={JOB_CARD_LABEL_STYLE}>Project Reference Photo</div>
           <img
-            src={photoUrl}
-            alt="Job Card product/result"
+            src={projectPhotoUrl}
+            alt="Project reference"
             style={{
               display: "block",
               maxHeight: "120px",
@@ -2437,6 +2464,91 @@ export function JobCardDocContent({
         authoritative — data recorded above must be entered back into FabFlow,
         not treated as a separate record.
       </div>
+
+      {/* PAGE 2 — Work Reference (Section 3/5, see chat). Only when the
+          caller resolved a Job Card Reference Photo AND printReferencePhoto
+          is on; otherwise this whole block doesn't exist, so no blank
+          second page is ever generated. pageBreakBefore forces it onto
+          its own sheet even though this is one continuous element in the
+          DOM (same technique @page/CSS print rules already rely on
+          elsewhere in this file for A4 pagination). */}
+      {referencePhotoUrl && (
+        <div style={{ pageBreakBefore: "always", paddingTop: "20px" }}>
+          <div
+            style={{
+              borderBottom: "2px solid #1a1a1a",
+              paddingBottom: "10px",
+              marginBottom: "16px",
+            }}
+          >
+            <div
+              style={{ fontSize: "18px", fontWeight: 800, color: "#1a1a1a" }}
+            >
+              Work Reference — Expected Result
+            </div>
+            <div style={{ fontSize: "12px", color: "#555", marginTop: "4px" }}>
+              {jobCard.jobNo} · {projectLabel} · {jobCard.operationType}
+            </div>
+          </div>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "center",
+              alignItems: "center",
+              border: "1px solid #999",
+              borderRadius: "4px",
+              padding: "16px",
+            }}
+          >
+            <img
+              src={referencePhotoUrl}
+              alt="Work reference — expected result"
+              style={{
+                display: "block",
+                maxWidth: "100%",
+                maxHeight: "220mm",
+                objectFit: "contain",
+              }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* PAGE 3+ — Linked Drawing (Section 4/5, see chat). Reuses the
+          existing Drawing Editor's own composed print layout as a flat
+          image (resolved by the caller via composeLatestView) — no
+          second drawing renderer, no drawing data duplicated here. Only
+          when the caller resolved an image AND printDrawing is on. */}
+      {drawingImageDataUrl && (
+        <div style={{ pageBreakBefore: "always", paddingTop: "20px" }}>
+          <div
+            style={{
+              borderBottom: "2px solid #1a1a1a",
+              paddingBottom: "10px",
+              marginBottom: "16px",
+            }}
+          >
+            <div
+              style={{ fontSize: "18px", fontWeight: 800, color: "#1a1a1a" }}
+            >
+              Engineering Drawing
+            </div>
+            <div style={{ fontSize: "12px", color: "#555", marginTop: "4px" }}>
+              {jobCard.jobNo} · {projectLabel}
+            </div>
+          </div>
+          <img
+            src={drawingImageDataUrl}
+            alt="Linked engineering drawing"
+            style={{
+              display: "block",
+              width: "100%",
+              maxHeight: "260mm",
+              objectFit: "contain",
+            }}
+          />
+        </div>
+      )}
     </div>
   );
 }

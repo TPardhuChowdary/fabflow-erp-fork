@@ -3477,6 +3477,7 @@ export const JOB_CARD_COLUMNS =
   "reject_root_cause, stage_id, " +
   "start_time, end_time, actual_time_spent_minutes, active_seconds, " +
   "current_run_started_at, status, notes, " +
+  "reference_photo_id, print_reference_photo, print_drawing, " +
   "created_at, updated_at";
 
 export interface JobCardRow {
@@ -3502,6 +3503,9 @@ export interface JobCardRow {
   current_run_started_at: string | null;
   status: string;
   notes: string | null;
+  reference_photo_id: string | null;
+  print_reference_photo: boolean;
+  print_drawing: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -3531,6 +3535,9 @@ export function transformJobCardRow(row: JobCardRow): JobCard {
     currentRunStartedAt: row.current_run_started_at ?? undefined,
     status: (row.status as JobCardStatus | null) ?? "NotStarted",
     notes: row.notes ?? undefined,
+    referencePhotoId: row.reference_photo_id ?? undefined,
+    printReferencePhoto: row.print_reference_photo ?? false,
+    printDrawing: row.print_drawing ?? false,
     createdAt: new Date(row.created_at).getTime(),
     updatedAt: new Date(row.updated_at).getTime(),
   };

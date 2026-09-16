@@ -61,6 +61,14 @@ function toJobCardFields(v: JobCardWritable) {
     end_time: v.endTime || null,
     status: v.status,
     notes: v.notes || null,
+    // Job Card print/layout options (see chat) — reference_photo_id is
+    // validated server-side against THIS job card's own asset_photos
+    // rows by trg_validate_job_card_reference_photo (database/
+    // 20260916180000); the two booleans are plain persisted print
+    // preferences, both defaulting false at the DB level.
+    reference_photo_id: v.referencePhotoId || null,
+    print_reference_photo: v.printReferencePhoto,
+    print_drawing: v.printDrawing,
   };
 }
 

@@ -106,6 +106,9 @@ export interface DrawingLink {
   // truth for every drawing's actual content.
   // Phase 6 (Group 2) - tool/inventory_item added, matching the widened
   // drawing_links_linked_type_check CHECK constraint (database/phase-51).
+  // Job Card print/layout (see chat) - "job_card" added so a Job Card can
+  // link its own engineering drawing, reusing this exact table/constraint
+  // (database/20260916180000) rather than a second drawing-link mechanism.
   linkedType:
     | "project"
     | "machine"
@@ -113,7 +116,8 @@ export interface DrawingLink {
     | "customer"
     | "die"
     | "tool"
-    | "inventory_item";
+    | "inventory_item"
+    | "job_card";
   linkedId: string;
   createdAt: number;
 }

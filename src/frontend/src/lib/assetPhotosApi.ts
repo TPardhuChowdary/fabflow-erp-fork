@@ -110,7 +110,7 @@ function rowToAssetPhoto(row: Record<string, unknown>): AssetPhoto {
 }
 
 // Phase 4 — the ONE allowlist this whole feature is built around: every
-// swatch the UI can show, every value requestProjectPhotoProcessing can
+// swatch the UI can show, every value requestAssetPhotoProcessing can
 // send, and every value the Edge Function will accept comes from this
 // exact list (mirrored server-side in
 // supabase/functions/process-project-photo/index.ts's own
@@ -305,13 +305,29 @@ export async function setPrimaryAssetPhoto(
 // Phase 3 — Project Photos cover variant (original vs. processed).
 // Deliberately its own single-purpose writer, not a generic "update any
 // asset_photos column" API — same one-writer-per-concern shape as
-// setPrimaryAssetPhoto() above. Only ever called for owner_type
-// 'project' (enforced by the .eq below, defense in depth alongside the
-// UI's own ownerType === "project" gating in AssetPhotoGallery.tsx).
-// Never touches is_primary, storage_path, or processed_storage_path —
-// RLS (asset_photos_update: has_asset_permission(owner_type, 'edit') +
-// organization_id = current_organization_id()) is the actual
-// authorization boundary, same as every other write in this file.
+// setPrimaryAssetPhoto() above. Never touches is_primary, storage_path,
+// or processed_storage_path — RLS (asset_photos_update:
+// has_asset_permission(owner_type, 'edit') + organization_id =
+// current_organization_id()) is the actual authorization boundary,
+// same as every other write in this file.
+//
+// Phase 5 — allowed for every owner_type that has a meaningful place to
+// actually DISPLAY a cover (project's external ProjectDetail/Projects
+// list, and machine/die/tool's own AssetPhotoGallery heroMode — see
+// that component's heroImgUrl, which now reads this same field). NOT
+// inventory_item/job_card: neither has a hero/cover display anywhere
+// (confirmed in the architecture audit — their galleries are plain
+// thumbnail strips), so exposing this toggle for them would set a flag
+// nothing ever reads — a second, meaningless source of "truth" rather
+// than reuse. If either entity grows a hero display later, add its
+// owner_type here rather than inventing a parallel flag.
+const COVER_VARIANT_OWNER_TYPES = [
+  "project",
+  "machine",
+  "die",
+  "tool",
+] as const;
+
 export async function setPhotoCoverVariant(
   photoId: string,
   useProcessed: boolean,
@@ -322,7 +338,7 @@ export async function setPhotoCoverVariant(
     .from("asset_photos")
     .update({ cover_uses_processed: useProcessed })
     .eq("id", photoId)
-    .eq("owner_type", "project")
+    .in("owner_type", COVER_VARIANT_OWNER_TYPES)
     .select("id");
   if (error) return { status: "error", error: error.message };
   const rows = (data as unknown as { id: string }[]) ?? [];
@@ -330,19 +346,28 @@ export async function setPhotoCoverVariant(
     return {
       status: "denied",
       error:
-        "No row was updated (blocked by RLS, not a project photo, or the photo does not exist)",
+        "No row was updated (blocked by RLS, this photo type has no cover concept, or the photo does not exist)",
     };
   }
   return { status: "success" };
 }
 
-// Phase 2 — Project Photos AI background removal. Dedicated Edge
-// Function (supabase/functions/process-project-photo/index.ts), never
-// the ChatProvider/agent-chat relay — see that function's own header
-// for why. Same request shape as every other Edge Function invocation
-// in this codebase (lib/accountRecoveryApi.ts's own invoke() helper is
-// the model this mirrors, adapted for this function's own response
-// shape rather than that file's `{ success, error }` convention).
+// Phase 2 — AI background removal. Dedicated Edge Function
+// (supabase/functions/process-project-photo/index.ts — filename is a
+// historical artifact, see that function's own Phase 5 header comment),
+// never the ChatProvider/agent-chat relay — see that function's own
+// header for why. Same request shape as every other Edge Function
+// invocation in this codebase (lib/accountRecoveryApi.ts's own invoke()
+// helper is the model this mirrors, adapted for this function's own
+// response shape rather than that file's `{ success, error }`
+// convention).
+//
+// Phase 5 — works for every AI-capable owner type (project, job_card,
+// inventory_item, machine, tool, die), not project-only: the Edge
+// Function itself derives owner_type from the photo row and checks the
+// matching permission, so this call is identical regardless of which
+// entity the photo belongs to. Renamed from
+// requestAssetPhotoProcessing to match.
 export interface PhotoProcessingResult {
   status: "ready" | "processing";
   processedStoragePath?: string;
@@ -354,13 +379,14 @@ export interface PhotoProcessingResult {
   message?: string;
 }
 
-/** Requests AI background processing for one project photo. Same call
- * whether this is the first "Process with AI" or an explicit
- * "Reprocess" — the Edge Function's own atomic claim (keyed off the
- * row's current processing_status) is what distinguishes them, not a
- * flag here. A 409 "already processing" response is not an error — it
- * comes back as a normal success with status: "processing" so the UI
- * can show "already processing" instead of a failure toast.
+/** Requests AI background processing for one asset photo (any
+ * AI-capable owner type). Same call whether this is the first "Process
+ * with AI" or an explicit "Reprocess" — the Edge Function's own atomic
+ * claim (keyed off the row's current processing_status) is what
+ * distinguishes them, not a flag here. A 409 "already processing"
+ * response is not an error — it comes back as a normal success with
+ * status: "processing" so the UI can show "already processing" instead
+ * of a failure toast.
  *
  * `backgroundColor` is optional and, when passed, MUST be one of
  * BACKGROUND_PALETTE's own hex values — this is the "Reprocess with
@@ -369,7 +395,7 @@ export interface PhotoProcessingResult {
  * picks a palette color server-side. The Edge Function re-validates
  * this value against its own allowlist regardless — this check here is
  * a cheap early reject, never the actual authorization boundary. */
-export async function requestProjectPhotoProcessing(
+export async function requestAssetPhotoProcessing(
   photoId: string,
   backgroundColor?: string,
 ): Promise<WriteResult<PhotoProcessingResult>> {

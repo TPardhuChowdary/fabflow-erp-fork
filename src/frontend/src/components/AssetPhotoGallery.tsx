@@ -22,7 +22,7 @@ import {
   deleteAssetPhoto,
   findBackgroundByHex,
   getAssetPhotoSignedUrl,
-  requestProjectPhotoProcessing,
+  requestAssetPhotoProcessing,
   setPhotoCoverVariant,
   uploadAssetPhoto,
 } from "@/lib/assetPhotosApi";
@@ -86,10 +86,12 @@ export function AssetPhotoGallery({
   const [signedUrls, setSignedUrls] = useState<Record<string, string>>({});
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [isBusy, setIsBusy] = useState(false);
-  // Phase 2 — Project Photos AI background removal. project-only; every
-  // other ownerType never sets processingStatus, so all of this stays
-  // completely inert (no extra network calls, no UI change) for
-  // Machine/Die/Tool/Inventory Item/Job Card photos.
+  // Phase 2 — AI background removal (originally project-only; Phase 5
+  // generalized it to every owner type asset_photos supports — see the
+  // AI-processing block's own comment below). A photo whose owner type
+  // never requests processing simply never sets processingStatus, so
+  // all of this stays completely inert for it (no extra network calls,
+  // no UI change) — nothing here assumes a specific ownerType.
   const [processedSignedUrls, setProcessedSignedUrls] = useState<
     Record<string, string>
   >({});
@@ -149,9 +151,9 @@ export function AssetPhotoGallery({
   }, [photos]);
 
   // Same shape as the original-photo signed-URL effect above, applied to
-  // whichever photos have a processed derivative (project photos only —
-  // every other owner type's processedStoragePath is always undefined,
-  // so `withProcessed` is always empty for them and this never fires).
+  // whichever photos have a processed derivative — `withProcessed` is
+  // simply empty (this never fires) for any photo that hasn't been
+  // AI-processed yet, regardless of owner type.
   // biome-ignore lint/correctness/useExhaustiveDependencies: see the original-photo effect's own comment — processedSignedUrls must stay out of the deps for the same reason
   useEffect(() => {
     let cancelled = false;
@@ -246,23 +248,23 @@ export function AssetPhotoGallery({
     }
   }
 
-  // Phase 2 — Project Photos AI background removal. Same call whether
-  // this is the first "Process with AI" click or an explicit
-  // "Reprocess" — see requestProjectPhotoProcessing's own comment for
-  // why no extra flag is needed. The Edge Function call is synchronous
-  // (the whole OpenAI + Storage + DB round trip happens inside that one
-  // request), so the final outcome is already known when it resolves —
-  // no polling loop is needed here.
+  // Phase 2 — AI background removal, generalized in Phase 5 to every
+  // AI-capable owner type (see requestAssetPhotoProcessing's own
+  // comment). Same call whether this is the first "Process with AI"
+  // click or an explicit "Reprocess" — no extra flag is needed. The
+  // Edge Function call is synchronous (the whole OpenAI + Storage + DB
+  // round trip happens inside that one request), so the final outcome
+  // is already known when it resolves — no polling loop is needed here.
   // Phase 4 — backgroundColor omitted means "AI Recommended" (the Edge
   // Function analyzes the product and picks a palette color itself);
   // passed means "Reprocess with Selected Background" (deterministic —
-  // see requestProjectPhotoProcessing's own comment). Either way the
+  // see requestAssetPhotoProcessing's own comment). Either way the
   // real response tells us which color was actually used, so the local
   // state update never has to guess.
   async function handleProcess(photo: AssetPhoto, backgroundColor?: string) {
     setProcessingPhotoId(photo.id);
     try {
-      const result = await requestProjectPhotoProcessing(
+      const result = await requestAssetPhotoProcessing(
         photo.id,
         backgroundColor,
       );
@@ -369,8 +371,17 @@ export function AssetPhotoGallery({
   const heroIndex =
     primaryIndex >= 0 ? primaryIndex : photos.length > 0 ? 0 : -1;
   const heroPhoto = heroIndex >= 0 ? photos[heroIndex] : null;
+  // Phase 5 — the hero display is heroMode's own cover concept
+  // (machine/die/tool), so it respects cover_uses_processed exactly
+  // like ProjectDetail/Projects.tsx already do externally for
+  // projects — same field, same rule, never a second source of truth.
+  // Picks between the two already-resolved signed-URL maps rather than
+  // re-deriving a storage path, since both are fetched unconditionally
+  // above regardless of ownerType.
   const heroImgUrl = heroPhoto
-    ? signedUrls[heroPhoto.id]
+    ? heroPhoto.coverUsesProcessed && heroPhoto.processedStoragePath
+      ? processedSignedUrls[heroPhoto.id]
+      : signedUrls[heroPhoto.id]
     : usingLegacyFallback
       ? legacyPhotoDataUrl
       : undefined;
@@ -558,9 +569,10 @@ export function AssetPhotoGallery({
           ) : (
             previewPhoto && (
               <div className="space-y-3">
-                {/* Phase 2 — Project Photos AI background removal. Only
-                    ever renders for ownerType "project" with a
-                    processed derivative — every other case leaves this
+                {/* Phase 2 — AI background removal. Renders for any
+                    photo with a processed derivative, regardless of
+                    owner type — a photo that was never processed
+                    simply has no processedStoragePath, so this stays
                     exactly as it always looked. Never silently shows
                     the processed image; "Original"/"Processed" is
                     always explicit. */}
@@ -677,10 +689,15 @@ export function AssetPhotoGallery({
                   </div>
                 </div>
 
-                {/* Phase 2 — Project Photos AI background removal.
-                    ownerType-gated: Machine/Die/Tool/Inventory Item/Job
-                    Card photos never render any of this. */}
-                {ownerType === "project" && canEdit && (
+                {/* Phase 2 — AI background removal. Phase 5 generalized
+                    this from project-only to every owner type
+                    asset_photos supports — the Edge Function itself
+                    validates owner_type and the matching module
+                    permission server-side (see its own header), so no
+                    ownerType allowlist is needed here; canEdit (already
+                    computed per-module by each caller, e.g.
+                    canEdit(currentUser,'job_cards')) is the only gate. */}
+                {canEdit && (
                   <div
                     className="flex items-center gap-2 flex-wrap border-t pt-3"
                     data-ocid={dataOcid ? `${dataOcid}.ai` : undefined}
@@ -800,12 +817,21 @@ export function AssetPhotoGallery({
                         )}
                       </>
                     )}
-                    {/* Phase 3 — Project Photos cover variant. Only for
-                        the cover row itself (isPrimary) once a
-                        processed image is actually ready — never
-                        offered for a non-primary photo or a
-                        processing/failed one. Never changes isPrimary. */}
-                    {previewPhoto.isPrimary &&
+                    {/* Phase 3 — cover variant (original vs. processed).
+                        Phase 5: only offered for owner types that
+                        actually DISPLAY a cover somewhere (project's
+                        external ProjectDetail/Projects list, or
+                        machine/die/tool's own heroMode hero above) —
+                        never for inventory_item/job_card, which have no
+                        hero/cover display anywhere (confirmed in the
+                        architecture audit), so the toggle would set a
+                        flag nothing ever reads. Also only for the cover
+                        row itself (isPrimary) once a processed image is
+                        actually ready — never offered for a non-primary
+                        photo or a processing/failed one. Never changes
+                        isPrimary. */}
+                    {(ownerType === "project" || heroMode) &&
+                      previewPhoto.isPrimary &&
                       previewPhoto.processingStatus === "ready" &&
                       previewPhoto.processedStoragePath &&
                       (previewPhoto.coverUsesProcessed ? (

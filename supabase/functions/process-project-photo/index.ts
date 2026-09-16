@@ -74,6 +74,36 @@
 // the edit call, so it can be embedded verbatim in the edit prompt AND
 // stored in processed_background_color — no parsing of the edit
 // response required, no chance of the edit model silently drifting.
+//
+// Phase 5 — generalized to every asset_photos owner_type (project,
+// job_card, inventory_item, machine, tool, die), not just projects.
+// Deliberately NOT renamed/split into six functions: nothing below is
+// actually project-specific once OWNER_TABLES exists — the file name
+// is now a historical artifact (same as how Phase 51's AssetPhotoGallery
+// component kept its name after growing beyond its original scope).
+// Two things generalize:
+//   - has_asset_permission's own p_asset_type param, already keyed
+//     dynamically off owner_type in the DB function (see
+//     20260915130000_project_photos.sql) — was hardcoded to the
+//     literal 'project' here; now passes photoRow.owner_type straight
+//     through, so authorization is checked against the CORRECT module
+//     per owner type (projects/job_cards/inventory/machinery/tools/
+//     tooling_dies) — reusing the exact same routing every other
+//     asset_photos reader/writer already goes through, never a new
+//     "photo processing" permission.
+//   - the "does the owning row genuinely exist, in my org" check,
+//     previously a hardcoded `.from("projects")` — now looks up the
+//     right table via OWNER_TABLES. Every owner table already has the
+//     same {id, organization_id} shape (confirmed live before writing
+//     this), so one generic query shape covers all six.
+const OWNER_TABLES: Record<string, string> = {
+  project: "projects",
+  job_card: "job_cards",
+  inventory_item: "inventory_items",
+  machine: "machines",
+  tool: "tools",
+  die: "dies",
+};
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
@@ -194,7 +224,21 @@ Respond with ONLY the number of your chosen option (1-7). No other words, punctu
             ],
           },
         ],
-        max_output_tokens: 16,
+        // Reliability fix (Phase 5 live-QA follow-up): this is a
+        // reasoning model (see _shared/openaiProvider.ts's own
+        // reasoning.effort usage for the same model) — its hidden
+        // reasoning tokens count against max_output_tokens, and at 16
+        // tokens the model frequently spent the entire budget
+        // "thinking" and never emitted the visible answer digit,
+        // observed live as incomplete:{reason:"max_output_tokens"}.
+        // effort:"low" keeps reasoning minimal for what is a trivial
+        // 1-of-7 classification (matches this same codebase's existing
+        // convention rather than introducing a new one), and 200 is a
+        // generous buffer on top so a still-larger reasoning burst
+        // can't reproduce the same failure. Everything else about the
+        // call (model, prompt, image, response parsing) is unchanged.
+        reasoning: { effort: "low" },
+        max_output_tokens: 200,
         store: false,
       }),
       signal: controller.signal,
@@ -221,7 +265,14 @@ Respond with ONLY the number of your chosen option (1-7). No other words, punctu
       }
     }
   }
-  const match = text.match(/[1-7]/);
+  // Normalize whitespace/newlines the model may wrap the digit in, then
+  // accept only a genuine 1-7 selection — an exact single-digit answer
+  // first (the expected shape), falling back to a word-boundary digit
+  // (so "3" inside stray leaked text still parses, but "13" or "2024"
+  // never do). Never falls through to an arbitrary/default color: no
+  // match is always a thrown, controlled error.
+  const trimmedText = text.trim();
+  const match = trimmedText.match(/^[1-7]$/) ?? trimmedText.match(/\b[1-7]\b/);
   if (!match) {
     throw new Error("Background analysis did not return a valid selection.");
   }
@@ -350,16 +401,22 @@ Deno.serve(async (req: Request) => {
   if (photoError) return jsonResponse({ error: photoError.message }, 400);
   if (!photo) return jsonResponse({ error: "Photo not found." }, 404);
   const photoRow = photo as AssetPhotoRow;
-  if (photoRow.owner_type !== "project") {
-    return jsonResponse({ error: "AI processing is only available for project photos." }, 400);
+  const ownerTable = OWNER_TABLES[photoRow.owner_type];
+  if (!ownerTable) {
+    return jsonResponse({ error: "AI processing is not available for this photo type." }, 400);
   }
 
   // Explicit edit-permission check — reading the row above only proved
   // 'view'. Reuses the existing has_asset_permission() SQL function
   // (already EXECUTE-granted to `authenticated`) rather than
   // duplicating its logic here; no new permission is introduced.
+  // p_asset_type is the photo's OWN owner_type, never trusted from the
+  // request body — has_asset_permission() routes it to the correct
+  // module internally (project->projects, job_card->job_cards, etc.),
+  // so this is the exact right permission for whatever entity this
+  // photo actually belongs to.
   const { data: canEdit, error: permError } = await userClient.rpc("has_asset_permission", {
-    p_asset_type: "project",
+    p_asset_type: photoRow.owner_type,
     p_action: "edit",
   });
   if (permError) return jsonResponse({ error: permError.message }, 400);
@@ -367,17 +424,19 @@ Deno.serve(async (req: Request) => {
     return jsonResponse({ error: "You do not have permission to process this photo." }, 403);
   }
 
-  // Confirms the owning project genuinely exists and belongs to the
-  // caller's organization — projects_select RLS (projects.view +
-  // organization_id match) is the real check; this is not inferred
-  // solely from asset_photos.organization_id.
-  const { data: project, error: projectError } = await userClient
-    .from("projects")
+  // Confirms the owning entity genuinely exists and belongs to the
+  // caller's organization — that table's own SELECT RLS (view
+  // permission + organization_id match) is the real check; this is not
+  // inferred solely from asset_photos.organization_id. ownerTable was
+  // just validated against the fixed OWNER_TABLES map above, so this is
+  // never an arbitrary/unvalidated table name.
+  const { data: ownerRow, error: ownerError } = await userClient
+    .from(ownerTable)
     .select("id, organization_id")
     .eq("id", photoRow.owner_id)
     .maybeSingle();
-  if (projectError) return jsonResponse({ error: projectError.message }, 400);
-  if (!project) return jsonResponse({ error: "Project not found." }, 404);
+  if (ownerError) return jsonResponse({ error: ownerError.message }, 400);
+  if (!ownerRow) return jsonResponse({ error: "Owning record not found." }, 404);
 
   // ── Atomic claim ────────────────────────────────────────────────
   // Exact same idiom as _shared/emailSyncLock.ts's claimSyncLock(): one
@@ -486,8 +545,10 @@ Deno.serve(async (req: Request) => {
 
   // Fresh path every run (never the same path twice) — the orphan-safe
   // ordering below depends on the new object never colliding with the
-  // one it's about to replace.
-  const newProcessedPath = `${project.organization_id}/project/${project.id}/${photoId}-processed-${crypto.randomUUID()}.png`;
+  // one it's about to replace. Same {orgId}/{ownerType}/{ownerId}/
+  // prefix convention assetPhotosApi.ts's uploadAssetPhoto() already
+  // uses for originals — not a new path scheme.
+  const newProcessedPath = `${ownerRow.organization_id}/${photoRow.owner_type}/${photoRow.owner_id}/${photoId}-processed-${crypto.randomUUID()}.png`;
   const newProcessedFilename = `${(photoRow.original_filename || "photo").replace(/\.[^.]+$/, "")}-processed.png`;
 
   const { error: uploadError } = await serviceClient.storage

@@ -58,6 +58,7 @@ import {
   formatJobCardTimestamp,
   useJobCardTimer,
 } from "../hooks/useJobCardTimer";
+import { getAssetPhotoSignedUrl } from "../lib/assetPhotosApi";
 import { getEvidenceRequirements } from "../lib/companySettingsApi";
 import { JobCardDocContent } from "../lib/documentRenderers";
 import { setJobCardExceptionStatusRemote } from "../lib/jobCardExceptionsApi";
@@ -152,6 +153,7 @@ export function JobCards({
     projectProductions,
     jobCardExceptions,
     settings,
+    assetPhotos,
     addJobCard,
     updateJobCard,
     deleteJobCard,
@@ -320,6 +322,28 @@ export function JobCards({
   // and nothing here writes to the Job Card or any other table — it only
   // reads the same fields the View dialog above already reads.
   async function handlePrintJobCard(jc: JobCard) {
+    // Feature: optional photo on the printed Job Card (see chat) — the
+    // same asset_photos-backed primary photo AssetPhotoGallery already
+    // shows for this job_card (Evidence Photos section), never a
+    // separate photo record. Resolved to a real signed URL BEFORE the
+    // synchronous flushSync render below: an <img> written into a popup
+    // via innerHTML has no chance to await anything itself, same
+    // reasoning settings.companyLogo is already a ready-to-use value by
+    // the time it reaches JobCardDocContent. Prefers the processed
+    // derivative when one exists (per requirement — job_card photos
+    // have no cover_uses_processed UI of their own to consult), falls
+    // back to the original, and is entirely absent (undefined) for a
+    // Job Card with no photo — existing Job Cards print exactly as
+    // before, nothing here is required.
+    const primaryPhoto = (assetPhotos || []).find(
+      (p) => p.ownerType === "job_card" && p.ownerId === jc.id && p.isPrimary,
+    );
+    const photoUrl = primaryPhoto
+      ? await getAssetPhotoSignedUrl(
+          primaryPhoto.processedStoragePath ?? primaryPhoto.storagePath,
+        )
+      : null;
+
     const container = document.createElement("div");
     container.style.cssText =
       "position:fixed;top:0;left:-9999px;width:800px;background:#fff;z-index:9999";
@@ -339,6 +363,7 @@ export function JobCards({
           stageLabel={stageName(jc.stageId) ?? null}
           settings={settings as unknown as Record<string, string>}
           printedAt={printedAt}
+          photoUrl={photoUrl ?? undefined}
         />,
       );
     });

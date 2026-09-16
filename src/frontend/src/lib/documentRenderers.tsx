@@ -2013,6 +2013,13 @@ interface JobCardDocProps {
    * comment) — a value the caller computes fresh per print, not a field
    * read off `jobCard`. */
   printedAt: number;
+  /** Optional — a real, already-resolved signed URL for this Job
+   * Card's primary asset_photos photo (processed derivative preferred
+   * over the original when one exists), resolved by the caller before
+   * render (see handlePrintJobCard's own comment for why). undefined
+   * for a Job Card with no photo, which prints exactly as it always
+   * has — this section simply doesn't render. */
+  photoUrl?: string;
 }
 
 function formatPrintedOn(ms: number): string {
@@ -2042,6 +2049,7 @@ export function JobCardDocContent({
   stageLabel,
   settings,
   printedAt,
+  photoUrl,
 }: JobCardDocProps) {
   const activeTimeDisplay = formatJobCardDuration(
     getJobCardActiveSeconds(jobCard),
@@ -2168,6 +2176,39 @@ export function JobCardDocContent({
           {jobCard.jobDescription}
         </div>
       </div>
+
+      {/* PHOTO — optional (requirement 8, see chat). Entirely absent
+          when photoUrl is undefined (no photo attached, or this Job
+          Card predates the feature) — an existing Job Card without a
+          photo prints byte-for-byte the same layout as before this
+          section was added. Deliberately small/bounded (max 120px
+          tall) so a photo can never dominate or push the rest of the
+          sheet onto another page; object-fit: contain keeps the whole
+          product visible rather than cropping it. */}
+      {photoUrl && (
+        <div
+          style={{
+            border: "1px solid #999",
+            borderRadius: "4px",
+            padding: "10px 16px",
+            marginBottom: "16px",
+          }}
+        >
+          <div style={JOB_CARD_LABEL_STYLE}>Product / Result Photo</div>
+          <img
+            src={photoUrl}
+            alt="Job Card product/result"
+            style={{
+              display: "block",
+              maxHeight: "120px",
+              maxWidth: "180px",
+              objectFit: "contain",
+              border: "1px solid #ddd",
+              borderRadius: "3px",
+            }}
+          />
+        </div>
+      )}
 
       {/* QUANTITY — only Expected comes from the digital Job Card
           (requirement: it must stay auto-populated). Completed/Rejected/

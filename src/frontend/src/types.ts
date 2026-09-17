@@ -351,37 +351,100 @@ export interface JobCard {
    * project_qms_inspections and its stage-gate Pass/Fail logic. Empty
    * array = no plan configured, no section printed. */
   inspectionPlan: JobCardInspectionCheckpoint[];
-  /** Optional FK to Machine — which machine/station this operation runs
-   * on. Reuses the existing `machines` master via MachineSelect, no
-   * duplicate Work Center system. */
-  workCenterMachineId?: string;
-  /** Display snapshot of workCenterMachineId at the time it was set —
-   * survives the machine later being deleted (ON DELETE SET NULL). */
-  workCenterName?: string;
   /** Low / Normal / High / Urgent. Defaults 'Normal' at the database
    * level for every existing and new Job Card. */
   priority: JobCardPriority;
   /** Planned/scheduled Job Card date — distinct from startTime (the
    * real, server-authoritative timer column, untouched by this field). */
   startDate?: string;
+  /** Job Card Inspection Checkpoint Execution + Sign-off (see chat,
+   * database/20260917180000) — independent of the planning fields
+   * above. Execution events (JobCardInspectionEvent) are deliberately
+   * NOT a field on JobCard — they live in the real, database-enforced
+   * append-only child table job_card_inspection_events (never a jsonb
+   * column, see that migration's own header for why), fetched
+   * separately via fetchJobCardInspectionEvents() and held in its own
+   * component state, not embedded on this object. */
+  /** The authenticated user who created this Job Card. Snapshot-only —
+   * set once at creation, never user-editable (see chat, Part 9). */
+  preparedById?: string;
+  preparedByName?: string;
+  /** Who assigned/instructed this work — distinct from employeeId (the
+   * worker performing it). Real-FK-plus-snapshot, same convention as
+   * employeeId/employeeName. */
+  assignedByEmployeeId?: string;
+  assignedByEmployeeName?: string;
+  /** Who is responsible for the in-process/QC check. */
+  inProcessCheckEmployeeId?: string;
+  inProcessCheckEmployeeName?: string;
+  /** Who gave final QC approval/sign-off. */
+  qcApprovedByEmployeeId?: string;
+  qcApprovedByEmployeeName?: string;
+  /** The scanned/photographed, manually completed and signed physical
+   * Job Card — evidence the shop-floor paperwork was completed.
+   * Distinct from referencePhotoId (expected-result photo) and from
+   * any Project Reference Photo. undefined = none uploaded. */
+  completedDocumentStoragePath?: string;
+  completedDocumentFilename?: string;
+  completedDocumentMimeType?: string;
+  completedDocumentSizeBytes?: number;
+  completedDocumentUploadedBy?: string;
+  completedDocumentUploadedByName?: string;
+  completedDocumentUploadedAt?: number;
   createdAt: number;
   updatedAt: number;
 }
 
 export type JobCardPriority = "Low" | "Normal" | "High" | "Urgent";
 
+export type JobCardCheckpointSource = "manual" | "automatic" | "final";
+
 /** One row of a Job Card's freeform inspection plan (see JobCard.
- * inspectionPlan above). Purely descriptive/printed — no pass/fail, no
- * persisted "done" state, no relation to project_qms_inspections. */
+ * inspectionPlan above). Purely descriptive/printed CONFIGURATION — no
+ * pass/fail, no persisted "done" state, no relation to
+ * project_qms_inspections. Execution state lives separately in the
+ * job_card_inspection_events table (see JobCardInspectionEvent below),
+ * keyed by this row's `id`. */
 export interface JobCardInspectionCheckpoint {
   /** Client-generated, stable only for the lifetime of one edit session
    * (React list key / add-remove identity) — never a database id, this
-   * whole array is one jsonb column, not a child table. */
+   * whole array is one jsonb column, not a child table. Also the join
+   * key used by JobCardInspectionEvent.checkpointId. */
   id: string;
   label: string;
   triggerQty: number;
   cumulativeQty: number;
   sampleQty: number;
+  /** Where this checkpoint came from — purely informational (a small
+   * badge in the UI), never affects execution. "final" is the
+   * mandatory, auto-generated, non-deletable checkpoint at
+   * totalQuantity (see jobCardCheckpoints.ts). */
+  source: JobCardCheckpointSource;
+}
+
+/** One row of job_card_inspection_events (database/20260917180000) — a
+ * real, database-enforced append-only child table (INSERT/SELECT only;
+ * UPDATE/DELETE rejected by RLS + a trigger, mirroring
+ * project_qms_inspection_attempts' own established pattern), NOT a
+ * jsonb array. One row per completed inspection attempt at one
+ * checkpoint. Independent per checkpoint — completing the 100-piece
+ * checkpoint never touches the 25-piece checkpoint's own events. A
+ * checkpoint's current status is derived (see jobCardCheckpoints.ts)
+ * from the LATEST row matching its checkpointId (ordered by
+ * inspectedAt), so an earlier Fail is never destroyed by a later Pass
+ * — both rows remain, forever, enforced by the database itself. */
+export interface JobCardInspectionEvent {
+  id: string;
+  jobCardId: string;
+  checkpointId: string;
+  checkpointLabel: string;
+  checkpointQty: number;
+  source: JobCardCheckpointSource;
+  result: "Pass" | "Fail";
+  inspectedBy?: string;
+  inspectedByName?: string;
+  remarks?: string;
+  inspectedAt: number;
 }
 
 export interface MRItem {

@@ -100,6 +100,7 @@ import type {
   InvoiceStatus,
   JobCard,
   JobCardException,
+  JobCardInspectionEvent,
   JobCardStatus,
   LineItem,
   Machine,
@@ -3470,7 +3471,24 @@ export async function hydratePayments(): Promise<HydrationResult<Payment[]>> {
 // actual_time_spent_minutes are Postgres GENERATED columns, read here
 // exactly like any other column - never computed client-side, so they
 // can never drift from the server's own calculation.
-export const JOB_CARD_COLUMNS =
+// Split in two (see chat, Job Card Sign-off correction pass) so
+// createJobCardRemote/updateJobCardRemote can always write+read the
+// CORE columns (everything through the already-applied migration
+// 20260917100000) and treat the SIGNOFF columns (migration
+// 20260917180000 — prepared_by_*/assigned_by_*/in_process_check_*/
+// qc_approved_by_*/completed_document_*, NOT yet applied/authorized) as
+// a separate, best-effort second write — Create/Edit must never fail
+// just because that second migration hasn't been applied yet.
+// Inspection EVENTS are deliberately NOT a job_cards column at all
+// (never were, in the corrected design) — they live in the real child
+// table job_card_inspection_events, read via
+// fetchJobCardInspectionEvents() below. work_center_machine_id/
+// work_center_name are deliberately NOT listed here at all anymore
+// (see chat, Work Center removal) — the columns stay in the live
+// database (nothing else depends on them, confirmed, but dropping them
+// isn't required to remove the feature), the frontend simply stops
+// reading/writing them.
+export const JOB_CARD_CORE_COLUMNS =
   "id, job_no, project_id, employee_id, employee_name, job_description, " +
   "operation_type, standard_time_per_unit_minutes, allocated_time_minutes, " +
   "expected_quantity, actual_completed_qty, rejected_qty, rework_qty, " +
@@ -3479,8 +3497,20 @@ export const JOB_CARD_COLUMNS =
   "current_run_started_at, status, notes, " +
   "reference_photo_id, print_reference_photo, print_drawing, " +
   "total_quantity, expected_quantity_override, inspection_plan, " +
-  "work_center_machine_id, work_center_name, priority, start_date, " +
+  "priority, start_date, " +
   "created_at, updated_at";
+
+export const JOB_CARD_SIGNOFF_COLUMNS =
+  "prepared_by_id, prepared_by_name, " +
+  "assigned_by_employee_id, assigned_by_employee_name, " +
+  "in_process_check_employee_id, in_process_check_employee_name, " +
+  "qc_approved_by_employee_id, qc_approved_by_employee_name, " +
+  "completed_document_storage_path, completed_document_filename, " +
+  "completed_document_mime_type, completed_document_size_bytes, " +
+  "completed_document_uploaded_by, completed_document_uploaded_by_name, " +
+  "completed_document_uploaded_at";
+
+export const JOB_CARD_COLUMNS = `${JOB_CARD_CORE_COLUMNS}, ${JOB_CARD_SIGNOFF_COLUMNS}`;
 
 export interface JobCardRow {
   id: string;
@@ -3516,11 +3546,28 @@ export interface JobCardRow {
     triggerQty: number;
     cumulativeQty: number;
     sampleQty: number;
+    source?: string;
   }> | null;
-  work_center_machine_id: string | null;
-  work_center_name: string | null;
   priority: string;
   start_date: string | null;
+  // Sign-off columns (database/20260917180000, applied) — optional here
+  // since older cached rows may omit them; transformJobCardRow's own
+  // `??` handling treats absent exactly like null.
+  prepared_by_id?: string | null;
+  prepared_by_name?: string | null;
+  assigned_by_employee_id?: string | null;
+  assigned_by_employee_name?: string | null;
+  in_process_check_employee_id?: string | null;
+  in_process_check_employee_name?: string | null;
+  qc_approved_by_employee_id?: string | null;
+  qc_approved_by_employee_name?: string | null;
+  completed_document_storage_path?: string | null;
+  completed_document_filename?: string | null;
+  completed_document_mime_type?: string | null;
+  completed_document_size_bytes?: number | null;
+  completed_document_uploaded_by?: string | null;
+  completed_document_uploaded_by_name?: string | null;
+  completed_document_uploaded_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -3561,13 +3608,78 @@ export function transformJobCardRow(row: JobCardRow): JobCard {
       triggerQty: r.triggerQty,
       cumulativeQty: r.cumulativeQty,
       sampleQty: r.sampleQty,
+      source:
+        (r.source as JobCard["inspectionPlan"][number]["source"]) ?? "manual",
     })),
-    workCenterMachineId: row.work_center_machine_id ?? undefined,
-    workCenterName: row.work_center_name ?? undefined,
     priority: (row.priority as JobCard["priority"]) ?? "Normal",
     startDate: row.start_date ?? undefined,
+    preparedById: row.prepared_by_id ?? undefined,
+    preparedByName: row.prepared_by_name ?? undefined,
+    assignedByEmployeeId: row.assigned_by_employee_id ?? undefined,
+    assignedByEmployeeName: row.assigned_by_employee_name ?? undefined,
+    inProcessCheckEmployeeId: row.in_process_check_employee_id ?? undefined,
+    inProcessCheckEmployeeName: row.in_process_check_employee_name ?? undefined,
+    qcApprovedByEmployeeId: row.qc_approved_by_employee_id ?? undefined,
+    qcApprovedByEmployeeName: row.qc_approved_by_employee_name ?? undefined,
+    completedDocumentStoragePath:
+      row.completed_document_storage_path ?? undefined,
+    completedDocumentFilename: row.completed_document_filename ?? undefined,
+    completedDocumentMimeType: row.completed_document_mime_type ?? undefined,
+    completedDocumentSizeBytes: row.completed_document_size_bytes ?? undefined,
+    completedDocumentUploadedBy:
+      row.completed_document_uploaded_by ?? undefined,
+    completedDocumentUploadedByName:
+      row.completed_document_uploaded_by_name ?? undefined,
+    completedDocumentUploadedAt: row.completed_document_uploaded_at
+      ? new Date(row.completed_document_uploaded_at).getTime()
+      : undefined,
     createdAt: new Date(row.created_at).getTime(),
     updatedAt: new Date(row.updated_at).getTime(),
+  };
+}
+
+// ── Job Card Inspection Events (database/20260917180000, NOT YET
+// APPLIED) — the checkpoint EXECUTION log's real child table, replacing
+// the originally-designed job_cards.inspection_events jsonb column (see
+// that migration's own header for the full "why"). A real, insert-only
+// table, not queried via JOB_CARD_COLUMNS at all — fetched separately
+// per Job Card by fetchJobCardInspectionEvents() in jobCardsApi.ts. ────
+
+export const JOB_CARD_INSPECTION_EVENT_COLUMNS =
+  "id, job_card_id, checkpoint_id, checkpoint_label, checkpoint_qty, " +
+  "source, result, inspected_by, inspected_by_name, remarks, " +
+  "inspected_at, created_at";
+
+export interface JobCardInspectionEventRow {
+  id: string;
+  job_card_id: string;
+  checkpoint_id: string;
+  checkpoint_label: string;
+  checkpoint_qty: number;
+  source: string;
+  result: string;
+  inspected_by: string | null;
+  inspected_by_name: string | null;
+  remarks: string | null;
+  inspected_at: string;
+  created_at: string;
+}
+
+export function transformJobCardInspectionEventRow(
+  row: JobCardInspectionEventRow,
+): JobCardInspectionEvent {
+  return {
+    id: row.id,
+    jobCardId: row.job_card_id,
+    checkpointId: row.checkpoint_id,
+    checkpointLabel: row.checkpoint_label,
+    checkpointQty: row.checkpoint_qty,
+    source: row.source as JobCardInspectionEvent["source"],
+    result: row.result as JobCardInspectionEvent["result"],
+    inspectedBy: row.inspected_by ?? undefined,
+    inspectedByName: row.inspected_by_name ?? undefined,
+    remarks: row.remarks ?? undefined,
+    inspectedAt: new Date(row.inspected_at).getTime(),
   };
 }
 

@@ -1,0 +1,41 @@
+-- Drop Job Card Work Center columns (see chat) — NOT YET APPLIED, written
+-- for review only.
+--
+-- Work Center has been decided to be unnecessary on the Job Card (see
+-- chat). This migration removes the two columns added by
+-- 20260917100000_job_card_planning_fields.sql:
+--   work_center_machine_id uuid references machines(id) on delete set null
+--   work_center_name text
+--
+-- Dependency analysis performed before writing this migration (see chat):
+--   - Repo-wide grep for work_center_machine_id/work_center_name/
+--     workCenterMachineId/workCenterName found references ONLY inside the
+--     Job Card feature's own files (types.ts, hydration.ts, jobCardsApi.ts,
+--     JobCards.tsx, documentRenderers.tsx) plus the two migrations
+--     themselves -- nothing else in the codebase reads or writes these
+--     columns. The frontend has already been changed to stop
+--     reading/writing them (this migration is a pure follow-up cleanup,
+--     not a prerequisite for that removal).
+--   - Live dependency check via pg_depend/pg_rewrite confirmed zero views
+--     or rules depend on job_cards at all.
+--   - Live data check confirmed zero job_cards rows currently have either
+--     column set (both NULL for every existing row) -- dropping loses no
+--     data.
+--   - The FK target (machines) is untouched; only the FK *from* job_cards
+--     is removed, along with its column.
+--
+-- RLS impact: none. job_cards' existing row-level policies
+-- (job_cards_select/insert/update/delete) are column-agnostic --
+-- dropping two columns changes nothing about them.
+--
+-- Rollback: re-running 20260917100000's own
+--   alter table public.job_cards
+--     add column if not exists work_center_machine_id uuid
+--       references public.machines(id) on delete set null,
+--     add column if not exists work_center_name text;
+-- restores both columns (empty/NULL again, matching their state
+-- immediately before this drop -- no data was ever in them to restore).
+
+alter table public.job_cards
+  drop column if exists work_center_machine_id,
+  drop column if exists work_center_name;

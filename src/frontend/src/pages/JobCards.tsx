@@ -59,7 +59,6 @@ import { CompleteJobCardDialog } from "../components/CompleteJobCardDialog";
 import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import { EmployeeSelect } from "../components/EmployeeSelect";
 import { JobCardTimerPanel } from "../components/JobCardTimerPanel";
-import { MachineSelect } from "../components/MachineSelect";
 import { ProjectSelect } from "../components/ProjectSelect";
 import {
   formatJobCardTimestamp,
@@ -72,16 +71,32 @@ import {
   validateAssetPhotoFile,
 } from "../lib/assetPhotosApi";
 import { getEvidenceRequirements } from "../lib/companySettingsApi";
+import {
+  getCompletedJobCardDocumentSignedUrl,
+  removeCompletedJobCardDocument,
+  uploadCompletedJobCardDocument,
+  validateCompletedJobCardDocumentFile,
+} from "../lib/completedJobCardDocumentApi";
 import { JobCardDocContent } from "../lib/documentRenderers";
+import {
+  addManualCheckpoint,
+  getCheckpointStatus,
+  mergeAutomaticPoints,
+  reconcileFinalCheckpoint,
+  relabelCheckpoints,
+} from "../lib/jobCardCheckpoints";
 import { setJobCardExceptionStatusRemote } from "../lib/jobCardExceptionsApi";
 import type { WriteResult } from "../lib/jobCardsApi";
 import {
   computeNextJobNo,
   createJobCardRemote,
   deleteJobCardRemote,
+  fetchJobCardInspectionEvents,
   pauseJobCardRemote,
+  recordJobCardInspectionEvent,
   resumeJobCardRemote,
   startJobCardRemote,
+  updateJobCardProductionProgress,
   updateJobCardRemote,
 } from "../lib/jobCardsApi";
 import {
@@ -97,6 +112,7 @@ import type {
   JobCard,
   JobCardExceptionReason,
   JobCardInspectionCheckpoint,
+  JobCardInspectionEvent,
   JobCardPriority,
   JobCardStatus,
 } from "../types";
@@ -191,10 +207,34 @@ const emptyForm = {
   expectedQuantityOverride: "",
   expectedQuantityTouched: false,
   inspectionPlan: [] as JobCardInspectionCheckpoint[],
-  workCenterMachineId: "",
-  workCenterName: "",
   priority: "Normal" as JobCardPriority,
   startDate: "",
+  // Job Card Inspection Checkpoint Execution + Sign-off (see chat,
+  // database/20260917180000). Inspection events are NOT a form field at
+  // all (never were, in the corrected design) — they live in the real
+  // child table job_card_inspection_events, fetched separately (see
+  // viewCardEvents state) and written via recordJobCardInspectionEvent,
+  // never through this form's save payload. completedDocument* are
+  // similarly never edited through this form directly (upload-driven —
+  // see the Completed Job Card upload section) but the writable payload
+  // still needs to carry the CURRENT value through unchanged on every
+  // save. preparedBy* is likewise never a form field — set once,
+  // automatically, from the authenticated session in handleSaveAdd.
+  preparedById: "",
+  preparedByName: "",
+  assignedByEmployeeId: "",
+  assignedByEmployeeName: "",
+  inProcessCheckEmployeeId: "",
+  inProcessCheckEmployeeName: "",
+  qcApprovedByEmployeeId: "",
+  qcApprovedByEmployeeName: "",
+  completedDocumentStoragePath: "",
+  completedDocumentFilename: "",
+  completedDocumentMimeType: "",
+  completedDocumentSizeBytes: undefined as number | undefined,
+  completedDocumentUploadedBy: "",
+  completedDocumentUploadedByName: "",
+  completedDocumentUploadedAt: undefined as number | undefined,
 };
 
 interface JobCardsProps {
@@ -484,11 +524,216 @@ export function JobCards({
     });
   }, []);
 
+  // Inspection Checkpoint Execution + Production Progress + Completed
+  // Document (see chat, Parts 4-5/12-13, database/20260917180000) — all
+  // View-dialog-only state, reset whenever viewCard changes (see the
+  // reset effect below) so reopening a different Job Card never carries
+  // over a half-filled inspect/upload form from the previous one.
+  const [recordingCheckpointId, setRecordingCheckpointId] = useState<
+    string | null
+  >(null);
+  const [checkpointRemarks, setCheckpointRemarks] = useState("");
+  const [savingCheckpoint, setSavingCheckpoint] = useState(false);
+  const [progressInput, setProgressInput] = useState("");
+  const [savingProgress, setSavingProgress] = useState(false);
+  const [savingDocument, setSavingDocument] = useState(false);
+  const [completedDocSignedUrl, setCompletedDocSignedUrl] = useState<
+    string | null
+  >(null);
+  // The View dialog's own copy of this Job Card's inspection events —
+  // fetched separately from job_card_inspection_events (see chat,
+  // database/20260917180000), never embedded on JobCard itself. A
+  // successful recordJobCardInspectionEvent() appends its one new row
+  // here directly (no need to refetch the whole list — an INSERT can't
+  // conflict with anything already loaded).
+  const [viewCardEvents, setViewCardEvents] = useState<
+    JobCardInspectionEvent[]
+  >([]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset only when the OPEN card changes, not on every field of it
+  useEffect(() => {
+    setRecordingCheckpointId(null);
+    setCheckpointRemarks("");
+    setProgressInput(viewCard ? String(viewCard.actualCompletedQty ?? 0) : "");
+    setCompletedDocSignedUrl(null);
+    setViewCardEvents([]);
+    if (viewCard?.completedDocumentStoragePath) {
+      getCompletedJobCardDocumentSignedUrl(
+        viewCard.completedDocumentStoragePath,
+      ).then(setCompletedDocSignedUrl);
+    }
+    if (viewCard) {
+      fetchJobCardInspectionEvents(viewCard.id).then(setViewCardEvents);
+    }
+  }, [viewCard?.id]);
+
+  async function handleRecordCheckpoint(
+    checkpoint: JobCardInspectionCheckpoint,
+    result: "Pass" | "Fail",
+  ) {
+    if (!viewCard || savingCheckpoint) return;
+    setSavingCheckpoint(true);
+    try {
+      const res = await recordJobCardInspectionEvent(viewCard.id, {
+        checkpointId: checkpoint.id,
+        checkpointLabel: checkpoint.label,
+        checkpointQty: checkpoint.cumulativeQty,
+        source: checkpoint.source,
+        result,
+        inspectedBy: currentUser?.id,
+        inspectedByName: currentUser?.username,
+        remarks: checkpointRemarks.trim() || undefined,
+      });
+      if (res.status === "unauthenticated") {
+        toast.error("Not signed in — inspection was not recorded.");
+        return;
+      }
+      if (res.status === "denied" || res.status === "error") {
+        toast.error(res.error ?? "Could not record inspection");
+        return;
+      }
+      if (!res.data) return;
+      // Append locally — a successful INSERT can't conflict with
+      // anything already loaded, so there's no need to refetch the
+      // whole list (see chat, database/20260917180000).
+      setViewCardEvents((prev) => [
+        ...prev,
+        res.data as JobCardInspectionEvent,
+      ]);
+      setRecordingCheckpointId(null);
+      setCheckpointRemarks("");
+      toast.success(`${checkpoint.label}: ${result}`);
+    } finally {
+      setSavingCheckpoint(false);
+    }
+  }
+
+  async function handleSaveProgress() {
+    if (!viewCard || savingProgress) return;
+    const qty = Number.parseInt(progressInput, 10);
+    if (Number.isNaN(qty) || qty < 0) {
+      toast.error("Enter a valid quantity");
+      return;
+    }
+    setSavingProgress(true);
+    try {
+      const res = await updateJobCardProductionProgress(viewCard.id, qty);
+      if (res.status === "unauthenticated") {
+        toast.error("Not signed in — progress was not saved.");
+        return;
+      }
+      if (res.status === "denied" || res.status === "error") {
+        toast.error(res.error ?? "Could not update progress");
+        return;
+      }
+      if (!res.data) return;
+      updateJobCard(res.data);
+      setViewCard(res.data);
+      toast.success("Production progress updated");
+    } finally {
+      setSavingProgress(false);
+    }
+  }
+
+  async function handleUploadCompletedDocument(
+    e: React.ChangeEvent<HTMLInputElement>,
+  ) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !viewCard || savingDocument) return;
+    const validation = validateCompletedJobCardDocumentFile(file);
+    if (!validation.ok) {
+      toast.error(validation.reason);
+      return;
+    }
+    setSavingDocument(true);
+    try {
+      const res = await uploadCompletedJobCardDocument(
+        viewCard.id,
+        file,
+        currentUser?.username || "Unknown",
+        viewCard.completedDocumentStoragePath,
+      );
+      if (res.status === "unauthenticated") {
+        toast.error("Not signed in — file was not uploaded.");
+        return;
+      }
+      if (res.status === "denied" || res.status === "error") {
+        toast.error(res.error ?? "Could not upload file");
+        return;
+      }
+      if (!res.data) return;
+      updateJobCard(res.data);
+      setViewCard(res.data);
+      toast.success("Completed Job Card uploaded");
+    } finally {
+      setSavingDocument(false);
+    }
+  }
+
+  async function handleRemoveCompletedDocument() {
+    if (!viewCard || !viewCard.completedDocumentStoragePath || savingDocument)
+      return;
+    setSavingDocument(true);
+    try {
+      const res = await removeCompletedJobCardDocument(
+        viewCard.id,
+        viewCard.completedDocumentStoragePath,
+      );
+      if (res.status === "unauthenticated") {
+        toast.error("Not signed in — file was not removed.");
+        return;
+      }
+      if (res.status === "denied" || res.status === "error") {
+        toast.error(res.error ?? "Could not remove file");
+        return;
+      }
+      if (!res.data) return;
+      updateJobCard(res.data);
+      setViewCard(res.data);
+      toast.success("Completed Job Card removed");
+    } finally {
+      setSavingDocument(false);
+    }
+  }
+
   useEffect(() => {
     if (!highlightJobCardId) return;
     const match = jobCards.find((jc) => jc.id === highlightJobCardId);
     if (match) setViewCard(match);
   }, [highlightJobCardId, jobCards]);
+
+  // Final Inspection reconciliation (see chat, Part 6/16) — runs
+  // whenever Total Quantity changes, ensuring exactly one checkpoint
+  // sits at totalQuantity, auto-labeled "Final Inspection" and
+  // non-deletable. Converts an existing manual/automatic checkpoint at
+  // that exact quantity in place rather than duplicating it. A quantity
+  // CHANGE never discards any OTHER checkpoint's configuration or
+  // history (see Part 16) — it only ever adds/updates the one Final row.
+  // Deliberately keyed on form.totalQuantity only — including
+  // form.inspectionPlan in the deps would re-run this on every manual
+  // add/remove/edit too, fighting those actions instead of only
+  // reacting to the Total Quantity itself changing.
+  useEffect(() => {
+    const totalQuantity =
+      form.totalQuantity !== ""
+        ? Number.parseInt(form.totalQuantity, 10)
+        : undefined;
+    setForm((f) => {
+      const reconciled = reconcileFinalCheckpoint(
+        f.inspectionPlan,
+        totalQuantity,
+      );
+      const changed =
+        reconciled.length !== f.inspectionPlan.length ||
+        reconciled.some(
+          (r, i) =>
+            r.label !== f.inspectionPlan[i]?.label ||
+            r.source !== f.inspectionPlan[i]?.source ||
+            r.cumulativeQty !== f.inspectionPlan[i]?.cumulativeQty,
+        );
+      return changed ? { ...f, inspectionPlan: reconciled } : f;
+    });
+  }, [form.totalQuantity]);
 
   async function handleTransition(
     action: (id: string) => Promise<WriteResult<JobCard>>,
@@ -571,10 +816,27 @@ export function JobCards({
       // because the dialog was reopened.
       expectedQuantityTouched: jc.expectedQuantityOverride != null,
       inspectionPlan: jc.inspectionPlan ?? [],
-      workCenterMachineId: jc.workCenterMachineId ?? "",
-      workCenterName: jc.workCenterName ?? "",
       priority: jc.priority ?? "Normal",
       startDate: jc.startDate ?? "",
+      // Carried through unchanged, never edited by this form (see their
+      // own emptyForm comment) — completedDocument*/preparedBy* must
+      // survive a save untouched. inspectionEvents is not a form field
+      // at all (see viewCardEvents state, fetched separately).
+      preparedById: jc.preparedById ?? "",
+      preparedByName: jc.preparedByName ?? "",
+      assignedByEmployeeId: jc.assignedByEmployeeId ?? "",
+      assignedByEmployeeName: jc.assignedByEmployeeName ?? "",
+      inProcessCheckEmployeeId: jc.inProcessCheckEmployeeId ?? "",
+      inProcessCheckEmployeeName: jc.inProcessCheckEmployeeName ?? "",
+      qcApprovedByEmployeeId: jc.qcApprovedByEmployeeId ?? "",
+      qcApprovedByEmployeeName: jc.qcApprovedByEmployeeName ?? "",
+      completedDocumentStoragePath: jc.completedDocumentStoragePath ?? "",
+      completedDocumentFilename: jc.completedDocumentFilename ?? "",
+      completedDocumentMimeType: jc.completedDocumentMimeType ?? "",
+      completedDocumentSizeBytes: jc.completedDocumentSizeBytes,
+      completedDocumentUploadedBy: jc.completedDocumentUploadedBy ?? "",
+      completedDocumentUploadedByName: jc.completedDocumentUploadedByName ?? "",
+      completedDocumentUploadedAt: jc.completedDocumentUploadedAt,
     });
   };
 
@@ -751,10 +1013,39 @@ export function JobCards({
         ? overrideQty
         : undefined,
     inspectionPlan: form.inspectionPlan,
-    workCenterMachineId: form.workCenterMachineId || undefined,
-    workCenterName: form.workCenterName || undefined,
     priority: form.priority,
     startDate: form.startDate || undefined,
+  });
+
+  // Sign-off fields payload (see chat, Part 9, database/20260917180000)
+  // — shared the same way. preparedById/preparedByName are NOT here:
+  // they're set exactly once, automatically, in handleSaveAdd from the
+  // authenticated session, and passed straight through unchanged from
+  // `form` (populated by openEdit from the existing Job Card) in
+  // handleSaveEdit — this form never lets the user type/select them.
+  const signOffFieldsPayload = () => ({
+    assignedByEmployeeId: form.assignedByEmployeeId || undefined,
+    assignedByEmployeeName: form.assignedByEmployeeName || undefined,
+    inProcessCheckEmployeeId: form.inProcessCheckEmployeeId || undefined,
+    inProcessCheckEmployeeName: form.inProcessCheckEmployeeName || undefined,
+    qcApprovedByEmployeeId: form.qcApprovedByEmployeeId || undefined,
+    qcApprovedByEmployeeName: form.qcApprovedByEmployeeName || undefined,
+  });
+
+  // Carried through unchanged on every save (see their own emptyForm
+  // comment) — never edited by this form. Create always starts with
+  // none of these; Edit passes through what openEdit populated from the
+  // existing Job Card.
+  const passthroughFieldsPayload = () => ({
+    completedDocumentStoragePath:
+      form.completedDocumentStoragePath || undefined,
+    completedDocumentFilename: form.completedDocumentFilename || undefined,
+    completedDocumentMimeType: form.completedDocumentMimeType || undefined,
+    completedDocumentSizeBytes: form.completedDocumentSizeBytes,
+    completedDocumentUploadedBy: form.completedDocumentUploadedBy || undefined,
+    completedDocumentUploadedByName:
+      form.completedDocumentUploadedByName || undefined,
+    completedDocumentUploadedAt: form.completedDocumentUploadedAt,
   });
 
   const validate = () => {
@@ -819,6 +1110,13 @@ export function JobCards({
           printReferencePhoto: form.printReferencePhoto,
           printDrawing: form.printDrawing,
           ...planningFieldsPayload(),
+          ...signOffFieldsPayload(),
+          ...passthroughFieldsPayload(),
+          // Prepared By (see chat, Part 9) — automatically the
+          // authenticated user creating this Job Card, never a manual
+          // selection. Set exactly once, here, at creation.
+          preparedById: currentUser?.id || undefined,
+          preparedByName: currentUser?.username || undefined,
         },
         { autoRenumberOnConflict: true },
       );
@@ -890,10 +1188,25 @@ export function JobCards({
               totalQuantity: created.totalQuantity,
               expectedQuantityOverride: created.expectedQuantityOverride,
               inspectionPlan: created.inspectionPlan,
-              workCenterMachineId: created.workCenterMachineId,
-              workCenterName: created.workCenterName,
               priority: created.priority,
               startDate: created.startDate,
+              preparedById: created.preparedById,
+              preparedByName: created.preparedByName,
+              assignedByEmployeeId: created.assignedByEmployeeId,
+              assignedByEmployeeName: created.assignedByEmployeeName,
+              inProcessCheckEmployeeId: created.inProcessCheckEmployeeId,
+              inProcessCheckEmployeeName: created.inProcessCheckEmployeeName,
+              qcApprovedByEmployeeId: created.qcApprovedByEmployeeId,
+              qcApprovedByEmployeeName: created.qcApprovedByEmployeeName,
+              completedDocumentStoragePath:
+                created.completedDocumentStoragePath,
+              completedDocumentFilename: created.completedDocumentFilename,
+              completedDocumentMimeType: created.completedDocumentMimeType,
+              completedDocumentSizeBytes: created.completedDocumentSizeBytes,
+              completedDocumentUploadedBy: created.completedDocumentUploadedBy,
+              completedDocumentUploadedByName:
+                created.completedDocumentUploadedByName,
+              completedDocumentUploadedAt: created.completedDocumentUploadedAt,
             });
             if (patched.status === "success" && patched.data) {
               created = patched.data;
@@ -977,6 +1290,14 @@ export function JobCards({
         printReferencePhoto: form.printReferencePhoto,
         printDrawing: form.printDrawing,
         ...planningFieldsPayload(),
+        ...signOffFieldsPayload(),
+        ...passthroughFieldsPayload(),
+        // Prepared By is immutable once set — always carried through
+        // from the existing Job Card (openEdit populated `form` with
+        // it), never re-derived from the CURRENT session (editing a
+        // card someone else prepared must not silently reassign it).
+        preparedById: form.preparedById || undefined,
+        preparedByName: form.preparedByName || undefined,
       });
       if (result.status === "unauthenticated") {
         toast.error("You must be signed in to edit a Job Card");
@@ -1060,22 +1381,6 @@ export function JobCards({
       </div>
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1">
-          <Label className="text-xs">Work Center</Label>
-          <MachineSelect
-            value={form.workCenterMachineId}
-            onChange={(id) =>
-              setForm((f) => ({
-                ...f,
-                workCenterMachineId: id,
-                workCenterName:
-                  useStore.getState().machines.find((m) => m.id === id)?.name ??
-                  "",
-              }))
-            }
-            className="w-full"
-          />
-        </div>
-        <div className="space-y-1">
           <Label className="text-xs">Employee *</Label>
           <EmployeeSelect
             value={form.employeeId}
@@ -1083,8 +1388,6 @@ export function JobCards({
             className="w-full"
           />
         </div>
-      </div>
-      <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1">
           <Label className="text-xs">Start Date</Label>
           <Input
@@ -1116,6 +1419,32 @@ export function JobCards({
               )}
             </SelectContent>
           </Select>
+          {/* "To Be Fulfilled" reminder (see chat, Part 8) — a status
+              only, never validation: Assigned By / In-Process Check / QC
+              Approved By are genuinely optional follow-up fields (see
+              their own emptyForm comment) and this never blocks Create/
+              Save. Purely a calculated hint so a supervisor can tell,
+              at a glance, that some sign-off details are still pending
+              without FabFlow forcing them to fill anything in now. */}
+          {!(
+            form.assignedByEmployeeId &&
+            form.inProcessCheckEmployeeId &&
+            form.qcApprovedByEmployeeId
+          ) ? (
+            <p
+              className="text-[10px] text-warning mt-1"
+              data-ocid="jobcards.form.to_be_fulfilled"
+            >
+              ⚠ To Be Fulfilled — some sign-off details are still pending
+            </p>
+          ) : (
+            <p
+              className="text-[10px] text-success mt-1"
+              data-ocid="jobcards.form.to_be_fulfilled"
+            >
+              ✓ Sign-off details complete
+            </p>
+          )}
         </div>
       </div>
 
@@ -1348,8 +1677,72 @@ export function JobCards({
       {sectionLabel("Inspection Plan")}
       <InspectionPlanEditor
         rows={form.inspectionPlan}
+        totalQuantity={
+          form.totalQuantity !== ""
+            ? Number.parseInt(form.totalQuantity, 10)
+            : undefined
+        }
         onChange={(rows) => setForm((f) => ({ ...f, inspectionPlan: rows }))}
       />
+
+      {sectionLabel("Sign-off")}
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1">
+          <Label className="text-xs">Prepared By</Label>
+          <div className="h-9 flex items-center px-3 rounded-md border bg-muted/30 text-sm text-muted-foreground">
+            {editCard
+              ? form.preparedByName || "—"
+              : currentUser?.username || "—"}
+          </div>
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs">Assigned By</Label>
+          <EmployeeSelect
+            value={form.assignedByEmployeeId}
+            onChange={(id) =>
+              setForm((f) => ({
+                ...f,
+                assignedByEmployeeId: id,
+                assignedByEmployeeName:
+                  employees.find((e) => e.id === id)?.name ?? "",
+              }))
+            }
+            className="w-full"
+          />
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1">
+          <Label className="text-xs">In-Process Check</Label>
+          <EmployeeSelect
+            value={form.inProcessCheckEmployeeId}
+            onChange={(id) =>
+              setForm((f) => ({
+                ...f,
+                inProcessCheckEmployeeId: id,
+                inProcessCheckEmployeeName:
+                  employees.find((e) => e.id === id)?.name ?? "",
+              }))
+            }
+            className="w-full"
+          />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs">QC Approved By</Label>
+          <EmployeeSelect
+            value={form.qcApprovedByEmployeeId}
+            onChange={(id) =>
+              setForm((f) => ({
+                ...f,
+                qcApprovedByEmployeeId: id,
+                qcApprovedByEmployeeName:
+                  employees.find((e) => e.id === id)?.name ?? "",
+              }))
+            }
+            className="w-full"
+          />
+        </div>
+      </div>
 
       {sectionLabel("Work Reference")}
       {/* Job Card print/layout (Sections 2/3/4/8, see chat) — Create and
@@ -1996,6 +2389,275 @@ export function JobCards({
                   isSaving={isSaving}
                   dataOcidPrefix="jobcards.view.timer"
                 />
+
+                {/* Production Progress (see chat, Part 5) — reuses the
+                    EXISTING actual_completed_qty column, just widens
+                    WHEN it can be written (also while InProgress/
+                    OnHold, not only at Complete) so checkpoints below
+                    can react to it as production happens, not only at
+                    the very end. Never auto-marks any checkpoint
+                    Passed — this only moves the quantity the checkpoint
+                    list compares against. */}
+                {(viewCard.status === "InProgress" ||
+                  viewCard.status === "OnHold") &&
+                  pEdit && (
+                    <div
+                      className="rounded-md border p-2.5 space-y-1.5"
+                      data-ocid="jobcards.view.production_progress"
+                    >
+                      <Label className="text-xs">Production Progress</Label>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          type="number"
+                          min="0"
+                          className="h-8 w-28 text-xs"
+                          value={progressInput}
+                          onChange={(e) => setProgressInput(e.target.value)}
+                        />
+                        <span className="text-xs text-muted-foreground">
+                          of {viewCard.totalQuantity ?? "—"} pcs
+                        </span>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={savingProgress}
+                          onClick={handleSaveProgress}
+                          data-ocid="jobcards.view.production_progress.save"
+                        >
+                          Update
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+
+                {/* Inspection Checkpoints (see chat, Part 4-8) — each
+                    row is an INDEPENDENT inspection event; recording one
+                    never touches any other checkpoint's own state. */}
+                {viewCard.inspectionPlan.length > 0 && (
+                  <div
+                    className="rounded-md border p-2.5 space-y-2"
+                    data-ocid="jobcards.view.checkpoints"
+                  >
+                    <Label className="text-xs">Inspection Checkpoints</Label>
+                    {[...viewCard.inspectionPlan]
+                      .sort((a, b) => a.cumulativeQty - b.cumulativeQty)
+                      .map((cp) => {
+                        const status = getCheckpointStatus(
+                          cp,
+                          viewCard.actualCompletedQty,
+                          viewCardEvents,
+                        );
+                        const cls =
+                          status === "Passed"
+                            ? "bg-success/10 text-success border-success/30"
+                            : status === "Failed"
+                              ? "bg-destructive/10 text-destructive border-destructive/30"
+                              : status === "Due"
+                                ? "bg-warning/15 text-warning border-warning/30"
+                                : "bg-muted text-muted-foreground";
+                        return (
+                          <div
+                            key={cp.id}
+                            className="rounded border p-2 space-y-1.5"
+                            data-ocid={`jobcards.view.checkpoints.${cp.id}`}
+                          >
+                            <div className="flex items-center justify-between gap-2 flex-wrap">
+                              <div className="flex items-center gap-1.5">
+                                <span className="text-xs font-medium">
+                                  {cp.label}
+                                </span>
+                                <Badge
+                                  variant="outline"
+                                  className={`text-[9px] px-1.5 py-0 ${CHECKPOINT_SOURCE_CLS[cp.source]}`}
+                                >
+                                  {CHECKPOINT_SOURCE_LABEL[cp.source]}
+                                </Badge>
+                                <span className="text-[10px] text-muted-foreground">
+                                  @ {cp.cumulativeQty} pcs
+                                </span>
+                              </div>
+                              <Badge className={`text-[10px] ${cls}`}>
+                                {status}
+                              </Badge>
+                            </div>
+                            {pEdit &&
+                              (status === "Due" ||
+                                status === "Upcoming" ||
+                                status === "Failed") &&
+                              (recordingCheckpointId === cp.id ? (
+                                <div className="space-y-1.5">
+                                  <Textarea
+                                    className="text-xs"
+                                    placeholder="Remarks (optional)"
+                                    rows={2}
+                                    value={checkpointRemarks}
+                                    onChange={(e) =>
+                                      setCheckpointRemarks(e.target.value)
+                                    }
+                                  />
+                                  <div className="flex gap-1.5">
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      disabled={savingCheckpoint}
+                                      onClick={() =>
+                                        handleRecordCheckpoint(cp, "Pass")
+                                      }
+                                      data-ocid={`jobcards.view.checkpoints.${cp.id}.pass`}
+                                    >
+                                      Pass
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="destructive"
+                                      disabled={savingCheckpoint}
+                                      onClick={() =>
+                                        handleRecordCheckpoint(cp, "Fail")
+                                      }
+                                      data-ocid={`jobcards.view.checkpoints.${cp.id}.fail`}
+                                    >
+                                      Fail
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="ghost"
+                                      onClick={() => {
+                                        setRecordingCheckpointId(null);
+                                        setCheckpointRemarks("");
+                                      }}
+                                    >
+                                      Cancel
+                                    </Button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() =>
+                                    setRecordingCheckpointId(cp.id)
+                                  }
+                                  data-ocid={`jobcards.view.checkpoints.${cp.id}.inspect`}
+                                >
+                                  Inspect
+                                </Button>
+                              ))}
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+
+                {/* Completed Job Card attachment (see chat, Parts 12-14)
+                    — the scanned/photographed, manually completed and
+                    signed physical Job Card. Distinct from Reference
+                    Photo/Project Reference Photo/Evidence Photo. */}
+                <div
+                  className="rounded-md border p-2.5 space-y-1.5"
+                  data-ocid="jobcards.view.completed_document"
+                >
+                  <Label className="text-xs">Completed Job Card</Label>
+                  {viewCard.completedDocumentStoragePath ? (
+                    <div className="space-y-1.5">
+                      <p className="text-xs">
+                        {viewCard.completedDocumentFilename}
+                      </p>
+                      <p className="text-[10px] text-muted-foreground">
+                        Uploaded by{" "}
+                        {viewCard.completedDocumentUploadedByName ?? "—"}
+                        {viewCard.completedDocumentUploadedAt &&
+                          ` on ${new Date(viewCard.completedDocumentUploadedAt).toLocaleString("en-IN")}`}
+                      </p>
+                      <div className="flex gap-1.5">
+                        {completedDocSignedUrl && (
+                          <Button
+                            asChild
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                          >
+                            <a
+                              href={completedDocSignedUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              data-ocid="jobcards.view.completed_document.view"
+                            >
+                              View
+                            </a>
+                          </Button>
+                        )}
+                        {pEdit && (
+                          <>
+                            <input
+                              type="file"
+                              accept="application/pdf,image/jpeg,image/png"
+                              id="jc-completed-doc-replace"
+                              className="hidden"
+                              onChange={handleUploadCompletedDocument}
+                            />
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              disabled={savingDocument}
+                              onClick={() =>
+                                document
+                                  .getElementById("jc-completed-doc-replace")
+                                  ?.click()
+                              }
+                              data-ocid="jobcards.view.completed_document.replace"
+                            >
+                              Replace
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              disabled={savingDocument}
+                              onClick={handleRemoveCompletedDocument}
+                              data-ocid="jobcards.view.completed_document.remove"
+                            >
+                              Remove
+                            </Button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  ) : pEdit ? (
+                    <div>
+                      <input
+                        type="file"
+                        accept="application/pdf,image/jpeg,image/png"
+                        id="jc-completed-doc-upload"
+                        className="hidden"
+                        onChange={handleUploadCompletedDocument}
+                      />
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={savingDocument}
+                        onClick={() =>
+                          document
+                            .getElementById("jc-completed-doc-upload")
+                            ?.click()
+                        }
+                        data-ocid="jobcards.view.completed_document.upload"
+                      >
+                        <Plus className="w-3.5 h-3.5 mr-1" /> Upload Completed
+                        Job Card
+                      </Button>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      Not uploaded yet.
+                    </p>
+                  )}
+                </div>
               </div>
               <DialogFooter>
                 {pEdit && (
@@ -2068,64 +2730,99 @@ function JobCardListTimerChip({ jc }: { jc: JobCard }) {
 // connected to project_qms_inspections. Empty array is a valid, common
 // state (nothing configured — the print renderer omits the section
 // entirely rather than showing an empty table).
+const CHECKPOINT_SOURCE_LABEL: Record<
+  JobCardInspectionCheckpoint["source"],
+  string
+> = {
+  manual: "Manual",
+  automatic: "Automatic",
+  final: "Final",
+};
+const CHECKPOINT_SOURCE_CLS: Record<
+  JobCardInspectionCheckpoint["source"],
+  string
+> = {
+  manual: "bg-muted text-muted-foreground",
+  automatic: "bg-info/10 text-info border-info/30",
+  final: "bg-primary/10 text-primary border-primary/30 font-semibold",
+};
+
+// Inspection Plan configuration editor (Section 7, see chat, Part 2-3,
+// database/20260917180000) — labels are ALWAYS auto-generated
+// (First/Second/Third Inspection...), never manually typed (Part 2);
+// supports both manual ("+ Add Inspection" at a quantity you type) and
+// automatic (interval "Generate") checkpoints, de-duplicated by
+// quantity (Part 3); Final Inspection is mandatory, auto-derived from
+// Total Quantity, and cannot be added/removed through this UI (Part 6)
+// — it appears/updates automatically via the totalQuantity effect in
+// the parent form. All structural changes go through
+// jobCardCheckpoints.ts's pure functions so labels/deltas/final-row
+// dedup can never drift out of sync with each other.
 function InspectionPlanEditor({
   rows,
+  totalQuantity,
   onChange,
 }: {
   rows: JobCardInspectionCheckpoint[];
+  totalQuantity: number | undefined;
   onChange: (rows: JobCardInspectionCheckpoint[]) => void;
 }) {
+  const [manualQty, setManualQty] = useState("");
+  const [interval, setIntervalQty] = useState("");
+
   const addRow = () => {
-    onChange([
-      ...rows,
-      {
-        id: `insp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        label: "",
-        triggerQty: 0,
-        cumulativeQty: 0,
-        sampleQty: 0,
-      },
-    ]);
+    const qty = Number.parseInt(manualQty, 10);
+    const { rows: next, error } = addManualCheckpoint(rows, qty, totalQuantity);
+    if (error) {
+      toast.error(error);
+      return;
+    }
+    onChange(next);
+    setManualQty("");
   };
+
+  const generateAutomatic = () => {
+    const iv = Number.parseInt(interval, 10);
+    if (!totalQuantity) {
+      toast.error("Set Total Quantity first.");
+      return;
+    }
+    if (!iv || iv <= 0) {
+      toast.error("Enter a valid interval.");
+      return;
+    }
+    onChange(mergeAutomaticPoints(rows, totalQuantity, iv));
+  };
+
   const removeRow = (id: string) => onChange(rows.filter((r) => r.id !== id));
-  const patchRow = (id: string, patch: Partial<JobCardInspectionCheckpoint>) =>
-    onChange(rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  const patchSampleQty = (id: string, sampleQty: number) =>
+    onChange(rows.map((r) => (r.id === id ? { ...r, sampleQty } : r)));
+
+  const sorted = [...rows].sort((a, b) => a.cumulativeQty - b.cumulativeQty);
 
   return (
     <div className="space-y-2 rounded-md border p-3">
-      {rows.length === 0 && (
+      {sorted.length === 0 && (
         <p className="text-xs text-muted-foreground">
           No inspection checkpoints configured. Not printed if left empty.
         </p>
       )}
-      {rows.map((row, i) => (
+      {sorted.map((row, i) => (
         <div
           key={row.id}
-          className="grid grid-cols-2 gap-1.5 items-end sm:grid-cols-[1fr_5rem_5rem_5rem_auto]"
+          className="grid grid-cols-2 gap-1.5 items-end sm:grid-cols-[1fr_5rem_5rem_auto_auto]"
         >
           <div className="col-span-2 space-y-1 sm:col-span-1">
-            {i === 0 && <Label className="text-[10px]">Label</Label>}
-            <Input
-              className="h-8 text-xs"
-              value={row.label}
-              onChange={(e) => patchRow(row.id, { label: e.target.value })}
-              placeholder="e.g. First off"
-              data-ocid={`jobcards.form.inspection_plan.${i}.label`}
-            />
-          </div>
-          <div className="space-y-1">
-            {i === 0 && <Label className="text-[10px]">Trigger Qty</Label>}
-            <Input
-              type="number"
-              min="0"
-              className="h-8 text-xs"
-              value={row.triggerQty}
-              onChange={(e) =>
-                patchRow(row.id, {
-                  triggerQty: Number.parseInt(e.target.value, 10) || 0,
-                })
-              }
-            />
+            {i === 0 && <Label className="text-[10px]">Checkpoint</Label>}
+            <div className="flex items-center gap-1.5 h-8">
+              <span className="text-xs font-medium">{row.label}</span>
+              <Badge
+                variant="outline"
+                className={`text-[9px] px-1.5 py-0 ${CHECKPOINT_SOURCE_CLS[row.source]}`}
+              >
+                {CHECKPOINT_SOURCE_LABEL[row.source]}
+              </Badge>
+            </div>
           </div>
           <div className="space-y-1">
             {i === 0 && <Label className="text-[10px]">Cumulative Qty</Label>}
@@ -2134,11 +2831,30 @@ function InspectionPlanEditor({
               min="0"
               className="h-8 text-xs"
               value={row.cumulativeQty}
-              onChange={(e) =>
-                patchRow(row.id, {
-                  cumulativeQty: Number.parseInt(e.target.value, 10) || 0,
-                })
-              }
+              disabled={row.source === "final"}
+              onChange={(e) => {
+                const qty = Number.parseInt(e.target.value, 10);
+                if (!Number.isFinite(qty) || qty <= 0) return;
+                if (totalQuantity && qty >= totalQuantity) {
+                  toast.error(
+                    "Checkpoint quantity must be less than Total Quantity.",
+                  );
+                  return;
+                }
+                if (
+                  rows.some((r) => r.id !== row.id && r.cumulativeQty === qty)
+                ) {
+                  toast.error(`A checkpoint already exists at ${qty}.`);
+                  return;
+                }
+                onChange(
+                  relabelCheckpoints(
+                    rows.map((r) =>
+                      r.id === row.id ? { ...r, cumulativeQty: qty } : r,
+                    ),
+                  ),
+                );
+              }}
             />
           </div>
           <div className="space-y-1">
@@ -2149,17 +2865,29 @@ function InspectionPlanEditor({
               className="h-8 text-xs"
               value={row.sampleQty}
               onChange={(e) =>
-                patchRow(row.id, {
-                  sampleQty: Number.parseInt(e.target.value, 10) || 0,
-                })
+                patchSampleQty(row.id, Number.parseInt(e.target.value, 10) || 0)
               }
             />
+          </div>
+          <div className="space-y-1">
+            {i === 0 && (
+              <Label className="text-[10px] block">Inspect After</Label>
+            )}
+            <div className="h-8 flex items-center text-[11px] text-muted-foreground">
+              Next {row.triggerQty} Nos
+            </div>
           </div>
           <Button
             type="button"
             variant="ghost"
             size="sm"
             className="h-8 w-8 p-0"
+            disabled={row.source === "final"}
+            title={
+              row.source === "final"
+                ? "Final Inspection is mandatory and cannot be removed"
+                : "Remove checkpoint"
+            }
             onClick={() => removeRow(row.id)}
             data-ocid={`jobcards.form.inspection_plan.${i}.remove`}
           >
@@ -2167,15 +2895,54 @@ function InspectionPlanEditor({
           </Button>
         </div>
       ))}
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={addRow}
-        data-ocid="jobcards.form.inspection_plan.add"
-      >
-        <Plus className="w-3.5 h-3.5 mr-1" /> Add Inspection
-      </Button>
+      <div className="flex flex-wrap items-end gap-1.5 pt-1">
+        <div className="space-y-1">
+          <Label className="text-[10px]">Add checkpoint at qty</Label>
+          <Input
+            type="number"
+            min="0"
+            className="h-8 w-24 text-xs"
+            value={manualQty}
+            onChange={(e) => setManualQty(e.target.value)}
+            placeholder="e.g. 25"
+          />
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={addRow}
+          data-ocid="jobcards.form.inspection_plan.add"
+        >
+          <Plus className="w-3.5 h-3.5 mr-1" /> Add Inspection
+        </Button>
+        <div className="space-y-1">
+          <Label className="text-[10px]">Automatic interval</Label>
+          <Input
+            type="number"
+            min="0"
+            className="h-8 w-24 text-xs"
+            value={interval}
+            onChange={(e) => setIntervalQty(e.target.value)}
+            placeholder="e.g. 25"
+          />
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={generateAutomatic}
+          data-ocid="jobcards.form.inspection_plan.generate"
+        >
+          Generate
+        </Button>
+      </div>
+      {!totalQuantity && (
+        <p className="text-[10px] text-muted-foreground">
+          Set Total Quantity above to enable Final Inspection and the automatic
+          interval generator.
+        </p>
+      )}
     </div>
   );
 }

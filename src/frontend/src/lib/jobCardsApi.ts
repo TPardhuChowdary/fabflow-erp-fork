@@ -9,13 +9,15 @@
 // never drift from the two real inputs they're derived from.
 
 import { getSupabase, isSupabaseConfigured } from "@/lib/supabaseClient";
-import type { JobCard } from "@/types";
+import type { JobCard, JobCardInspectionEvent } from "@/types";
 import {
   JOB_CARD_COLUMNS,
+  JOB_CARD_INSPECTION_EVENT_COLUMNS,
   fetchAllRows,
+  transformJobCardInspectionEventRow,
   transformJobCardRow,
 } from "./hydration";
-import type { JobCardRow } from "./hydration";
+import type { JobCardInspectionEventRow, JobCardRow } from "./hydration";
 
 export type WriteStatus = "success" | "denied" | "error" | "unauthenticated";
 
@@ -36,6 +38,13 @@ export type JobCardWritable = Omit<
   | "updatedAt"
 >;
 
+// Both migrations (20260917180000 sign-off/inspection-events,
+// 20260918090000 work-center drop) are now applied, so Create/Edit are
+// back to a single authoritative write — no more CORE/SIGN-OFF split or
+// PGRST204 swallowing (see chat, database/20260917180000 follow-up).
+// work_center_machine_id/work_center_name are deliberately NOT written
+// here anymore (see chat, Work Center removal) — the columns are gone
+// from the live database entirely now.
 function toJobCardFields(v: JobCardWritable) {
   return {
     job_no: v.jobNo,
@@ -75,10 +84,32 @@ function toJobCardFields(v: JobCardWritable) {
     total_quantity: v.totalQuantity ?? null,
     expected_quantity_override: v.expectedQuantityOverride ?? null,
     inspection_plan: v.inspectionPlan ?? [],
-    work_center_machine_id: v.workCenterMachineId || null,
-    work_center_name: v.workCenterName || null,
     priority: v.priority,
     start_date: v.startDate || null,
+    // Sign-off fields (database/20260917180000) — prepared_by_* is set
+    // once at creation and never user-editable; callers must pass
+    // through the existing value unchanged on edit.
+    prepared_by_id: v.preparedById || null,
+    prepared_by_name: v.preparedByName || null,
+    // Assigned By / In-Process Check / QC Approved By are OPTIONAL
+    // follow-up/sign-off fields (see chat) — never required to create or
+    // save a Job Card; null simply means "not yet fulfilled".
+    assigned_by_employee_id: v.assignedByEmployeeId || null,
+    assigned_by_employee_name: v.assignedByEmployeeName || null,
+    in_process_check_employee_id: v.inProcessCheckEmployeeId || null,
+    in_process_check_employee_name: v.inProcessCheckEmployeeName || null,
+    qc_approved_by_employee_id: v.qcApprovedByEmployeeId || null,
+    qc_approved_by_employee_name: v.qcApprovedByEmployeeName || null,
+    completed_document_storage_path: v.completedDocumentStoragePath || null,
+    completed_document_filename: v.completedDocumentFilename || null,
+    completed_document_mime_type: v.completedDocumentMimeType || null,
+    completed_document_size_bytes: v.completedDocumentSizeBytes ?? null,
+    completed_document_uploaded_by: v.completedDocumentUploadedBy || null,
+    completed_document_uploaded_by_name:
+      v.completedDocumentUploadedByName || null,
+    completed_document_uploaded_at: v.completedDocumentUploadedAt
+      ? new Date(v.completedDocumentUploadedAt).toISOString()
+      : null,
   };
 }
 
@@ -126,6 +157,21 @@ function isJobNoConflict(error: { code?: string; message?: string }) {
   );
 }
 
+// database/20260918100000 — job_card_inspection_events.job_card_id is
+// ON DELETE RESTRICT (changed from CASCADE), so deleting a Job Card
+// with recorded inspection history now fails with a plain FK violation
+// (23503) instead of reaching the append-only trigger. Caught here so
+// the raw Postgres error never reaches the user.
+function isInspectionHistoryConflict(error: {
+  code?: string;
+  message?: string;
+}) {
+  return (
+    error.code === "23503" &&
+    error.message?.includes("job_card_inspection_events_job_card_id_fkey")
+  );
+}
+
 // Gap-closure fix — was a single unbounded .select(), which silently
 // truncates past 1,000 rows and could miss the true max job_no, defeating
 // the auto-renumber-on-conflict retry below at scale. The real safety net
@@ -155,6 +201,9 @@ export async function createJobCardRemote(
 
   let candidate = jc;
   for (let attempt = 1; attempt <= MAX_JOB_NO_ATTEMPTS; attempt++) {
+    // CORE insert first — must succeed on its own regardless of whether
+    // the sign-off migration (20260917180000) has been applied yet (see
+    // chat, "Create must never be blocked by sign-off fields").
     const { data, error } = await client
       .from("job_cards")
       .insert(toJobCardFields(candidate))
@@ -201,11 +250,112 @@ export async function updateJobCardRemote(
 ): Promise<WriteResult<JobCard>> {
   const gate = await requireSession();
   if (!gate.ok) return gate.result;
+  const { client } = gate;
 
-  const { data, error } = await gate.client
+  const { data, error } = await client
     .from("job_cards")
     .update(toJobCardFields(jc))
     .eq("id", jc.id)
+    .select(JOB_CARD_COLUMNS);
+
+  if (error) return { status: "error", error: error.message };
+  const rows = (data as unknown as JobCardRow[]) ?? [];
+  if (rows.length === 0) {
+    return {
+      status: "denied",
+      error: "No row was updated (blocked by RLS, or the row does not exist)",
+    };
+  }
+  return { status: "success", data: transformJobCardRow(rows[0]) };
+}
+
+// Inspection Checkpoint Execution (see chat, database/20260917180000) —
+// a plain INSERT into the real, database-enforced append-only child
+// table job_card_inspection_events (RLS grants INSERT/SELECT only,
+// UPDATE/DELETE rejected by RLS + a trigger — see that migration's own
+// header). Deliberately NOT a read-current-array/append/write-whole-
+// array-back cycle: two inspectors completing two different checkpoints
+// concurrently now produce two independent INSERTs, which can never
+// conflict or lose an event — the exact race the original jsonb design
+// had, and the reason this table replaced it.
+export async function recordJobCardInspectionEvent(
+  jobCardId: string,
+  event: Omit<JobCardInspectionEvent, "id" | "jobCardId" | "inspectedAt">,
+): Promise<WriteResult<JobCardInspectionEvent>> {
+  const gate = await requireSession();
+  if (!gate.ok) return gate.result;
+
+  const { data, error } = await gate.client
+    .from("job_card_inspection_events")
+    .insert({
+      job_card_id: jobCardId,
+      checkpoint_id: event.checkpointId,
+      checkpoint_label: event.checkpointLabel,
+      checkpoint_qty: event.checkpointQty,
+      source: event.source,
+      result: event.result,
+      inspected_by: event.inspectedBy || null,
+      inspected_by_name: event.inspectedByName || null,
+      remarks: event.remarks || null,
+    })
+    .select(JOB_CARD_INSPECTION_EVENT_COLUMNS)
+    .single();
+
+  if (error) return { status: "error", error: error.message };
+  if (!data) {
+    return {
+      status: "denied",
+      error: "No row was inserted (blocked by RLS)",
+    };
+  }
+  return {
+    status: "success",
+    data: transformJobCardInspectionEventRow(
+      data as unknown as JobCardInspectionEventRow,
+    ),
+  };
+}
+
+/** Every recorded inspection event for one Job Card, oldest first — the
+ * application derives each checkpoint's CURRENT status as the latest
+ * row matching its checkpointId (see jobCardCheckpoints.ts's
+ * getCheckpointStatus), never by re-deriving from a jsonb array. */
+export async function fetchJobCardInspectionEvents(
+  jobCardId: string,
+): Promise<JobCardInspectionEvent[]> {
+  if (!isSupabaseConfigured) return [];
+  const client = getSupabase();
+  const { data, error } = await client
+    .from("job_card_inspection_events")
+    .select(JOB_CARD_INSPECTION_EVENT_COLUMNS)
+    .eq("job_card_id", jobCardId)
+    .order("inspected_at", { ascending: true });
+  if (error || !data) return [];
+  return (data as unknown as JobCardInspectionEventRow[]).map(
+    transformJobCardInspectionEventRow,
+  );
+}
+
+// Live production-quantity update (see chat, Part 5) — reuses the
+// EXISTING actual_completed_qty column (the one authoritative
+// production-quantity field, otherwise only ever written once by
+// CompleteJobCardDialog at Complete time) as the checkpoint trigger
+// input, rather than inventing a second/competing quantity counter.
+// This function only WIDENS WHEN that same column can be written
+// (additionally while InProgress/OnHold, not only at Complete) — it
+// does not add a new field. Minimal single-column update, same pattern
+// as updateJobCardStatusRemote below.
+export async function updateJobCardProductionProgress(
+  jobCardId: string,
+  actualCompletedQty: number,
+): Promise<WriteResult<JobCard>> {
+  const gate = await requireSession();
+  if (!gate.ok) return gate.result;
+
+  const { data, error } = await gate.client
+    .from("job_cards")
+    .update({ actual_completed_qty: actualCompletedQty })
+    .eq("id", jobCardId)
     .select(JOB_CARD_COLUMNS);
 
   if (error) return { status: "error", error: error.message };
@@ -283,7 +433,16 @@ export async function deleteJobCardRemote(
     .eq("id", id)
     .select("id");
 
-  if (error) return { status: "error", error: error.message };
+  if (error) {
+    if (isInspectionHistoryConflict(error)) {
+      return {
+        status: "denied",
+        error:
+          "This Job Card has recorded inspection history and cannot be deleted.",
+      };
+    }
+    return { status: "error", error: error.message };
+  }
   const rows = (data as unknown as { id: string }[]) ?? [];
   if (rows.length === 0) {
     return {

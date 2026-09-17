@@ -2243,14 +2243,13 @@ export function JobCardDocContent({
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "1fr 1fr 1fr 1fr",
+            gridTemplateColumns: "1fr 1fr 1fr",
             fontSize: "12px",
           }}
         >
           {[
             ["Project", projectLabel || "—"],
             ["Operation", jobCard.operationType],
-            ["Work Center", jobCard.workCenterName || "—"],
             ["Assigned Employee", jobCard.employeeName || "—"],
           ].map(([label, value], i) => (
             <div
@@ -2512,12 +2511,11 @@ export function JobCardDocContent({
             <thead>
               <tr style={{ background: "#eee" }}>
                 {[
-                  "Checkpoint",
-                  "Trigger Qty",
+                  "S.No",
+                  "Check Point",
+                  "Inspection After",
                   "Cumulative Qty",
-                  "Sample Qty",
-                  "Insp. Sign",
-                  "QC Sign",
+                  "To Be Checked",
                 ].map((h) => (
                   <th
                     key={h}
@@ -2533,92 +2531,124 @@ export function JobCardDocContent({
               </tr>
             </thead>
             <tbody>
-              {jobCard.inspectionPlan.map((row) => (
-                <tr key={row.id}>
-                  <td style={{ border: "1px solid #999", padding: "6px 8px" }}>
-                    {row.label}
-                  </td>
-                  <td
-                    style={{
-                      border: "1px solid #999",
-                      padding: "6px 8px",
-                      textAlign: "center",
-                    }}
-                  >
-                    {row.triggerQty}
-                  </td>
-                  <td
-                    style={{
-                      border: "1px solid #999",
-                      padding: "6px 8px",
-                      textAlign: "center",
-                    }}
-                  >
-                    {row.cumulativeQty}
-                  </td>
-                  <td
-                    style={{
-                      border: "1px solid #999",
-                      padding: "6px 8px",
-                      textAlign: "center",
-                    }}
-                  >
-                    {row.sampleQty}
-                  </td>
-                  <td style={{ border: "1px solid #999", height: "26px" }} />
-                  <td style={{ border: "1px solid #999", height: "26px" }} />
-                </tr>
-              ))}
+              {[...jobCard.inspectionPlan]
+                .sort((a, b) => a.cumulativeQty - b.cumulativeQty)
+                .map((row, i, sorted) => {
+                  // "Inspection After" wording (Part 10, see chat):
+                  // the FIRST row reads "N Nos" (from zero); the LAST
+                  // row (always Final, when configured via the Create/
+                  // Edit checkpoint UI) reads "Remaining N Nos"; every
+                  // row in between reads "Next N Nos" — all derived
+                  // from row.triggerQty (already the delta from the
+                  // previous checkpoint), never re-computed here.
+                  const isFirst = i === 0;
+                  const isLast = i === sorted.length - 1;
+                  const afterWording = isFirst
+                    ? `${row.triggerQty} Nos`
+                    : isLast && row.source === "final"
+                      ? `Remaining ${row.triggerQty} Nos`
+                      : `Next ${row.triggerQty} Nos`;
+                  return (
+                    <tr key={row.id}>
+                      <td
+                        style={{
+                          border: "1px solid #999",
+                          padding: "6px 8px",
+                          textAlign: "center",
+                        }}
+                      >
+                        {i + 1}
+                      </td>
+                      <td
+                        style={{ border: "1px solid #999", padding: "6px 8px" }}
+                      >
+                        {row.label}
+                      </td>
+                      <td
+                        style={{ border: "1px solid #999", padding: "6px 8px" }}
+                      >
+                        {afterWording}
+                      </td>
+                      <td
+                        style={{
+                          border: "1px solid #999",
+                          padding: "6px 8px",
+                          textAlign: "center",
+                        }}
+                      >
+                        {row.cumulativeQty}
+                      </td>
+                      <td
+                        style={{
+                          border: "1px solid #999",
+                          padding: "6px 8px",
+                          textAlign: "center",
+                        }}
+                      >
+                        {row.sampleQty}
+                      </td>
+                    </tr>
+                  );
+                })}
             </tbody>
           </table>
         </div>
       )}
 
-      {/* RESPONSIBILITY / SIGN-OFF — five distinct roles (Section
-          "RESPONSIBILITY / SIGN-OFF" of the brief), same meaning as the
-          previous 3-box strip (Employee/Supervisor Signature + Date) but
-          now split into the roles a real manufacturing traveler carries.
-          Every box is blank ink-fill, exactly as before — no field is
-          bound to any of these, nothing here is new persisted data. */}
+      {/* FINAL SIGN-OFF (Part 9, see chat) — exactly four roles.
+          "Completed By" deliberately REMOVED: the Job Card already
+          names the assigned Employee who performed the operation
+          (Job Identification strip above), so a separate "Completed
+          By" signature is redundant. Individual checkpoint
+          inspector/result/timestamp/signature information stays in the
+          DIGITAL record only (job_card_inspection_events) — this printed
+          block is the physical document's own overall sign-off, not a
+          per-checkpoint log (Part 10). Prepared By prints the actual
+          persisted preparer (automatic, never a blank line); the other
+          three print the actual selected name when set, and fall back
+          to a blank ink-fill line only when nothing was selected. */}
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "1fr 1fr 1fr",
-          gap: "16px",
-          marginBottom: "12px",
-        }}
-      >
-        {["Prepared By", "Assigned By", "In-Process Check"].map((label) => (
-          <div key={label} style={{ textAlign: "center" }}>
-            <div
-              style={{
-                minHeight: "44px",
-                borderBottom: "1px solid #555",
-                marginBottom: "5px",
-              }}
-            />
-            <div style={{ fontSize: "10.5px", fontWeight: 600, color: "#333" }}>
-              {label}
-            </div>
-          </div>
-        ))}
-      </div>
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
+          gridTemplateColumns: "1fr 1fr 1fr 1fr",
           gap: "16px",
         }}
       >
-        {["Completed By", "QC Approved By"].map((label) => (
+        {(
+          [
+            ["Prepared By", jobCard.preparedByName],
+            ["Assigned By", jobCard.assignedByEmployeeName],
+            ["In-Process Check", jobCard.inProcessCheckEmployeeName],
+            ["QC Approved By", jobCard.qcApprovedByEmployeeName],
+          ] as const
+        ).map(([label, name]) => (
           <div key={label} style={{ textAlign: "center" }}>
-            <div
-              style={{
-                minHeight: "44px",
-                borderBottom: "1px solid #555",
-                marginBottom: "5px",
-              }}
-            />
+            {name ? (
+              <div
+                style={{
+                  minHeight: "44px",
+                  borderBottom: "1px solid #555",
+                  marginBottom: "5px",
+                  display: "flex",
+                  alignItems: "flex-end",
+                  justifyContent: "center",
+                  paddingBottom: "4px",
+                  fontSize: "12px",
+                  fontWeight: 600,
+                  color: "#111",
+                }}
+              >
+                {name}
+              </div>
+            ) : (
+              <div
+                style={{
+                  minHeight: "44px",
+                  borderBottom: "1px solid #555",
+                  marginBottom: "5px",
+                }}
+              />
+            )}
             <div style={{ fontSize: "10.5px", fontWeight: 600, color: "#333" }}>
               {label}
             </div>

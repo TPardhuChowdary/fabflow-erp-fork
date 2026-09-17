@@ -77,8 +77,16 @@ export function CompleteJobCardDialog({
   );
   const [isSaving, setIsSaving] = useState(false);
 
+  // Evidence Photo (proof of completion) must never be conflated with
+  // this job card's Reference Photo (expected result, set before work
+  // starts) even though both are asset_photos rows owned by the same
+  // job_card — exclude job.referencePhotoId from both the "photo
+  // present" check and the gallery below.
   const hasPhoto = assetPhotos.some(
-    (p) => p.ownerType === "job_card" && p.ownerId === job.id,
+    (p) =>
+      p.ownerType === "job_card" &&
+      p.ownerId === job.id &&
+      p.id !== job.referencePhotoId,
   );
 
   const accepted =
@@ -235,6 +243,9 @@ export function CompleteJobCardDialog({
               ownerType="job_card"
               ownerId={job.id}
               canEdit
+              excludeIds={
+                job.referencePhotoId ? [job.referencePhotoId] : undefined
+              }
               data-ocid={`${dataOcidPrefix}.photos`}
             />
           </div>

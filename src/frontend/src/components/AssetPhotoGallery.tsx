@@ -63,6 +63,12 @@ interface AssetPhotoGalleryProps {
   heroClassName?: string;
   heroAlt?: string;
   "data-ocid"?: string;
+  /** Photo ids to hide from this gallery even though they share the same
+   * ownerType/ownerId — e.g. a job_card's Reference Photo (expected
+   * result) must never appear alongside its Evidence Photos (actual
+   * completion) even though both live in asset_photos under the same
+   * owner. See CompleteJobCardDialog. */
+  excludeIds?: string[];
 }
 
 export function AssetPhotoGallery({
@@ -74,6 +80,7 @@ export function AssetPhotoGallery({
   heroClassName,
   heroAlt,
   "data-ocid": dataOcid,
+  excludeIds,
 }: AssetPhotoGalleryProps) {
   const {
     assetPhotos,
@@ -111,12 +118,17 @@ export function AssetPhotoGallery({
   const photos = useMemo(
     () =>
       (assetPhotos || [])
-        .filter((p) => p.ownerType === ownerType && p.ownerId === ownerId)
+        .filter(
+          (p) =>
+            p.ownerType === ownerType &&
+            p.ownerId === ownerId &&
+            !excludeIds?.includes(p.id),
+        )
         .sort(
           (a, b) =>
             a.displayOrder - b.displayOrder || a.createdAt - b.createdAt,
         ),
-    [assetPhotos, ownerType, ownerId],
+    [assetPhotos, ownerType, ownerId, excludeIds],
   );
   const usingLegacyFallback = photos.length === 0 && !!legacyPhotoDataUrl;
 

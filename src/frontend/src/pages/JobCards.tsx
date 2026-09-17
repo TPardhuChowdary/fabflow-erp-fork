@@ -67,6 +67,8 @@ import {
 import {
   getAssetPhotoSignedUrl,
   resolveCoverStoragePath,
+  uploadAssetPhoto,
+  validateAssetPhotoFile,
 } from "../lib/assetPhotosApi";
 import { getEvidenceRequirements } from "../lib/companySettingsApi";
 import { JobCardDocContent } from "../lib/documentRenderers";
@@ -89,7 +91,12 @@ import {
   canView,
 } from "../permissions";
 import { useStore } from "../store";
-import type { JobCard, JobCardExceptionReason, JobCardStatus } from "../types";
+import type {
+  AssetPhoto,
+  JobCard,
+  JobCardExceptionReason,
+  JobCardStatus,
+} from "../types";
 
 const REASON_LABEL: Record<JobCardExceptionReason, string> = {
   machine_breakdown: "Machine breakdown",
@@ -109,6 +116,27 @@ const STATUS_LABEL: Record<JobCardStatus, string> = {
   Completed: "Completed",
   OnHold: "On Hold",
 };
+
+// Project Reference Photo resolver (see chat) — the one place that
+// turns "a project id + the org's already-loaded asset_photos" into a
+// signed URL for that project's primary photo. Shared by the View
+// dialog, the Create/Edit form, and handlePrintJobCard so there is
+// exactly one implementation of "which photo, which URL rule" rather
+// than three near-identical copies. Never copies/duplicates the photo
+// into the Job Card's own asset_photos — always resolved fresh from the
+// Project's own row, same resolveCoverStoragePath processed/original
+// preference Projects.tsx's own cover thumbnails use.
+async function resolveProjectPhotoUrl(
+  projectId: string | undefined,
+  photos: AssetPhoto[] | undefined,
+): Promise<string | null> {
+  if (!projectId) return null;
+  const photo = (photos || []).find(
+    (p) => p.ownerType === "project" && p.ownerId === projectId && p.isPrimary,
+  );
+  if (!photo) return null;
+  return getAssetPhotoSignedUrl(resolveCoverStoragePath(photo));
+}
 
 function statusCls(status: JobCardStatus) {
   const map: Record<JobCardStatus, string> = {
@@ -171,10 +199,12 @@ export function JobCards({
     jobCardExceptions,
     settings,
     assetPhotos,
+    assetPhotosHydration,
     addJobCard,
     updateJobCard,
     deleteJobCard,
     updateJobCardExceptionLocal,
+    addAssetPhotoLocal,
   } = useStore();
   const pCreate = canCreate(currentUser, "job_cards");
   const pEdit = canEdit(currentUser, "job_cards");
@@ -215,10 +245,36 @@ export function JobCards({
   const [isSaving, setIsSaving] = useState(false);
   const [form, setForm] = useState(emptyForm);
 
+  // Create/Edit consistency (see chat) — a not-yet-saved Job Card has no
+  // id for AssetPhotoGallery/DrawingLinkPicker to attach rows to, so
+  // Create mode stages these purely locally, exactly like Dies.tsx's own
+  // pendingDrawingIds does for its mandatory drawing link, and flushes
+  // them in handleSaveAdd right after createJobCardRemote() returns a
+  // real id. pendingReferencePhotoFile is the photo equivalent — a raw
+  // File, uploaded via uploadAssetPhoto() only once that id exists.
+  const [pendingReferencePhotoFile, setPendingReferencePhotoFile] =
+    useState<File | null>(null);
+  const [pendingReferencePhotoPreviewUrl, setPendingReferencePhotoPreviewUrl] =
+    useState<string | null>(null);
+  const [pendingDrawingIds, setPendingDrawingIds] = useState<string[]>([]);
+
+  // Reference Photo vs Evidence Photo separation (Edit mode) — asset_photos
+  // has no "kind" column, so the only reliable signal for "this is an
+  // Evidence Photo, not a Reference Photo candidate" is the same rule
+  // CompleteJobCardDialog/MyJobs already use: any job_card-owned photo
+  // other than the current reference_photo_id. Snapshotted once when
+  // openEdit() runs (not recomputed live) so a brand-new photo uploaded
+  // during THIS edit session — replacing the Reference Photo — is never
+  // in the snapshot and stays visible/selectable; everything that
+  // already existed at open time and isn't the current reference photo
+  // is treated as Evidence and hidden from this gallery/picker.
+  const [referencePhotoExcludeIds, setReferencePhotoExcludeIds] = useState<
+    string[]
+  >([]);
+
   // Job Card Drawing Link (Section 4, see chat) — same Drawing Repository
   // store Dies.tsx/MachineDetail.tsx/ProjectDetail.tsx already use, now
   // also linking through linkedType "job_card" (drawingEditor/types.ts).
-  // Edit-only, matching the Reference Photo's own scope decision above.
   const {
     links: drawingLinks,
     linksLoaded,
@@ -237,6 +293,61 @@ export function JobCards({
         )
         .map((l) => l.drawingId)
     : [];
+  // Create-mode reads pendingDrawingIds, Edit-mode reads the real linked
+  // rows — same split Dies.tsx uses for its own picker.
+  const currentLinkedDrawingIds = editCard
+    ? linkedDrawingIdsForEdit
+    : pendingDrawingIds;
+
+  function handleAddDrawingLink(drawingId: string) {
+    if (editCard) {
+      addDrawingLink(drawingId, "job_card", editCard.id);
+    } else {
+      setPendingDrawingIds((prev) =>
+        prev.includes(drawingId) ? prev : [...prev, drawingId],
+      );
+    }
+  }
+
+  function handleRemoveDrawingLink(drawingId: string) {
+    if (editCard) {
+      const link = (drawingLinks || []).find(
+        (l) =>
+          l.linkedType === "job_card" &&
+          l.linkedId === editCard.id &&
+          l.drawingId === drawingId,
+      );
+      if (link) removeDrawingLink(link.id);
+    } else {
+      setPendingDrawingIds((prev) => prev.filter((id) => id !== drawingId));
+    }
+  }
+
+  function handlePendingReferencePhotoSelect(
+    e: React.ChangeEvent<HTMLInputElement>,
+  ) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    const validation = validateAssetPhotoFile(file);
+    if (!validation.ok) {
+      toast.error(validation.reason);
+      return;
+    }
+    if (pendingReferencePhotoPreviewUrl) {
+      URL.revokeObjectURL(pendingReferencePhotoPreviewUrl);
+    }
+    setPendingReferencePhotoFile(file);
+    setPendingReferencePhotoPreviewUrl(URL.createObjectURL(file));
+  }
+
+  function clearPendingReferencePhoto() {
+    if (pendingReferencePhotoPreviewUrl) {
+      URL.revokeObjectURL(pendingReferencePhotoPreviewUrl);
+    }
+    setPendingReferencePhotoFile(null);
+    setPendingReferencePhotoPreviewUrl(null);
+  }
 
   // Live-ticking Active Time for the View dialog's persisted Start/End
   // block below — called unconditionally (Rules of Hooks) with a no-op
@@ -253,32 +364,92 @@ export function JobCards({
   // from the Project's own primary asset_photos row (never copied into
   // the Job Card's own photos), same processed/original preference
   // Projects.tsx's own cover thumbnails use via resolveCoverStoragePath.
+  // Shared by the View dialog, the Create/Edit form (so the photo
+  // appears the moment a Project is selected, before the Job Card is
+  // saved), and handlePrintJobCard below — one resolver, three callers.
   const [viewProjectPhotoUrl, setViewProjectPhotoUrl] = useState<string | null>(
     null,
   );
   useEffect(() => {
-    if (!viewCard) {
-      setViewProjectPhotoUrl(null);
-      return;
-    }
-    const photo = (assetPhotos || []).find(
-      (p) =>
-        p.ownerType === "project" &&
-        p.ownerId === viewCard.projectId &&
-        p.isPrimary,
-    );
-    if (!photo) {
-      setViewProjectPhotoUrl(null);
-      return;
-    }
     let cancelled = false;
-    getAssetPhotoSignedUrl(resolveCoverStoragePath(photo)).then((url) => {
+    resolveProjectPhotoUrl(viewCard?.projectId, assetPhotos).then((url) => {
       if (!cancelled) setViewProjectPhotoUrl(url);
     });
     return () => {
       cancelled = true;
     };
   }, [viewCard, assetPhotos]);
+
+  const [formProjectPhotoUrl, setFormProjectPhotoUrl] = useState<string | null>(
+    null,
+  );
+  useEffect(() => {
+    let cancelled = false;
+    resolveProjectPhotoUrl(form.projectId, assetPhotos).then((url) => {
+      if (!cancelled) setFormProjectPhotoUrl(url);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [form.projectId, assetPhotos]);
+
+  // Print Options invariant (see chat) — printReferencePhoto/printDrawing
+  // must never stay checked once their dependency disappears. The
+  // checkbox's own `disabled` state only blocks a NEW check; it can
+  // never uncheck a box the user already checked earlier (staged Create
+  // photo removed, Edit reference photo deleted/unselected, last linked
+  // drawing removed in either mode). One effect per dependency, run at
+  // the actual state-transition point rather than only gating the
+  // checkbox — covers Create and Edit uniformly since both read the
+  // same form.printReferencePhoto/printDrawing fields.
+  //
+  // Gated on assetPhotosHydration having actually finished ("success")
+  // so this can never fire on the transient empty-array state before
+  // assetPhotos has hydrated and wrongly wipe out a legitimately-set
+  // printReferencePhoto for a Job Card that really does have one.
+  //
+  // Also clears the dangling form.referencePhotoId itself (Edit mode),
+  // not just printReferencePhoto — deleting the photo via
+  // AssetPhotoGallery only updates the local assetPhotos list; it never
+  // patches the job_cards row's own referencePhotoId in local state (the
+  // server-side FK ON DELETE SET NULL only takes effect on the row, not
+  // this in-memory form), so the stale id would otherwise still be sent
+  // on Save and get rejected by trg_validate_job_card_reference_photo
+  // ("reference_photo_id must belong to this job card").
+  useEffect(() => {
+    if (assetPhotosHydration.status !== "success") return;
+    const referencePhotoStillExists =
+      !!form.referencePhotoId &&
+      (assetPhotos || []).some(
+        (p) => p.ownerType === "job_card" && p.id === form.referencePhotoId,
+      );
+    const hasReferencePhoto = editCard
+      ? referencePhotoStillExists
+      : !!pendingReferencePhotoFile;
+    if (!hasReferencePhoto && form.printReferencePhoto) {
+      setForm((f) => ({ ...f, printReferencePhoto: false }));
+    }
+    if (editCard && form.referencePhotoId && !referencePhotoStillExists) {
+      setForm((f) => ({ ...f, referencePhotoId: "" }));
+    }
+  }, [
+    editCard,
+    form.referencePhotoId,
+    form.printReferencePhoto,
+    pendingReferencePhotoFile,
+    assetPhotos,
+    assetPhotosHydration.status,
+  ]);
+
+  // Same invariant for the Drawing dependency — gated on linksLoaded so
+  // this can't fire on the transient empty-links state before
+  // drawing_links has actually loaded for this session.
+  useEffect(() => {
+    if (!linksLoaded) return;
+    if (currentLinkedDrawingIds.length === 0 && form.printDrawing) {
+      setForm((f) => ({ ...f, printDrawing: false }));
+    }
+  }, [linksLoaded, currentLinkedDrawingIds.length, form.printDrawing]);
 
   // Job Card live timer (Start/Pause/Resume/Complete) — same evidence
   // policy read and Complete flow as My Jobs (MyJobs.tsx), reused via
@@ -335,11 +506,26 @@ export function JobCards({
 
   const openAdd = () => {
     setForm(emptyForm);
+    clearPendingReferencePhoto();
+    setPendingDrawingIds([]);
+    setReferencePhotoExcludeIds([]);
     setAddOpen(true);
   };
 
   const openEdit = (jc: JobCard) => {
     setEditCard(jc);
+    clearPendingReferencePhoto();
+    setPendingDrawingIds([]);
+    setReferencePhotoExcludeIds(
+      (assetPhotos || [])
+        .filter(
+          (p) =>
+            p.ownerType === "job_card" &&
+            p.ownerId === jc.id &&
+            p.id !== (jc.referencePhotoId || ""),
+        )
+        .map((p) => p.id),
+    );
     setForm({
       projectId: jc.projectId,
       employeeId: jc.employeeId ?? "",
@@ -406,16 +592,12 @@ export function JobCards({
     //
     // 1. Project Reference Photo — always resolved when the Project has
     //    one (Page 1, small); never duplicated into the Job Card's own
-    //    asset_photos, read straight from the Project's own primary
-    //    photo via the exact same resolveCoverStoragePath rule
-    //    Projects.tsx/ProjectDetail.tsx already use for cover photos.
-    const projectPhoto = (assetPhotos || []).find(
-      (p) =>
-        p.ownerType === "project" && p.ownerId === jc.projectId && p.isPrimary,
+    //    asset_photos. Same resolveProjectPhotoUrl the Create/Edit form
+    //    and View dialog use above — one resolver, not a third copy.
+    const projectPhotoUrl = await resolveProjectPhotoUrl(
+      jc.projectId,
+      assetPhotos,
     );
-    const projectPhotoUrl = projectPhoto
-      ? await getAssetPhotoSignedUrl(resolveCoverStoragePath(projectPhoto))
-      : null;
 
     // 2. Job Card Reference Photo ("Work Reference") — only resolved
     //    when both a photo is selected AND printReferencePhoto is on;
@@ -554,13 +736,14 @@ export function JobCards({
           endTime: undefined,
           status: form.status,
           notes: form.notes.trim() || undefined,
-          // Reference Photo/Drawing Link are edit-only (Section 8 scope
-          // decision, see chat) — a new Job Card has no id yet to attach
-          // asset_photos/drawing_links rows to, so it always starts with
-          // none selected and both print options off.
+          // Print options are plain booleans — sent directly. referencePhotoId
+          // is left unset here: it depends on the staged photo upload below,
+          // which needs this Job Card's real id and so can only happen after
+          // this insert returns (Create/Edit consistency, see chat — no fake
+          // Job Card record, just a second real write after the first).
           referencePhotoId: undefined,
-          printReferencePhoto: false,
-          printDrawing: false,
+          printReferencePhoto: form.printReferencePhoto,
+          printDrawing: form.printDrawing,
         },
         { autoRenumberOnConflict: true },
       );
@@ -576,9 +759,107 @@ export function JobCards({
         toast.error(result.error || "Failed to create Job Card");
         return;
       }
-      addJobCard(result.data);
-      toast.success(`${result.data.jobNo} created`);
+      // The Job Card now exists as a real backend row with a real id.
+      // Add it to local state and close the dialog immediately — same
+      // placement as Dies.tsx's own addDie(result.data), right after
+      // creation and BEFORE the pending-attachment flush below — so a
+      // failure in either attachment step can never leave a
+      // successfully-created, already-persisted Job Card invisible in
+      // the UI (previously addJobCard was called only after both flush
+      // steps, so an uncaught throw from the drawing-link loop meant the
+      // real, already-inserted row never appeared and the user got no
+      // feedback at all). Everything past this point is "attach optional
+      // extras to an already-real record," never "finish creating the
+      // record" — no second Job Card is ever created, and a failure here
+      // is reported, never silently swallowed.
+      let created = result.data;
+      addJobCard(created);
       setAddOpen(false);
+
+      const attachmentErrors: string[] = [];
+
+      // Flush the staged Reference Photo, then attach its real asset_photos
+      // id to the Job Card. A failure never rolls back or duplicates the
+      // already-created Job Card — it's collected and reported below.
+      if (pendingReferencePhotoFile) {
+        try {
+          const photoResult = await uploadAssetPhoto(
+            "job_card",
+            created.id,
+            pendingReferencePhotoFile,
+          );
+          if (photoResult.status === "success" && photoResult.data) {
+            addAssetPhotoLocal(photoResult.data);
+            const patched = await updateJobCardRemote({
+              id: created.id,
+              jobNo: created.jobNo,
+              projectId: created.projectId,
+              employeeId: created.employeeId,
+              employeeName: created.employeeName,
+              jobDescription: created.jobDescription,
+              operationType: created.operationType,
+              stageId: created.stageId,
+              standardTimePerUnitMinutes: created.standardTimePerUnitMinutes,
+              allocatedTimeMinutes: created.allocatedTimeMinutes,
+              actualCompletedQty: created.actualCompletedQty,
+              rejectedQty: created.rejectedQty,
+              reworkQty: created.reworkQty,
+              rejectRootCause: created.rejectRootCause,
+              startTime: created.startTime,
+              endTime: created.endTime,
+              status: created.status,
+              notes: created.notes,
+              referencePhotoId: photoResult.data.id,
+              printReferencePhoto: created.printReferencePhoto,
+              printDrawing: created.printDrawing,
+            });
+            if (patched.status === "success" && patched.data) {
+              created = patched.data;
+              updateJobCard(created);
+            } else {
+              attachmentErrors.push(
+                patched.error || "the reference photo could not be linked",
+              );
+            }
+          } else {
+            attachmentErrors.push(
+              photoResult.error || "the reference photo failed to upload",
+            );
+          }
+        } catch (err) {
+          attachmentErrors.push(
+            err instanceof Error
+              ? err.message
+              : "the reference photo could not be attached",
+          );
+        }
+      }
+
+      // Flush pending Drawing Links — same pending-until-saved pattern
+      // Dies.tsx already establishes for its own mandatory drawing link,
+      // just now for job_card-linked rows. Guarded: addDrawingLink can
+      // throw (drawingEditor/api/drawings.ts addLink throws a real Error
+      // on any Supabase failure) and must never abort this function
+      // silently or leave the user without feedback.
+      for (const drawingId of pendingDrawingIds) {
+        try {
+          await addDrawingLink(drawingId, "job_card", created.id);
+        } catch (err) {
+          attachmentErrors.push(
+            err instanceof Error
+              ? err.message
+              : "a drawing could not be linked",
+          );
+        }
+      }
+
+      if (attachmentErrors.length > 0) {
+        toast.error(
+          `${created.jobNo} was created, but some attachments could not be completed: ${attachmentErrors.join("; ")}. You can retry from Edit.`,
+        );
+      } else {
+        toast.success(`${created.jobNo} created`);
+      }
     } finally {
       setIsSaving(false);
     }
@@ -685,6 +966,30 @@ export function JobCards({
           />
         </div>
       </div>
+
+      {/* Project Reference Photo (Section 1/2, see chat) — automatically
+          resolved from the selected Project's own primary asset_photos
+          row the moment a Project is picked, in Create as well as Edit.
+          Purely informational: identifies "the product/project you are
+          working on", never uploaded again here, never copied into the
+          Job Card's own photos. Absent entirely when the Project has no
+          photo — no broken image, no placeholder box. */}
+      {form.projectId && formProjectPhotoUrl && (
+        <div className="rounded-md border p-2 flex items-center gap-3">
+          <img
+            src={formProjectPhotoUrl}
+            alt="Project reference"
+            className="h-16 w-16 object-contain rounded border shrink-0"
+            data-ocid="jobcards.form.project_photo"
+          />
+          <div className="text-xs text-muted-foreground">
+            Project Reference Photo
+            <br />
+            Identifies the overall product — shown for reference only.
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1">
           <Label className="text-xs">Job / Task *</Label>
@@ -839,121 +1144,163 @@ export function JobCards({
         />
       </div>
 
-      {/* Job Card print/layout (Sections 2/3/4/8, see chat) — edit-only:
+      {/* Job Card print/layout (Sections 2/3/4/8, see chat) — Create and
+          Edit consistency: the same configuration is available in both.
           Reference Photo/Drawing Link need a real job_cards.id to attach
-          asset_photos/drawing_links rows to (see emptyForm's own
-          comment). A not-yet-saved Add dialog simply doesn't show this
-          section — nothing to select yet. */}
-      {editCard && (
-        <div className="space-y-3 rounded-md border p-3">
-          <div className="space-y-1">
-            <Label className="text-xs">
-              Reference Photo
-              <span className="text-muted-foreground font-normal">
-                {" "}
-                — the expected visual result for this operation, not an
-                evidence/completion photo
-              </span>
-            </Label>
-            <AssetPhotoGallery
-              ownerType="job_card"
-              ownerId={editCard.id}
-              canEdit={pEdit}
-              data-ocid="jobcards.form.reference_photo_gallery"
-            />
-            {(assetPhotos || []).filter(
-              (p) => p.ownerType === "job_card" && p.ownerId === editCard.id,
-            ).length > 0 && (
-              <div className="flex flex-wrap gap-1.5 pt-1">
-                {(assetPhotos || [])
-                  .filter(
-                    (p) =>
-                      p.ownerType === "job_card" && p.ownerId === editCard.id,
-                  )
-                  .map((p) => (
-                    <button
-                      key={p.id}
-                      type="button"
-                      className={`text-xs rounded-md border px-2 py-1 ${
-                        form.referencePhotoId === p.id
-                          ? "border-primary bg-primary/10 font-semibold"
-                          : "border-input"
-                      }`}
-                      onClick={() =>
-                        setForm((f) => ({
-                          ...f,
-                          referencePhotoId:
-                            f.referencePhotoId === p.id ? "" : p.id,
-                        }))
-                      }
-                      data-ocid={`jobcards.form.reference_photo_select.${p.id}`}
-                    >
-                      {form.referencePhotoId === p.id ? "✓ " : ""}
-                      {p.originalFilename ?? p.id.slice(0, 8)}
-                    </button>
-                  ))}
-              </div>
-            )}
-          </div>
-          <div className="space-y-1.5">
-            <Label className="text-xs">
-              Linked Drawing
-              <span className="text-muted-foreground font-normal">
-                {" "}
-                — Drawing Repository is the source of truth
-              </span>
-            </Label>
-            <DrawingLinkPicker
-              linkedDrawingIds={linkedDrawingIdsForEdit}
-              onAdd={(drawingId) =>
-                addDrawingLink(drawingId, "job_card", editCard.id)
+          asset_photos/drawing_links rows to, so Create mode stages them
+          locally (pendingReferencePhotoFile/pendingDrawingIds, flushed by
+          handleSaveAdd right after the Job Card gets its real id — same
+          pending-until-saved pattern Dies.tsx already uses for its own
+          mandatory drawing link) while Edit mode writes them immediately
+          through the existing AssetPhotoGallery/DrawingLinkPicker. */}
+      <div className="space-y-3 rounded-md border p-3">
+        <div className="space-y-1">
+          <Label className="text-xs">
+            Reference Photo
+            <span className="text-muted-foreground font-normal">
+              {" "}
+              — the expected visual result for this operation, not an
+              evidence/completion photo
+            </span>
+          </Label>
+          {editCard ? (
+            <>
+              <AssetPhotoGallery
+                ownerType="job_card"
+                ownerId={editCard.id}
+                canEdit={pEdit}
+                excludeIds={referencePhotoExcludeIds}
+                data-ocid="jobcards.form.reference_photo_gallery"
+              />
+              {(assetPhotos || []).filter(
+                (p) =>
+                  p.ownerType === "job_card" &&
+                  p.ownerId === editCard.id &&
+                  !referencePhotoExcludeIds.includes(p.id),
+              ).length > 0 && (
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  {(assetPhotos || [])
+                    .filter(
+                      (p) =>
+                        p.ownerType === "job_card" &&
+                        p.ownerId === editCard.id &&
+                        !referencePhotoExcludeIds.includes(p.id),
+                    )
+                    .map((p) => (
+                      <button
+                        key={p.id}
+                        type="button"
+                        className={`text-xs rounded-md border px-2 py-1 ${
+                          form.referencePhotoId === p.id
+                            ? "border-primary bg-primary/10 font-semibold"
+                            : "border-input"
+                        }`}
+                        onClick={() =>
+                          setForm((f) => ({
+                            ...f,
+                            referencePhotoId:
+                              f.referencePhotoId === p.id ? "" : p.id,
+                          }))
+                        }
+                        data-ocid={`jobcards.form.reference_photo_select.${p.id}`}
+                      >
+                        {form.referencePhotoId === p.id ? "✓ " : ""}
+                        {p.originalFilename ?? p.id.slice(0, 8)}
+                      </button>
+                    ))}
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="space-y-1.5">
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                id="jc-pending-reference-photo"
+                className="hidden"
+                onChange={handlePendingReferencePhotoSelect}
+              />
+              {pendingReferencePhotoPreviewUrl ? (
+                <div className="flex items-center gap-2">
+                  <img
+                    src={pendingReferencePhotoPreviewUrl}
+                    alt="Staged work reference"
+                    className="h-16 w-16 object-contain rounded border"
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={clearPendingReferencePhoto}
+                  >
+                    Remove
+                  </Button>
+                </div>
+              ) : (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() =>
+                    document
+                      .getElementById("jc-pending-reference-photo")
+                      ?.click()
+                  }
+                  data-ocid="jobcards.form.pending_reference_photo_button"
+                >
+                  <Plus className="w-3.5 h-3.5 mr-1" /> Add Photo
+                </Button>
+              )}
+            </div>
+          )}
+        </div>
+        <div className="space-y-1.5">
+          <Label className="text-xs">
+            Linked Drawing
+            <span className="text-muted-foreground font-normal">
+              {" "}
+              — Drawing Repository is the source of truth
+            </span>
+          </Label>
+          <DrawingLinkPicker
+            linkedDrawingIds={currentLinkedDrawingIds}
+            onAdd={handleAddDrawingLink}
+            onRemove={handleRemoveDrawingLink}
+            data-ocid="jobcards.form.drawing_link_picker"
+          />
+        </div>
+        <div className="space-y-2">
+          <Label className="text-xs">Print Options</Label>
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id="jc-print-reference"
+              checked={form.printReferencePhoto}
+              disabled={
+                editCard ? !form.referencePhotoId : !pendingReferencePhotoFile
               }
-              onRemove={(drawingId) => {
-                const link = (drawingLinks || []).find(
-                  (l) =>
-                    l.linkedType === "job_card" &&
-                    l.linkedId === editCard.id &&
-                    l.drawingId === drawingId,
-                );
-                if (link) removeDrawingLink(link.id);
-              }}
-              data-ocid="jobcards.form.drawing_link_picker"
+              onCheckedChange={(v) =>
+                setForm((f) => ({ ...f, printReferencePhoto: v === true }))
+              }
             />
+            <Label htmlFor="jc-print-reference" className="text-xs font-normal">
+              Print Reference Photo (adds a dedicated page)
+            </Label>
           </div>
-          <div className="space-y-2">
-            <Label className="text-xs">Print Options</Label>
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="jc-print-reference"
-                checked={form.printReferencePhoto}
-                disabled={!form.referencePhotoId}
-                onCheckedChange={(v) =>
-                  setForm((f) => ({ ...f, printReferencePhoto: v === true }))
-                }
-              />
-              <Label
-                htmlFor="jc-print-reference"
-                className="text-xs font-normal"
-              >
-                Print Reference Photo (adds a dedicated page)
-              </Label>
-            </div>
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="jc-print-drawing"
-                checked={form.printDrawing}
-                disabled={linkedDrawingIdsForEdit.length === 0}
-                onCheckedChange={(v) =>
-                  setForm((f) => ({ ...f, printDrawing: v === true }))
-                }
-              />
-              <Label htmlFor="jc-print-drawing" className="text-xs font-normal">
-                Print Drawing (adds the linked drawing as additional pages)
-              </Label>
-            </div>
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id="jc-print-drawing"
+              checked={form.printDrawing}
+              disabled={currentLinkedDrawingIds.length === 0}
+              onCheckedChange={(v) =>
+                setForm((f) => ({ ...f, printDrawing: v === true }))
+              }
+            />
+            <Label htmlFor="jc-print-drawing" className="text-xs font-normal">
+              Print Drawing (adds the linked drawing as additional pages)
+            </Label>
           </div>
         </div>
-      )}
+      </div>
     </div>
   );
 

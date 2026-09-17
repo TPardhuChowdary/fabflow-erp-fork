@@ -2068,6 +2068,31 @@ const JOB_CARD_LABEL_STYLE: React.CSSProperties = {
   marginBottom: "6px",
 };
 
+// Small uppercase "section eyebrow" — the one repeated visual device
+// that gives the redesigned sheet its hierarchy (WHO/WHAT vs PRODUCTION
+// TARGET vs QUALITY/INSPECTION vs RESPONSIBILITY, per the design brief)
+// without resorting to boxed "UI cards" that print poorly. Deliberately
+// text-only, no background fill — a manufacturing traveler reads by
+// section labels and rules, not by colored chrome.
+function SectionEyebrow({ children }: { children: React.ReactNode }) {
+  return (
+    <div
+      style={{
+        fontSize: "10.5px",
+        fontWeight: 800,
+        color: "#1a1a1a",
+        textTransform: "uppercase",
+        letterSpacing: "1px",
+        borderBottom: "1.5px solid #1a1a1a",
+        paddingBottom: "3px",
+        marginBottom: "8px",
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
 export function JobCardDocContent({
   id,
   jobCard,
@@ -2084,48 +2109,56 @@ export function JobCardDocContent({
   );
 
   return (
-    <div id={id} style={{ ...HIDDEN_STYLE, fontSize: "14px" }}>
-      {/* HEADER */}
+    <div
+      id={id}
+      style={{
+        ...HIDDEN_STYLE,
+        fontSize: "13px",
+        fontFamily: "Arial, Helvetica, sans-serif",
+        color: "#1a1a1a",
+      }}
+    >
+      {/* WHO/WHAT — FabFlow/company identity + the Job Card's own
+          number, always the first thing a shop-floor reader sees. A
+          thin accent bar under the rule (not a colored card) keeps this
+          a manufacturing document rather than a generic printed form. */}
       <div
         style={{
           display: "flex",
           justifyContent: "space-between",
           alignItems: "flex-start",
-          borderBottom: "2px solid #1a1a1a",
-          paddingBottom: "12px",
-          marginBottom: "18px",
+          paddingBottom: "10px",
+          marginBottom: "3px",
         }}
       >
-        <div style={{ display: "flex", alignItems: "flex-start", gap: "16px" }}>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: "14px" }}>
           {settings.companyLogo && (
             <img
               src={settings.companyLogo}
               alt="logo"
               style={{
-                maxHeight: "60px",
-                maxWidth: "120px",
+                maxHeight: "52px",
+                maxWidth: "110px",
                 objectFit: "contain",
               }}
             />
           )}
           <div>
             {/* Same settings.companyName/companyLogo source Invoice's own
-                header reads (InvoicePrintView.tsx / InvoiceDocContent
-                above) — falls back to "FABFLOW" only when Company Profile
-                is genuinely unset, same as Invoice falls back to "YOUR
-                COMPANY NAME". Not a hardcoded product-branded header. */}
-            <div style={{ fontSize: "20px", fontWeight: 800, color: "#111" }}>
+                header reads — falls back to "FABFLOW" only when Company
+                Profile is genuinely unset, not a hardcoded brand. */}
+            <div style={{ fontSize: "18px", fontWeight: 800, color: "#111" }}>
               {settings.companyName || "FABFLOW"}
             </div>
             {settings.companyAddress && (
               <div
-                style={{ fontSize: "12px", color: "#555", marginTop: "3px" }}
+                style={{ fontSize: "11px", color: "#555", marginTop: "2px" }}
               >
                 {settings.companyAddress}
               </div>
             )}
             {settings.companyPhone && (
-              <div style={{ fontSize: "12px", color: "#555" }}>
+              <div style={{ fontSize: "11px", color: "#555" }}>
                 Ph: {settings.companyPhone}
               </div>
             )}
@@ -2134,318 +2167,402 @@ export function JobCardDocContent({
         <div style={{ textAlign: "right" }}>
           <div
             style={{
-              fontSize: "24px",
-              fontWeight: 800,
-              color: "#1a1a1a",
-              letterSpacing: "1.5px",
+              fontSize: "12px",
+              fontWeight: 700,
+              color: "#888",
+              letterSpacing: "2px",
               textTransform: "uppercase",
             }}
           >
             Job Card
           </div>
-          <div style={{ fontSize: "16px", fontWeight: 700, color: "#333" }}>
+          <div
+            style={{
+              fontSize: "22px",
+              fontWeight: 800,
+              color: "#111",
+              fontFamily: "'Courier New', monospace",
+              lineHeight: 1.15,
+            }}
+          >
             {jobCard.jobNo}
           </div>
           {/* Printed On — computed by the caller at print-generation time
               (client clock), never the Job Card's own createdAt and
-              never written back to the Job Card. Same placement pattern
-              as Invoice's own No/Date block. */}
-          <div style={{ fontSize: "11px", color: "#444", marginTop: "4px" }}>
-            <strong>Printed On:</strong> {formatPrintedOn(printedAt)}
+              never written back to the Job Card. */}
+          <div style={{ fontSize: "10.5px", color: "#666", marginTop: "2px" }}>
+            Printed {formatPrintedOn(printedAt)}
           </div>
         </div>
       </div>
-
-      {/* CORE DETAILS */}
       <div
         style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gap: "0",
-          border: "1px solid #999",
-          borderRadius: "4px",
+          height: "3px",
+          background: "#1a1a1a",
+          marginBottom: "14px",
+        }}
+      />
+
+      {/* JOB IDENTIFICATION — one compact 2-row strip combining what was
+          previously two separate boxes (core details + time/status): row
+          1 is real identifying data (Project/Employee/Operation/Stage),
+          row 2 pairs the shop floor's own blank Start/Targeted-End
+          fields with the two values that ARE already known (Active
+          Time, Status) — never pre-filling Start/End from jobCard.start
+          Time/endTime, exactly as before. */}
+      <div
+        style={{
+          border: "1px solid #bbb",
+          borderRadius: "3px",
           overflow: "hidden",
-          marginBottom: "16px",
-          fontSize: "13px",
+          marginBottom: "12px",
         }}
       >
-        {[
-          ["Project", projectLabel || "—"],
-          ["Assigned Employee", jobCard.employeeName || "—"],
-          ["Operation", jobCard.operationType],
-          ["Production Stage", stageLabel ?? "Ad-hoc (no stage)"],
-        ].map(([label, value], i) => (
-          <div
-            key={label}
-            style={{
-              padding: "10px 16px",
-              borderRight: i % 2 === 0 ? "1px solid #ddd" : undefined,
-              borderTop: i >= 2 ? "1px solid #ddd" : undefined,
-            }}
-          >
-            <div style={JOB_CARD_LABEL_STYLE}>{label}</div>
-            <div style={{ fontWeight: 700, fontSize: "15px", color: "#111" }}>
-              {value}
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <div
-        style={{
-          border: "1px solid #999",
-          borderRadius: "4px",
-          padding: "10px 16px",
-          marginBottom: "16px",
-        }}
-      >
-        <div style={JOB_CARD_LABEL_STYLE}>Job / Task</div>
-        <div style={{ fontSize: "14px", color: "#111" }}>
-          {jobCard.jobDescription}
-        </div>
-      </div>
-
-      {/* PROJECT REFERENCE PHOTO — identifies the product/project this
-          Job Card belongs to (Section 1, see chat); NOT an evidence or
-          completion photo. Entirely absent when the caller resolved no
-          usable Project photo — an existing Job Card prints exactly as
-          before. Deliberately small/bounded (max 120px tall) so it can
-          never push the rest of Page 1 onto another page; object-fit:
-          contain keeps the whole product visible rather than cropping. */}
-      {projectPhotoUrl && (
         <div
           style={{
-            border: "1px solid #999",
-            borderRadius: "4px",
-            padding: "10px 16px",
-            marginBottom: "16px",
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr 1fr 1fr",
+            fontSize: "12px",
           }}
         >
-          <div style={JOB_CARD_LABEL_STYLE}>Project Reference Photo</div>
-          <img
-            src={projectPhotoUrl}
-            alt="Project reference"
-            style={{
-              display: "block",
-              maxHeight: "120px",
-              maxWidth: "180px",
-              objectFit: "contain",
-              border: "1px solid #ddd",
-              borderRadius: "3px",
-            }}
-          />
-        </div>
-      )}
-
-      {/* QUANTITY — only Expected comes from the digital Job Card
-          (requirement: it must stay auto-populated). Completed/Rejected/
-          Rework are always printed blank for the shop floor to fill in
-          by hand and later transcribe back into the digital record —
-          never pre-filled from jobCard.actualCompletedQty/rejectedQty/
-          reworkQty, even though those fields already hold real values
-          in the system. "Remaining" was dropped since it was only ever
-          derived from the (now-blank) completed quantity. */}
-      <div style={{ marginBottom: "16px" }}>
-        <div style={{ ...JOB_CARD_LABEL_STYLE, marginBottom: "8px" }}>
-          Quantity
+          {[
+            ["Project", projectLabel || "—"],
+            ["Operation", jobCard.operationType],
+            ["Assigned Employee", jobCard.employeeName || "—"],
+            ["Production Stage", stageLabel ?? "Ad-hoc (no stage)"],
+          ].map(([label, value], i) => (
+            <div
+              key={label}
+              style={{
+                padding: "8px 10px",
+                borderLeft: i > 0 ? "1px solid #ddd" : undefined,
+                borderBottom: "1px solid #ddd",
+              }}
+            >
+              <div style={JOB_CARD_LABEL_STYLE}>{label}</div>
+              <div style={{ fontWeight: 700, fontSize: "13px", color: "#111" }}>
+                {value}
+              </div>
+            </div>
+          ))}
         </div>
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "repeat(4, 1fr)",
-            border: "1px solid #999",
-            borderRadius: "4px",
-            overflow: "hidden",
+            gridTemplateColumns: "1fr 1fr 1fr 1fr",
+            fontSize: "12px",
           }}
         >
-          <div style={{ padding: "10px 8px", textAlign: "center" }}>
-            <div style={{ fontSize: "10px", color: "#777" }}>Expected</div>
-            <div style={{ fontSize: "20px", fontWeight: 800, color: "#111" }}>
-              {jobCard.expectedQuantity}
-            </div>
-          </div>
-          {["Completed", "Rejected", "Rework"].map((label) => (
+          {(
+            [
+              ["Start Time", null],
+              ["Targeted End Time", null],
+              ["Active Time", activeTimeDisplay],
+              ["Status", JOB_CARD_STATUS_LABEL[jobCard.status]],
+            ] as const
+          ).map(([label, value], i) => (
             <div
               key={label}
               style={{
-                padding: "10px 8px",
-                textAlign: "center",
-                borderLeft: "1px solid #ddd",
+                padding: "8px 10px",
+                borderLeft: i > 0 ? "1px solid #ddd" : undefined,
               }}
             >
-              <div style={{ fontSize: "10px", color: "#777" }}>{label}</div>
-              <div
-                style={{
-                  borderBottom: "1px solid #555",
-                  height: "22px",
-                  marginTop: "4px",
-                }}
-              />
+              <div style={JOB_CARD_LABEL_STYLE}>{label}</div>
+              {value === null ? (
+                <div
+                  style={{
+                    borderBottom: "1px solid #999",
+                    height: "16px",
+                    marginTop: "3px",
+                  }}
+                />
+              ) : (
+                <div style={{ fontWeight: 700, color: "#111" }}>{value}</div>
+              )}
             </div>
           ))}
         </div>
       </div>
 
-      {/* TIME + STATUS — Status and Active Time are read straight off the
-          digital record (identifying/system information). Start Time and
-          Targeted End Time are always printed blank: they are the
-          shop-floor's own manual fields, never pre-filled from
-          jobCard.startTime/endTime. */}
+      {/* WORK INSTRUCTION + PROJECT REFERENCE — the operational text and
+          the small Project photo share one row so the photo never
+          dominates the page (Section "PROJECT REFERENCE" of the brief):
+          bounded to a fixed 92px-wide column, object-fit: contain. The
+          photo column simply doesn't exist when the caller resolved no
+          Project photo — Work Instruction then takes the full width,
+          never a placeholder box. */}
       <div
         style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr 1fr 1fr",
-          border: "1px solid #999",
-          borderRadius: "4px",
-          overflow: "hidden",
-          marginBottom: "20px",
-          fontSize: "12px",
-        }}
-      >
-        {(
-          [
-            ["Start Time", null],
-            ["Targeted End Time", null],
-            ["Active Time", activeTimeDisplay],
-            ["Status", JOB_CARD_STATUS_LABEL[jobCard.status]],
-          ] as const
-        ).map(([label, value], i) => (
-          <div
-            key={label}
-            style={{
-              padding: "10px 12px",
-              borderLeft: i > 0 ? "1px solid #ddd" : undefined,
-            }}
-          >
-            <div style={{ fontSize: "10px", color: "#777" }}>{label}</div>
-            {value === null ? (
-              <div
-                style={{
-                  borderBottom: "1px solid #555",
-                  height: "18px",
-                  marginTop: "4px",
-                }}
-              />
-            ) : (
-              <div style={{ fontWeight: 700, color: "#111" }}>{value}</div>
-            )}
-          </div>
-        ))}
-      </div>
-
-      {/* MANUAL WORK RECORD — the physical/paper half of the workflow.
-          Deliberately plain boxes, not tied to any field — nothing
-          written here is read back into the system; it's evidence a
-          supervisor later transcribes into the digital Job Card. */}
-      <div
-        style={{
-          border: "2px solid #1a1a1a",
-          borderRadius: "4px",
-          padding: "14px 16px",
-          marginBottom: "20px",
+          display: "flex",
+          gap: "12px",
+          marginBottom: "12px",
         }}
       >
         <div
           style={{
-            fontSize: "13px",
-            fontWeight: 800,
-            textTransform: "uppercase",
-            letterSpacing: "0.5px",
-            marginBottom: "10px",
+            flex: 1,
+            border: "1px solid #bbb",
+            borderRadius: "3px",
+            padding: "9px 12px",
           }}
         >
-          Manual Work Record (to be filled by hand)
-        </div>
-        <table
-          style={{
-            width: "100%",
-            borderCollapse: "collapse",
-            fontSize: "12px",
-            marginBottom: "12px",
-          }}
-        >
-          <thead>
-            <tr style={{ background: "#eee" }}>
-              {["Time", "Qty Completed", "Rejected", "Rework", "Remarks"].map(
-                (h) => (
-                  <th
-                    key={h}
-                    style={{
-                      border: "1px solid #999",
-                      padding: "8px",
-                      textAlign: "left",
-                    }}
-                  >
-                    {h}
-                  </th>
-                ),
-              )}
-            </tr>
-          </thead>
-          <tbody>
-            {BLANK_ROW_KEYS.map((rowKey) => (
-              <tr key={rowKey}>
-                {BLANK_CELL_KEYS.map((cellKey) => (
-                  <td
-                    key={`${rowKey}-${cellKey}`}
-                    style={{
-                      border: "1px solid #999",
-                      height: "30px",
-                    }}
-                  />
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <div style={{ display: "flex", gap: "24px", fontSize: "12px" }}>
-          <div style={{ flex: 1 }}>
-            <div style={{ color: "#555", marginBottom: "4px" }}>
-              Start Time (actual)
-            </div>
-            <div style={{ borderBottom: "1px solid #555", height: "26px" }} />
-          </div>
-          <div style={{ flex: 1 }}>
-            <div style={{ color: "#555", marginBottom: "4px" }}>
-              Stop / End Time (actual)
-            </div>
-            <div style={{ borderBottom: "1px solid #555", height: "26px" }} />
+          <SectionEyebrow>Work Instruction</SectionEyebrow>
+          <div style={{ fontSize: "13px", color: "#111", lineHeight: 1.4 }}>
+            {jobCard.jobDescription}
           </div>
         </div>
-        <div style={{ marginTop: "12px" }}>
-          <div style={{ color: "#555", fontSize: "12px", marginBottom: "4px" }}>
-            Remarks / Notes
-          </div>
-          <div style={{ borderBottom: "1px solid #555", height: "26px" }} />
+        {/* PROJECT REFERENCE PHOTO — identifies the product/project this
+            Job Card belongs to (Section 1, see chat); NOT an evidence or
+            completion photo. Deliberately small/bounded so it can never
+            push the rest of Page 1 onto another page. */}
+        {projectPhotoUrl && (
           <div
             style={{
-              borderBottom: "1px solid #555",
-              height: "26px",
-              marginTop: "8px",
+              width: "92px",
+              flexShrink: 0,
+              border: "1px solid #bbb",
+              borderRadius: "3px",
+              padding: "6px",
+              textAlign: "center",
             }}
-          />
+          >
+            <img
+              src={projectPhotoUrl}
+              alt="Project reference"
+              style={{
+                display: "block",
+                width: "100%",
+                height: "70px",
+                objectFit: "contain",
+                margin: "0 auto",
+              }}
+            />
+            <div
+              style={{
+                fontSize: "8.5px",
+                color: "#777",
+                textTransform: "uppercase",
+                letterSpacing: "0.5px",
+                marginTop: "4px",
+              }}
+            >
+              Project Reference
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* PRODUCTION TARGET — real, server-computed numbers only
+          (Expected Quantity is the GENERATED column, never client math).
+          Deliberately does not repeat Completed/Rejected/Rework as
+          separate blank boxes here — those already live, once, inside
+          the Quality/Inspection manual work record's own row-columns
+          below, so the shop floor fills each real time entry exactly
+          once rather than a redundant summary line first. */}
+      <div style={{ marginBottom: "12px" }}>
+        <SectionEyebrow>Production Target</SectionEyebrow>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1.3fr 1fr 1fr",
+            border: "1px solid #bbb",
+            borderRadius: "3px",
+            overflow: "hidden",
+          }}
+        >
+          <div
+            style={{
+              padding: "10px 12px",
+              textAlign: "center",
+              background: "#f4f4f4",
+            }}
+          >
+            <div style={{ fontSize: "9.5px", color: "#666" }}>
+              Expected Quantity
+            </div>
+            <div style={{ fontSize: "26px", fontWeight: 800, color: "#111" }}>
+              {jobCard.expectedQuantity}{" "}
+              <span style={{ fontSize: "12px", fontWeight: 600 }}>pcs</span>
+            </div>
+          </div>
+          <div
+            style={{
+              padding: "10px 12px",
+              textAlign: "center",
+              borderLeft: "1px solid #ddd",
+            }}
+          >
+            <div style={{ fontSize: "9.5px", color: "#666" }}>
+              Std Time / Piece
+            </div>
+            <div style={{ fontSize: "15px", fontWeight: 700, color: "#111" }}>
+              {jobCard.standardTimePerUnitMinutes} min
+            </div>
+          </div>
+          <div
+            style={{
+              padding: "10px 12px",
+              textAlign: "center",
+              borderLeft: "1px solid #ddd",
+            }}
+          >
+            <div style={{ fontSize: "9.5px", color: "#666" }}>
+              Allocated Time
+            </div>
+            <div style={{ fontSize: "15px", fontWeight: 700, color: "#111" }}>
+              {jobCard.allocatedTimeMinutes} min
+            </div>
+          </div>
         </div>
       </div>
 
-      {/* SIGN-OFF */}
+      {/* QUALITY / INSPECTION — the physical/paper half of the workflow
+          (same Manual Work Record fields as before this redesign, just
+          reframed under the Quality/Inspection heading the brief asks
+          for). Deliberately plain boxes, not tied to any field — nothing
+          written here is read back into the system; a supervisor later
+          transcribes it into the digital Job Card. */}
+      <div style={{ marginBottom: "14px" }}>
+        <SectionEyebrow>
+          Quality / Inspection — Manual Work Record
+        </SectionEyebrow>
+        <div
+          style={{
+            border: "1px solid #bbb",
+            borderRadius: "3px",
+            padding: "10px 12px",
+          }}
+        >
+          <div
+            style={{
+              fontSize: "10px",
+              color: "#777",
+              marginBottom: "8px",
+            }}
+          >
+            To be filled by hand
+          </div>
+          <table
+            style={{
+              width: "100%",
+              borderCollapse: "collapse",
+              fontSize: "12px",
+              marginBottom: "12px",
+            }}
+          >
+            <thead>
+              <tr style={{ background: "#eee" }}>
+                {["Time", "Qty Completed", "Rejected", "Rework", "Remarks"].map(
+                  (h) => (
+                    <th
+                      key={h}
+                      style={{
+                        border: "1px solid #999",
+                        padding: "8px",
+                        textAlign: "left",
+                      }}
+                    >
+                      {h}
+                    </th>
+                  ),
+                )}
+              </tr>
+            </thead>
+            <tbody>
+              {BLANK_ROW_KEYS.map((rowKey) => (
+                <tr key={rowKey}>
+                  {BLANK_CELL_KEYS.map((cellKey) => (
+                    <td
+                      key={`${rowKey}-${cellKey}`}
+                      style={{
+                        border: "1px solid #999",
+                        height: "30px",
+                      }}
+                    />
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ display: "flex", gap: "24px", fontSize: "12px" }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ color: "#555", marginBottom: "4px" }}>
+                Start Time (actual)
+              </div>
+              <div style={{ borderBottom: "1px solid #555", height: "26px" }} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ color: "#555", marginBottom: "4px" }}>
+                Stop / End Time (actual)
+              </div>
+              <div style={{ borderBottom: "1px solid #555", height: "26px" }} />
+            </div>
+          </div>
+          <div style={{ marginTop: "12px" }}>
+            <div
+              style={{ color: "#555", fontSize: "12px", marginBottom: "4px" }}
+            >
+              Remarks / Notes
+            </div>
+            <div style={{ borderBottom: "1px solid #555", height: "26px" }} />
+            <div
+              style={{
+                borderBottom: "1px solid #555",
+                height: "26px",
+                marginTop: "8px",
+              }}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* RESPONSIBILITY / SIGN-OFF — five distinct roles (Section
+          "RESPONSIBILITY / SIGN-OFF" of the brief), same meaning as the
+          previous 3-box strip (Employee/Supervisor Signature + Date) but
+          now split into the roles a real manufacturing traveler carries.
+          Every box is blank ink-fill, exactly as before — no field is
+          bound to any of these, nothing here is new persisted data. */}
       <div
         style={{
           display: "grid",
           gridTemplateColumns: "1fr 1fr 1fr",
-          gap: "24px",
-          paddingTop: "10px",
+          gap: "16px",
+          marginBottom: "12px",
         }}
       >
-        {["Employee Signature", "Supervisor Signature", "Date"].map((label) => (
+        {["Prepared By", "Assigned By", "In-Process Check"].map((label) => (
           <div key={label} style={{ textAlign: "center" }}>
             <div
               style={{
-                minHeight: "60px",
+                minHeight: "44px",
                 borderBottom: "1px solid #555",
-                marginBottom: "6px",
+                marginBottom: "5px",
               }}
             />
-            <div style={{ fontSize: "11px", fontWeight: 600, color: "#333" }}>
+            <div style={{ fontSize: "10.5px", fontWeight: 600, color: "#333" }}>
+              {label}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          gap: "16px",
+        }}
+      >
+        {["Completed By", "QC Approved By"].map((label) => (
+          <div key={label} style={{ textAlign: "center" }}>
+            <div
+              style={{
+                minHeight: "44px",
+                borderBottom: "1px solid #555",
+                marginBottom: "5px",
+              }}
+            />
+            <div style={{ fontSize: "10.5px", fontWeight: 600, color: "#333" }}>
               {label}
             </div>
           </div>
@@ -2454,8 +2571,8 @@ export function JobCardDocContent({
 
       <div
         style={{
-          marginTop: "18px",
-          fontSize: "10px",
+          marginTop: "16px",
+          fontSize: "9.5px",
           color: "#aaa",
           textAlign: "center",
         }}
@@ -2473,20 +2590,37 @@ export function JobCardDocContent({
           DOM (same technique @page/CSS print rules already rely on
           elsewhere in this file for A4 pagination). */}
       {referencePhotoUrl && (
-        <div style={{ pageBreakBefore: "always", paddingTop: "20px" }}>
+        <div style={{ pageBreakBefore: "always", paddingTop: "10mm" }}>
           <div
             style={{
-              borderBottom: "2px solid #1a1a1a",
-              paddingBottom: "10px",
-              marginBottom: "16px",
+              textAlign: "center",
+              borderBottom: "3px solid #1a1a1a",
+              paddingBottom: "14px",
+              marginBottom: "20px",
             }}
           >
             <div
-              style={{ fontSize: "18px", fontWeight: 800, color: "#1a1a1a" }}
+              style={{
+                fontSize: "26px",
+                fontWeight: 800,
+                color: "#1a1a1a",
+                letterSpacing: "2px",
+                lineHeight: 1.3,
+              }}
             >
-              Work Reference — Expected Result
+              WORK REFERENCE
             </div>
-            <div style={{ fontSize: "12px", color: "#555", marginTop: "4px" }}>
+            <div
+              style={{
+                fontSize: "15px",
+                fontWeight: 700,
+                color: "#555",
+                letterSpacing: "1px",
+              }}
+            >
+              EXPECTED RESULT
+            </div>
+            <div style={{ fontSize: "12px", color: "#555", marginTop: "8px" }}>
               {jobCard.jobNo} · {projectLabel} · {jobCard.operationType}
             </div>
           </div>

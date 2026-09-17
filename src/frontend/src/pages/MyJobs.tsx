@@ -461,6 +461,11 @@ export function MyJobs() {
                     ownerType="job_card"
                     ownerId={activeJob.id}
                     canEdit={pEdit}
+                    excludeIds={
+                      activeJob.referencePhotoId
+                        ? [activeJob.referencePhotoId]
+                        : undefined
+                    }
                     data-ocid="my-jobs.detail.photos"
                   />
                 </div>

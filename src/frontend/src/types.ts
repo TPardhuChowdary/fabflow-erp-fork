@@ -333,8 +333,55 @@ export interface JobCard {
    * Page 3+ using the Drawing Editor's own existing print format. Only
    * meaningful when a Drawing is actually linked. Defaults false. */
   printDrawing: boolean;
+  /** Job Card planning fields (see chat, database/20260917100000) — all
+   * seven additive, all independent of expectedQuantity/startTime/the
+   * QMS stage-gate system. */
+  /** Overall required output for this Job Card — a DIFFERENT concept
+   * from expectedQuantity (the achievable output within the allocated
+   * time window). Undefined = not recorded. */
+  totalQuantity?: number;
+  /** Manual planning override for expectedQuantity. The effective
+   * target everywhere (UI display, print) is
+   * `expectedQuantityOverride ?? expectedQuantity` — never read
+   * expectedQuantity alone once this field may be set. undefined = use
+   * the automatic calculation. Plain client-writable column — NOT
+   * generated, unlike expectedQuantity itself. */
+  expectedQuantityOverride?: number;
+  /** Freeform, printed-only inspection checklist — independent of
+   * project_qms_inspections and its stage-gate Pass/Fail logic. Empty
+   * array = no plan configured, no section printed. */
+  inspectionPlan: JobCardInspectionCheckpoint[];
+  /** Optional FK to Machine — which machine/station this operation runs
+   * on. Reuses the existing `machines` master via MachineSelect, no
+   * duplicate Work Center system. */
+  workCenterMachineId?: string;
+  /** Display snapshot of workCenterMachineId at the time it was set —
+   * survives the machine later being deleted (ON DELETE SET NULL). */
+  workCenterName?: string;
+  /** Low / Normal / High / Urgent. Defaults 'Normal' at the database
+   * level for every existing and new Job Card. */
+  priority: JobCardPriority;
+  /** Planned/scheduled Job Card date — distinct from startTime (the
+   * real, server-authoritative timer column, untouched by this field). */
+  startDate?: string;
   createdAt: number;
   updatedAt: number;
+}
+
+export type JobCardPriority = "Low" | "Normal" | "High" | "Urgent";
+
+/** One row of a Job Card's freeform inspection plan (see JobCard.
+ * inspectionPlan above). Purely descriptive/printed — no pass/fail, no
+ * persisted "done" state, no relation to project_qms_inspections. */
+export interface JobCardInspectionCheckpoint {
+  /** Client-generated, stable only for the lifetime of one edit session
+   * (React list key / add-remove identity) — never a database id, this
+   * whole array is one jsonb column, not a child table. */
+  id: string;
+  label: string;
+  triggerQty: number;
+  cumulativeQty: number;
+  sampleQty: number;
 }
 
 export interface MRItem {

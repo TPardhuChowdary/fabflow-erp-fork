@@ -69,6 +69,16 @@ function toJobCardFields(v: JobCardWritable) {
     reference_photo_id: v.referencePhotoId || null,
     print_reference_photo: v.printReferencePhoto,
     print_drawing: v.printDrawing,
+    // Job Card planning fields (see chat, database/20260917100000) — all
+    // plain columns, no staging needed (unlike reference_photo_id/drawing
+    // links, none of these require a real row id to exist first).
+    total_quantity: v.totalQuantity ?? null,
+    expected_quantity_override: v.expectedQuantityOverride ?? null,
+    inspection_plan: v.inspectionPlan ?? [],
+    work_center_machine_id: v.workCenterMachineId || null,
+    work_center_name: v.workCenterName || null,
+    priority: v.priority,
+    start_date: v.startDate || null,
   };
 }
 

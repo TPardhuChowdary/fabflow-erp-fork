@@ -59,6 +59,7 @@ import { CompleteJobCardDialog } from "../components/CompleteJobCardDialog";
 import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import { EmployeeSelect } from "../components/EmployeeSelect";
 import { JobCardTimerPanel } from "../components/JobCardTimerPanel";
+import { MachineSelect } from "../components/MachineSelect";
 import { ProjectSelect } from "../components/ProjectSelect";
 import {
   formatJobCardTimestamp,
@@ -95,6 +96,8 @@ import type {
   AssetPhoto,
   JobCard,
   JobCardExceptionReason,
+  JobCardInspectionCheckpoint,
+  JobCardPriority,
   JobCardStatus,
 } from "../types";
 
@@ -176,6 +179,22 @@ const emptyForm = {
   referencePhotoId: "",
   printReferencePhoto: false,
   printDrawing: false,
+  // Job Card planning fields (see chat, database/20260917100000). All
+  // plain columns — no create-mode staging needed (unlike Reference
+  // Photo/Drawing above, none of these need a real job_cards.id first).
+  totalQuantity: "",
+  // "" = use the automatic calculation (previewExpectedQty). A non-empty
+  // string is the user's deliberate override. expectedQuantityTouched
+  // distinguishes "the user has interacted with this field" from "it's
+  // just empty" so the auto-recompute effect below never overwrites a
+  // value the user is actively editing, including editing it back to "".
+  expectedQuantityOverride: "",
+  expectedQuantityTouched: false,
+  inspectionPlan: [] as JobCardInspectionCheckpoint[],
+  workCenterMachineId: "",
+  workCenterName: "",
+  priority: "Normal" as JobCardPriority,
+  startDate: "",
 };
 
 interface JobCardsProps {
@@ -542,6 +561,20 @@ export function JobCards({
       referencePhotoId: jc.referencePhotoId ?? "",
       printReferencePhoto: jc.printReferencePhoto,
       printDrawing: jc.printDrawing,
+      totalQuantity: jc.totalQuantity != null ? String(jc.totalQuantity) : "",
+      expectedQuantityOverride:
+        jc.expectedQuantityOverride != null
+          ? String(jc.expectedQuantityOverride)
+          : "",
+      // Loading an already-overridden card counts as "touched" — the
+      // auto-recompute effect must never clear a persisted override just
+      // because the dialog was reopened.
+      expectedQuantityTouched: jc.expectedQuantityOverride != null,
+      inspectionPlan: jc.inspectionPlan ?? [],
+      workCenterMachineId: jc.workCenterMachineId ?? "",
+      workCenterName: jc.workCenterName ?? "",
+      priority: jc.priority ?? "Normal",
+      startDate: jc.startDate ?? "",
     });
   };
 
@@ -557,6 +590,28 @@ export function JobCards({
     standardTime > 0 && allocatedTime >= 0
       ? Math.floor(allocatedTime / standardTime)
       : null;
+
+  // Effective Expected Quantity (see chat) = the override when the user
+  // has deliberately set one, else the automatic calculation above.
+  // Never silently overwritten: Standard/Allocated Time changing only
+  // recomputes previewExpectedQty (an independent value) — it never
+  // touches form.expectedQuantityOverride itself. autoValueChanged
+  // surfaces when the two have diverged so the "Use automatic value"
+  // reset action only appears when it would actually change anything.
+  const overrideQty =
+    form.expectedQuantityOverride !== ""
+      ? Number.parseInt(form.expectedQuantityOverride, 10)
+      : null;
+  const effectiveExpectedQty =
+    overrideQty !== null && !Number.isNaN(overrideQty)
+      ? overrideQty
+      : previewExpectedQty;
+  const autoValueChanged =
+    form.expectedQuantityTouched &&
+    overrideQty !== null &&
+    !Number.isNaN(overrideQty) &&
+    previewExpectedQty !== null &&
+    overrideQty !== previewExpectedQty;
 
   const employeeName = (id: string) =>
     employees.find((e) => e.id === id)?.name ?? "";
@@ -683,6 +738,25 @@ export function JobCards({
     setTimeout(() => win.print(), 300);
   }
 
+  // Job Card planning fields payload (see chat) — shared by the initial
+  // insert, the post-upload patch, and the edit update below, so the 7
+  // new fields are computed from `form` in exactly one place.
+  const planningFieldsPayload = () => ({
+    totalQuantity:
+      form.totalQuantity !== ""
+        ? Number.parseInt(form.totalQuantity, 10)
+        : undefined,
+    expectedQuantityOverride:
+      overrideQty !== null && !Number.isNaN(overrideQty)
+        ? overrideQty
+        : undefined,
+    inspectionPlan: form.inspectionPlan,
+    workCenterMachineId: form.workCenterMachineId || undefined,
+    workCenterName: form.workCenterName || undefined,
+    priority: form.priority,
+    startDate: form.startDate || undefined,
+  });
+
   const validate = () => {
     if (!form.projectId) {
       toast.error("Select a project");
@@ -744,6 +818,7 @@ export function JobCards({
           referencePhotoId: undefined,
           printReferencePhoto: form.printReferencePhoto,
           printDrawing: form.printDrawing,
+          ...planningFieldsPayload(),
         },
         { autoRenumberOnConflict: true },
       );
@@ -812,6 +887,13 @@ export function JobCards({
               referencePhotoId: photoResult.data.id,
               printReferencePhoto: created.printReferencePhoto,
               printDrawing: created.printDrawing,
+              totalQuantity: created.totalQuantity,
+              expectedQuantityOverride: created.expectedQuantityOverride,
+              inspectionPlan: created.inspectionPlan,
+              workCenterMachineId: created.workCenterMachineId,
+              workCenterName: created.workCenterName,
+              priority: created.priority,
+              startDate: created.startDate,
             });
             if (patched.status === "success" && patched.data) {
               created = patched.data;
@@ -894,6 +976,7 @@ export function JobCards({
         referencePhotoId: form.referencePhotoId || undefined,
         printReferencePhoto: form.printReferencePhoto,
         printDrawing: form.printDrawing,
+        ...planningFieldsPayload(),
       });
       if (result.status === "unauthenticated") {
         toast.error("You must be signed in to edit a Job Card");
@@ -940,8 +1023,15 @@ export function JobCards({
     projectProductions.find((pp) => pp.projectId === form.projectId)?.stages ??
     [];
 
+  const sectionLabel = (text: string) => (
+    <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground pt-2 first:pt-0">
+      {text}
+    </div>
+  );
+
   const formFields = (
     <div className="space-y-3 py-2">
+      {sectionLabel("Job Identification")}
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1">
           <Label className="text-xs">Project *</Label>
@@ -958,6 +1048,34 @@ export function JobCards({
           />
         </div>
         <div className="space-y-1">
+          <Label className="text-xs">Operation Type *</Label>
+          <Input
+            value={form.operationType}
+            onChange={(e) =>
+              setForm((f) => ({ ...f, operationType: e.target.value }))
+            }
+            placeholder="e.g. Cutting"
+          />
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1">
+          <Label className="text-xs">Work Center</Label>
+          <MachineSelect
+            value={form.workCenterMachineId}
+            onChange={(id) =>
+              setForm((f) => ({
+                ...f,
+                workCenterMachineId: id,
+                workCenterName:
+                  useStore.getState().machines.find((m) => m.id === id)?.name ??
+                  "",
+              }))
+            }
+            className="w-full"
+          />
+        </div>
+        <div className="space-y-1">
           <Label className="text-xs">Employee *</Label>
           <EmployeeSelect
             value={form.employeeId}
@@ -966,7 +1084,42 @@ export function JobCards({
           />
         </div>
       </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1">
+          <Label className="text-xs">Start Date</Label>
+          <Input
+            type="date"
+            value={form.startDate}
+            onChange={(e) =>
+              setForm((f) => ({ ...f, startDate: e.target.value }))
+            }
+          />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs">Priority</Label>
+          <Select
+            value={form.priority}
+            onValueChange={(v) =>
+              setForm((f) => ({ ...f, priority: v as JobCardPriority }))
+            }
+          >
+            <SelectTrigger className="h-8 text-sm">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {(["Low", "Normal", "High", "Urgent"] as JobCardPriority[]).map(
+                (p) => (
+                  <SelectItem key={p} value={p}>
+                    {p}
+                  </SelectItem>
+                ),
+              )}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
 
+      {sectionLabel("Project Reference")}
       {/* Project Reference Photo (Section 1/2, see chat) — automatically
           resolved from the selected Project's own primary asset_photos
           row the moment a Project is picked, in Create as well as Edit.
@@ -990,29 +1143,20 @@ export function JobCards({
         </div>
       )}
 
+      {sectionLabel("Production Planning")}
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1">
-          <Label className="text-xs">Job / Task *</Label>
+          <Label className="text-xs">Total Quantity</Label>
           <Input
-            value={form.jobDescription}
+            type="number"
+            min="0"
+            value={form.totalQuantity}
             onChange={(e) =>
-              setForm((f) => ({ ...f, jobDescription: e.target.value }))
+              setForm((f) => ({ ...f, totalQuantity: e.target.value }))
             }
-            placeholder="e.g. Cut 3mm MS sheet to size"
+            placeholder="Overall required output"
           />
         </div>
-        <div className="space-y-1">
-          <Label className="text-xs">Operation Type *</Label>
-          <Input
-            value={form.operationType}
-            onChange={(e) =>
-              setForm((f) => ({ ...f, operationType: e.target.value }))
-            }
-            placeholder="e.g. Cutting"
-          />
-        </div>
-      </div>
-      <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1">
           <Label className="text-xs">Production Stage</Label>
           <Select
@@ -1038,7 +1182,7 @@ export function JobCards({
       </div>
       <div className="grid grid-cols-2 gap-3">
         <div className="space-y-1">
-          <Label className="text-xs">Standard Time / Unit (minutes) *</Label>
+          <Label className="text-xs">Time per Piece (minutes) *</Label>
           <Input
             type="number"
             min="0.01"
@@ -1065,17 +1209,74 @@ export function JobCards({
           />
         </div>
       </div>
-      <div className="rounded-md border bg-muted/30 px-3 py-2 text-sm">
-        Expected Quantity ={" "}
-        <span className="font-semibold font-mono">
-          {previewExpectedQty !== null ? previewExpectedQty : "—"}
-        </span>{" "}
-        pieces
-        <span className="text-xs text-muted-foreground">
-          {" "}
-          (Allocated Time ÷ Standard Time per Unit, rounded down)
-        </span>
+      {/* Expected Quantity / Target (see chat) — effective value =
+          override ?? automatic. Editable directly: typing a value sets
+          the override and marks the field touched; the automatic
+          calculation keeps running underneath (previewExpectedQty) so a
+          later Standard/Allocated Time change is never lost — it just
+          shows up as "auto value is now X" without clobbering what the
+          user typed. */}
+      <div className="rounded-md border bg-muted/30 px-3 py-2 space-y-1.5">
+        <Label className="text-xs">Expected Quantity / Target</Label>
+        <div className="flex items-center gap-2">
+          <Input
+            type="number"
+            min="0"
+            className="h-8 w-28 font-mono"
+            value={
+              effectiveExpectedQty !== null ? String(effectiveExpectedQty) : ""
+            }
+            onChange={(e) =>
+              setForm((f) => ({
+                ...f,
+                expectedQuantityOverride: e.target.value,
+                expectedQuantityTouched: true,
+              }))
+            }
+          />
+          <span className="text-xs text-muted-foreground">pieces</span>
+          {form.expectedQuantityTouched &&
+            form.expectedQuantityOverride !== "" && (
+              <span className="text-[10px] text-muted-foreground italic">
+                Edited target
+              </span>
+            )}
+        </div>
+        {autoValueChanged && (
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            Automatic value is now{" "}
+            <span className="font-mono">{previewExpectedQty}</span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2 text-xs"
+              onClick={() =>
+                setForm((f) => ({
+                  ...f,
+                  expectedQuantityOverride: "",
+                  expectedQuantityTouched: false,
+                }))
+              }
+            >
+              Use automatic value
+            </Button>
+          </div>
+        )}
       </div>
+
+      {sectionLabel("Work Instruction")}
+      <div className="space-y-1">
+        <Label className="text-xs">Job / Task *</Label>
+        <Input
+          value={form.jobDescription}
+          onChange={(e) =>
+            setForm((f) => ({ ...f, jobDescription: e.target.value }))
+          }
+          placeholder="e.g. Cut 3mm MS sheet to size"
+        />
+      </div>
+
       <div className="grid grid-cols-3 gap-3">
         <div className="space-y-1">
           <Label className="text-xs">Actual Completed Qty</Label>
@@ -1144,6 +1345,13 @@ export function JobCards({
         />
       </div>
 
+      {sectionLabel("Inspection Plan")}
+      <InspectionPlanEditor
+        rows={form.inspectionPlan}
+        onChange={(rows) => setForm((f) => ({ ...f, inspectionPlan: rows }))}
+      />
+
+      {sectionLabel("Work Reference")}
       {/* Job Card print/layout (Sections 2/3/4/8, see chat) — Create and
           Edit consistency: the same configuration is available in both.
           Reference Photo/Drawing Link need a real job_cards.id to attach
@@ -1254,23 +1462,29 @@ export function JobCards({
             </div>
           )}
         </div>
-        <div className="space-y-1.5">
-          <Label className="text-xs">
-            Linked Drawing
-            <span className="text-muted-foreground font-normal">
-              {" "}
-              — Drawing Repository is the source of truth
-            </span>
-          </Label>
-          <DrawingLinkPicker
-            linkedDrawingIds={currentLinkedDrawingIds}
-            onAdd={handleAddDrawingLink}
-            onRemove={handleRemoveDrawingLink}
-            data-ocid="jobcards.form.drawing_link_picker"
-          />
-        </div>
+      </div>
+
+      {sectionLabel("Engineering Drawing")}
+      <div className="space-y-1.5 rounded-md border p-3">
+        <Label className="text-xs">
+          Drawing Link
+          <span className="text-muted-foreground font-normal">
+            {" "}
+            — Drawing Repository is the source of truth
+          </span>
+        </Label>
+        <DrawingLinkPicker
+          linkedDrawingIds={currentLinkedDrawingIds}
+          onAdd={handleAddDrawingLink}
+          onRemove={handleRemoveDrawingLink}
+          data-ocid="jobcards.form.drawing_link_picker"
+        />
+      </div>
+
+      {sectionLabel("Print Options")}
+      <div className="space-y-2 rounded-md border p-3">
         <div className="space-y-2">
-          <Label className="text-xs">Print Options</Label>
+          <Label className="text-xs">Print Reference Photo / Drawing</Label>
           <div className="flex items-center gap-2">
             <Checkbox
               id="jc-print-reference"
@@ -1846,5 +2060,122 @@ function JobCardListTimerChip({ jc }: { jc: JobCard }) {
     >
       {jc.status === "InProgress" ? "⏱" : "⏸"} {formatted}
     </span>
+  );
+}
+
+// Inspection Plan row editor (Section 7, see chat) — fully freeform:
+// add/remove/edit any number of rows, no hard-coded default rows, not
+// connected to project_qms_inspections. Empty array is a valid, common
+// state (nothing configured — the print renderer omits the section
+// entirely rather than showing an empty table).
+function InspectionPlanEditor({
+  rows,
+  onChange,
+}: {
+  rows: JobCardInspectionCheckpoint[];
+  onChange: (rows: JobCardInspectionCheckpoint[]) => void;
+}) {
+  const addRow = () => {
+    onChange([
+      ...rows,
+      {
+        id: `insp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        label: "",
+        triggerQty: 0,
+        cumulativeQty: 0,
+        sampleQty: 0,
+      },
+    ]);
+  };
+  const removeRow = (id: string) => onChange(rows.filter((r) => r.id !== id));
+  const patchRow = (id: string, patch: Partial<JobCardInspectionCheckpoint>) =>
+    onChange(rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+
+  return (
+    <div className="space-y-2 rounded-md border p-3">
+      {rows.length === 0 && (
+        <p className="text-xs text-muted-foreground">
+          No inspection checkpoints configured. Not printed if left empty.
+        </p>
+      )}
+      {rows.map((row, i) => (
+        <div
+          key={row.id}
+          className="grid grid-cols-2 gap-1.5 items-end sm:grid-cols-[1fr_5rem_5rem_5rem_auto]"
+        >
+          <div className="col-span-2 space-y-1 sm:col-span-1">
+            {i === 0 && <Label className="text-[10px]">Label</Label>}
+            <Input
+              className="h-8 text-xs"
+              value={row.label}
+              onChange={(e) => patchRow(row.id, { label: e.target.value })}
+              placeholder="e.g. First off"
+              data-ocid={`jobcards.form.inspection_plan.${i}.label`}
+            />
+          </div>
+          <div className="space-y-1">
+            {i === 0 && <Label className="text-[10px]">Trigger Qty</Label>}
+            <Input
+              type="number"
+              min="0"
+              className="h-8 text-xs"
+              value={row.triggerQty}
+              onChange={(e) =>
+                patchRow(row.id, {
+                  triggerQty: Number.parseInt(e.target.value, 10) || 0,
+                })
+              }
+            />
+          </div>
+          <div className="space-y-1">
+            {i === 0 && <Label className="text-[10px]">Cumulative Qty</Label>}
+            <Input
+              type="number"
+              min="0"
+              className="h-8 text-xs"
+              value={row.cumulativeQty}
+              onChange={(e) =>
+                patchRow(row.id, {
+                  cumulativeQty: Number.parseInt(e.target.value, 10) || 0,
+                })
+              }
+            />
+          </div>
+          <div className="space-y-1">
+            {i === 0 && <Label className="text-[10px]">Sample Qty</Label>}
+            <Input
+              type="number"
+              min="0"
+              className="h-8 text-xs"
+              value={row.sampleQty}
+              onChange={(e) =>
+                patchRow(row.id, {
+                  sampleQty: Number.parseInt(e.target.value, 10) || 0,
+                })
+              }
+            />
+          </div>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-8 w-8 p-0"
+            onClick={() => removeRow(row.id)}
+            data-ocid={`jobcards.form.inspection_plan.${i}.remove`}
+          >
+            <X className="w-3.5 h-3.5" />
+          </Button>
+        </div>
+      ))}
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={addRow}
+        data-ocid="jobcards.form.inspection_plan.add"
+      >
+        <Plus className="w-3.5 h-3.5 mr-1" /> Add Inspection
+      </Button>
+    </div>
   );
 }

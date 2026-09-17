@@ -1982,12 +1982,6 @@ export function ChallanDocContent({
 // and the new "Printed On" timestamp are auto-populated, since those are
 // identifying information rather than the physical work being recorded.
 
-// Fixed, literal row/cell identifiers for the blank manual-record table
-// below — genuinely static (not derived from a map index), matching the
-// table's own fixed 6x5 shape.
-const BLANK_ROW_KEYS = ["row1", "row2", "row3", "row4", "row5", "row6"];
-const BLANK_CELL_KEYS = ["time", "completed", "rejected", "rework", "remarks"];
-
 const JOB_CARD_STATUS_LABEL: Record<JobCard["status"], string> = {
   NotStarted: "Not Started",
   InProgress: "In Progress",
@@ -2090,6 +2084,34 @@ function SectionEyebrow({ children }: { children: React.ReactNode }) {
     >
       {children}
     </div>
+  );
+}
+
+// Compact Priority pill (Section 5, see chat) — a single small inline
+// badge, not a boxed metric cell, so it never grows the Job Identification
+// strip past its existing row layout.
+const PRIORITY_PILL_COLORS: Record<JobCard["priority"], string> = {
+  Low: "#666",
+  Normal: "#333",
+  High: "#b45309",
+  Urgent: "#b91c1c",
+};
+
+function PriorityPill({ priority }: { priority: JobCard["priority"] }) {
+  return (
+    <span
+      style={{
+        display: "inline-block",
+        fontSize: "11px",
+        fontWeight: 700,
+        color: PRIORITY_PILL_COLORS[priority],
+        border: `1px solid ${PRIORITY_PILL_COLORS[priority]}`,
+        borderRadius: "10px",
+        padding: "1px 8px",
+      }}
+    >
+      {priority}
+    </span>
   );
 }
 
@@ -2228,8 +2250,8 @@ export function JobCardDocContent({
           {[
             ["Project", projectLabel || "—"],
             ["Operation", jobCard.operationType],
+            ["Work Center", jobCard.workCenterName || "—"],
             ["Assigned Employee", jobCard.employeeName || "—"],
-            ["Production Stage", stageLabel ?? "Ad-hoc (no stage)"],
           ].map(([label, value], i) => (
             <div
               key={label}
@@ -2253,11 +2275,64 @@ export function JobCardDocContent({
             fontSize: "12px",
           }}
         >
+          <div style={{ padding: "8px 10px", borderBottom: "1px solid #ddd" }}>
+            <div style={JOB_CARD_LABEL_STYLE}>Production Stage</div>
+            <div style={{ fontWeight: 700, fontSize: "13px", color: "#111" }}>
+              {stageLabel ?? "Ad-hoc (no stage)"}
+            </div>
+          </div>
+          <div
+            style={{
+              padding: "8px 10px",
+              borderLeft: "1px solid #ddd",
+              borderBottom: "1px solid #ddd",
+            }}
+          >
+            <div style={JOB_CARD_LABEL_STYLE}>Start Date</div>
+            <div style={{ fontWeight: 700, fontSize: "13px", color: "#111" }}>
+              {jobCard.startDate
+                ? new Date(jobCard.startDate).toLocaleDateString("en-IN", {
+                    day: "numeric",
+                    month: "short",
+                    year: "numeric",
+                  })
+                : "—"}
+            </div>
+          </div>
+          <div
+            style={{
+              padding: "8px 10px",
+              borderLeft: "1px solid #ddd",
+              borderBottom: "1px solid #ddd",
+            }}
+          >
+            <div style={JOB_CARD_LABEL_STYLE}>Priority</div>
+            <PriorityPill priority={jobCard.priority} />
+          </div>
+          <div
+            style={{
+              padding: "8px 10px",
+              borderLeft: "1px solid #ddd",
+              borderBottom: "1px solid #ddd",
+            }}
+          >
+            <div style={JOB_CARD_LABEL_STYLE}>Active Time</div>
+            <div style={{ fontWeight: 700, color: "#111" }}>
+              {activeTimeDisplay}
+            </div>
+          </div>
+        </div>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr 1fr",
+            fontSize: "12px",
+          }}
+        >
           {(
             [
-              ["Start Time", null],
+              ["Start Time (actual)", null],
               ["Targeted End Time", null],
-              ["Active Time", activeTimeDisplay],
               ["Status", JOB_CARD_STATUS_LABEL[jobCard.status]],
             ] as const
           ).map(([label, value], i) => (
@@ -2285,87 +2360,50 @@ export function JobCardDocContent({
         </div>
       </div>
 
-      {/* WORK INSTRUCTION + PROJECT REFERENCE — the operational text and
-          the small Project photo share one row so the photo never
-          dominates the page (Section "PROJECT REFERENCE" of the brief):
-          bounded to a fixed 92px-wide column, object-fit: contain. The
-          photo column simply doesn't exist when the caller resolved no
-          Project photo — Work Instruction then takes the full width,
-          never a placeholder box. */}
-      <div
-        style={{
-          display: "flex",
-          gap: "12px",
-          marginBottom: "12px",
-        }}
-      >
+      {/* PROJECT REFERENCE PHOTO — identifies the product/project this
+          Job Card belongs to (Section 1, see chat); NOT an evidence or
+          completion photo. Its own compact block, entirely absent when
+          the caller resolved no Project photo — no placeholder box. */}
+      {projectPhotoUrl && (
         <div
           style={{
-            flex: 1,
+            display: "flex",
+            alignItems: "center",
+            gap: "10px",
             border: "1px solid #bbb",
             borderRadius: "3px",
-            padding: "9px 12px",
+            padding: "6px 10px",
+            marginBottom: "12px",
           }}
         >
-          <SectionEyebrow>Work Instruction</SectionEyebrow>
-          <div style={{ fontSize: "13px", color: "#111", lineHeight: 1.4 }}>
-            {jobCard.jobDescription}
+          <img
+            src={projectPhotoUrl}
+            alt="Project reference"
+            style={{
+              display: "block",
+              width: "60px",
+              height: "48px",
+              objectFit: "contain",
+              flexShrink: 0,
+            }}
+          />
+          <div style={{ fontSize: "10px", color: "#777" }}>
+            Project Reference — identifies the overall product
           </div>
         </div>
-        {/* PROJECT REFERENCE PHOTO — identifies the product/project this
-            Job Card belongs to (Section 1, see chat); NOT an evidence or
-            completion photo. Deliberately small/bounded so it can never
-            push the rest of Page 1 onto another page. */}
-        {projectPhotoUrl && (
-          <div
-            style={{
-              width: "92px",
-              flexShrink: 0,
-              border: "1px solid #bbb",
-              borderRadius: "3px",
-              padding: "6px",
-              textAlign: "center",
-            }}
-          >
-            <img
-              src={projectPhotoUrl}
-              alt="Project reference"
-              style={{
-                display: "block",
-                width: "100%",
-                height: "70px",
-                objectFit: "contain",
-                margin: "0 auto",
-              }}
-            />
-            <div
-              style={{
-                fontSize: "8.5px",
-                color: "#777",
-                textTransform: "uppercase",
-                letterSpacing: "0.5px",
-                marginTop: "4px",
-              }}
-            >
-              Project Reference
-            </div>
-          </div>
-        )}
-      </div>
+      )}
 
-      {/* PRODUCTION TARGET — real, server-computed numbers only
-          (Expected Quantity is the GENERATED column, never client math).
-          Deliberately does not repeat Completed/Rejected/Rework as
-          separate blank boxes here — those already live, once, inside
-          the Quality/Inspection manual work record's own row-columns
-          below, so the shop floor fills each real time entry exactly
-          once rather than a redundant summary line first. */}
+      {/* PRODUCTION PLANNING — real, server-computed/persisted numbers
+          only (Expected Quantity is either the GENERATED column or the
+          user's deliberate override — never client math). Total
+          Quantity is a distinct, separately-persisted field, never a
+          substitute for Expected Quantity. */}
       <div style={{ marginBottom: "12px" }}>
-        <SectionEyebrow>Production Target</SectionEyebrow>
+        <SectionEyebrow>Production Planning</SectionEyebrow>
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "1.3fr 1fr 1fr",
+            gridTemplateColumns: "1fr 1.3fr 1fr 1fr",
             border: "1px solid #bbb",
             borderRadius: "3px",
             overflow: "hidden",
@@ -2375,16 +2413,41 @@ export function JobCardDocContent({
             style={{
               padding: "10px 12px",
               textAlign: "center",
+            }}
+          >
+            <div style={{ fontSize: "9.5px", color: "#666" }}>
+              Total Quantity
+            </div>
+            <div style={{ fontSize: "15px", fontWeight: 700, color: "#111" }}>
+              {jobCard.totalQuantity ?? "—"}
+            </div>
+          </div>
+          <div
+            style={{
+              padding: "10px 12px",
+              textAlign: "center",
               background: "#f4f4f4",
+              borderLeft: "1px solid #ddd",
             }}
           >
             <div style={{ fontSize: "9.5px", color: "#666" }}>
               Expected Quantity
             </div>
             <div style={{ fontSize: "26px", fontWeight: 800, color: "#111" }}>
-              {jobCard.expectedQuantity}{" "}
+              {jobCard.expectedQuantityOverride ?? jobCard.expectedQuantity}{" "}
               <span style={{ fontSize: "12px", fontWeight: 600 }}>pcs</span>
             </div>
+            {jobCard.expectedQuantityOverride != null && (
+              <div
+                style={{
+                  fontSize: "8.5px",
+                  color: "#888",
+                  fontStyle: "italic",
+                }}
+              >
+                Edited target
+              </div>
+            )}
           </div>
           <div
             style={{
@@ -2417,105 +2480,99 @@ export function JobCardDocContent({
         </div>
       </div>
 
-      {/* QUALITY / INSPECTION — the physical/paper half of the workflow
-          (same Manual Work Record fields as before this redesign, just
-          reframed under the Quality/Inspection heading the brief asks
-          for). Deliberately plain boxes, not tied to any field — nothing
-          written here is read back into the system; a supervisor later
-          transcribes it into the digital Job Card. */}
-      <div style={{ marginBottom: "14px" }}>
-        <SectionEyebrow>
-          Quality / Inspection — Manual Work Record
-        </SectionEyebrow>
-        <div
-          style={{
-            border: "1px solid #bbb",
-            borderRadius: "3px",
-            padding: "10px 12px",
-          }}
-        >
-          <div
-            style={{
-              fontSize: "10px",
-              color: "#777",
-              marginBottom: "8px",
-            }}
-          >
-            To be filled by hand
-          </div>
+      {/* WORK INSTRUCTION */}
+      <div
+        style={{
+          border: "1px solid #bbb",
+          borderRadius: "3px",
+          padding: "9px 12px",
+          marginBottom: "12px",
+        }}
+      >
+        <SectionEyebrow>Work Instruction</SectionEyebrow>
+        <div style={{ fontSize: "13px", color: "#111", lineHeight: 1.4 }}>
+          {jobCard.jobDescription}
+        </div>
+      </div>
+
+      {/* INSPECTION PLAN (Section 7, see chat) — real, admin-configured
+          checkpoints only. Not connected to project_qms_inspections, no
+          pass/fail semantics, purely printed. Entirely omitted when
+          empty — no generic blank fallback table. */}
+      {jobCard.inspectionPlan.length > 0 && (
+        <div style={{ marginBottom: "14px" }}>
+          <SectionEyebrow>Inspection Plan</SectionEyebrow>
           <table
             style={{
               width: "100%",
               borderCollapse: "collapse",
               fontSize: "12px",
-              marginBottom: "12px",
             }}
           >
             <thead>
               <tr style={{ background: "#eee" }}>
-                {["Time", "Qty Completed", "Rejected", "Rework", "Remarks"].map(
-                  (h) => (
-                    <th
-                      key={h}
-                      style={{
-                        border: "1px solid #999",
-                        padding: "8px",
-                        textAlign: "left",
-                      }}
-                    >
-                      {h}
-                    </th>
-                  ),
-                )}
+                {[
+                  "Checkpoint",
+                  "Trigger Qty",
+                  "Cumulative Qty",
+                  "Sample Qty",
+                  "Insp. Sign",
+                  "QC Sign",
+                ].map((h) => (
+                  <th
+                    key={h}
+                    style={{
+                      border: "1px solid #999",
+                      padding: "6px 8px",
+                      textAlign: "left",
+                    }}
+                  >
+                    {h}
+                  </th>
+                ))}
               </tr>
             </thead>
             <tbody>
-              {BLANK_ROW_KEYS.map((rowKey) => (
-                <tr key={rowKey}>
-                  {BLANK_CELL_KEYS.map((cellKey) => (
-                    <td
-                      key={`${rowKey}-${cellKey}`}
-                      style={{
-                        border: "1px solid #999",
-                        height: "30px",
-                      }}
-                    />
-                  ))}
+              {jobCard.inspectionPlan.map((row) => (
+                <tr key={row.id}>
+                  <td style={{ border: "1px solid #999", padding: "6px 8px" }}>
+                    {row.label}
+                  </td>
+                  <td
+                    style={{
+                      border: "1px solid #999",
+                      padding: "6px 8px",
+                      textAlign: "center",
+                    }}
+                  >
+                    {row.triggerQty}
+                  </td>
+                  <td
+                    style={{
+                      border: "1px solid #999",
+                      padding: "6px 8px",
+                      textAlign: "center",
+                    }}
+                  >
+                    {row.cumulativeQty}
+                  </td>
+                  <td
+                    style={{
+                      border: "1px solid #999",
+                      padding: "6px 8px",
+                      textAlign: "center",
+                    }}
+                  >
+                    {row.sampleQty}
+                  </td>
+                  <td style={{ border: "1px solid #999", height: "26px" }} />
+                  <td style={{ border: "1px solid #999", height: "26px" }} />
                 </tr>
               ))}
             </tbody>
           </table>
-          <div style={{ display: "flex", gap: "24px", fontSize: "12px" }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ color: "#555", marginBottom: "4px" }}>
-                Start Time (actual)
-              </div>
-              <div style={{ borderBottom: "1px solid #555", height: "26px" }} />
-            </div>
-            <div style={{ flex: 1 }}>
-              <div style={{ color: "#555", marginBottom: "4px" }}>
-                Stop / End Time (actual)
-              </div>
-              <div style={{ borderBottom: "1px solid #555", height: "26px" }} />
-            </div>
-          </div>
-          <div style={{ marginTop: "12px" }}>
-            <div
-              style={{ color: "#555", fontSize: "12px", marginBottom: "4px" }}
-            >
-              Remarks / Notes
-            </div>
-            <div style={{ borderBottom: "1px solid #555", height: "26px" }} />
-            <div
-              style={{
-                borderBottom: "1px solid #555",
-                height: "26px",
-                marginTop: "8px",
-              }}
-            />
-          </div>
         </div>
-      </div>
+      )}
 
       {/* RESPONSIBILITY / SIGN-OFF — five distinct roles (Section
           "RESPONSIBILITY / SIGN-OFF" of the brief), same meaning as the

@@ -3478,6 +3478,8 @@ export const JOB_CARD_COLUMNS =
   "start_time, end_time, actual_time_spent_minutes, active_seconds, " +
   "current_run_started_at, status, notes, " +
   "reference_photo_id, print_reference_photo, print_drawing, " +
+  "total_quantity, expected_quantity_override, inspection_plan, " +
+  "work_center_machine_id, work_center_name, priority, start_date, " +
   "created_at, updated_at";
 
 export interface JobCardRow {
@@ -3506,6 +3508,19 @@ export interface JobCardRow {
   reference_photo_id: string | null;
   print_reference_photo: boolean;
   print_drawing: boolean;
+  total_quantity: number | null;
+  expected_quantity_override: number | null;
+  inspection_plan: Array<{
+    id?: string;
+    label: string;
+    triggerQty: number;
+    cumulativeQty: number;
+    sampleQty: number;
+  }> | null;
+  work_center_machine_id: string | null;
+  work_center_name: string | null;
+  priority: string;
+  start_date: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -3538,6 +3553,19 @@ export function transformJobCardRow(row: JobCardRow): JobCard {
     referencePhotoId: row.reference_photo_id ?? undefined,
     printReferencePhoto: row.print_reference_photo ?? false,
     printDrawing: row.print_drawing ?? false,
+    totalQuantity: row.total_quantity ?? undefined,
+    expectedQuantityOverride: row.expected_quantity_override ?? undefined,
+    inspectionPlan: (row.inspection_plan ?? []).map((r, i) => ({
+      id: r.id ?? `${row.id}-insp-${i}`,
+      label: r.label,
+      triggerQty: r.triggerQty,
+      cumulativeQty: r.cumulativeQty,
+      sampleQty: r.sampleQty,
+    })),
+    workCenterMachineId: row.work_center_machine_id ?? undefined,
+    workCenterName: row.work_center_name ?? undefined,
+    priority: (row.priority as JobCard["priority"]) ?? "Normal",
+    startDate: row.start_date ?? undefined,
     createdAt: new Date(row.created_at).getTime(),
     updatedAt: new Date(row.updated_at).getTime(),
   };

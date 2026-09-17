@@ -1,7 +1,3 @@
-import {
-  formatJobCardDuration,
-  getJobCardActiveSeconds,
-} from "../hooks/useJobCardTimer";
 /**
  * Shared document content components.
  * Used as hidden off-screen containers in page files so html2canvas
@@ -1968,37 +1964,33 @@ export function ChallanDocContent({
 //
 // Reuses the exact same existing JobCard row this whole feature is built
 // on — no second Job Card record, no new ledger, no new persistence.
-// Active Time is read straight from the same persisted fields and the
-// same getJobCardActiveSeconds helper the in-app View dialog uses
-// (hooks/useJobCardTimer.ts) — never re-derived or fabricated here.
 //
-// The printed sheet is a blank shop-floor manual record, not a mirror of
-// the digital Job Card's own live progress: Start Time, Targeted End
-// Time, Completed/Rejected/Rework quantities, remarks and both
-// signatures are always printed blank (never pre-filled from `jobCard`,
-// see each block's own comment below) — a supervisor fills these in by
-// hand, then transcribes them back into the digital record. Only
-// Project/Employee/Operation/Production Stage/Expected Quantity/Status
-// and the new "Printed On" timestamp are auto-populated, since those are
-// identifying information rather than the physical work being recorded.
-
-const JOB_CARD_STATUS_LABEL: Record<JobCard["status"], string> = {
-  NotStarted: "Not Started",
-  InProgress: "In Progress",
-  OnHold: "On Hold",
-  Completed: "Completed",
-};
+// A4 physical-sheet redesign (see chat) — laid out to match the
+// proportions of a real shop-floor Job Card: Project info + a large
+// Project Reference Photo share the top band, Production Planning/
+// Actual-Work/Work-Instruction stay compact in the middle, and
+// Inspection Plan gets the majority of the remaining page (one signature
+// pair per checkpoint — see chat, "every inspection needs its own
+// signature"). Deliberately NOT a mirror of the digital Job Card's own
+// live progress: Active Time, Status, and every actual-production value
+// (Start/End Time, Total Time Taken, Received/Completed/Failed/
+// Remaining quantities) are transient app state or handwritten shop-
+// floor data — never printed as a live/zero value, always either the
+// real persisted number (Total Quantity/Time-per-Piece/Allocated Time/
+// Target, each only when actually configured) or a blank ink-fill line.
+// Only Project/Project Code/Operation/Employee/Start Date/Priority and
+// the "Printed On" timestamp are auto-populated, since those are
+// identifying information known at creation time, not the physical work
+// being recorded.
 
 interface JobCardDocProps {
   id: string;
   jobCard: JobCard;
-  /** Already resolved by the caller, e.g. "PROJ-2026-001 — Cut sheet
-   * order" — this component does no project lookup of its own. */
-  projectLabel: string;
-  /** null for an ad-hoc (unlinked) Job Card — rendered as "Ad-hoc (no
-   * stage)" rather than omitted, so the printed sheet is explicit about
-   * it rather than silently blank. */
-  stageLabel: string | null;
+  /** The Project's own code, e.g. "PROJ-2026-001" — printed as its own
+   * "Project Code" row, separate from the Project's name below. */
+  projectCode: string;
+  /** The Project's own name, e.g. "L-Shape Frame" — printed as "Project". */
+  projectName: string;
   settings: Record<string, string>;
   /** The moment this print was generated (client clock, `Date.now()` at
    * render time) — shown as "Printed On" so a supervisor can tell how
@@ -2007,17 +1999,19 @@ interface JobCardDocProps {
    * comment) — a value the caller computes fresh per print, not a field
    * read off `jobCard`. */
   printedAt: number;
+  /** Total physical pages this print will produce (Page 1 + Work
+   * Reference page, if any + one page per linked-drawing sheet, if any)
+   * — computed by the caller, who already knows exactly which of those
+   * are included. Defaults to 1 when omitted. */
+  totalPages?: number;
   /** Job Card print/layout (see chat) — three DIFFERENT photo/drawing
-   * concepts (Section 6 of the spec), never to be mixed:
+   * concepts, never to be mixed:
    *
    * projectPhotoUrl: the PROJECT's own reference photo (identifies the
-   * overall product/project this Job Card belongs to) — small, always
-   * on Page 1, whenever the Project has one. This REPLACES the old
-   * per-Job-Card "Product / Result Photo" block that used to sit here
-   * (that was the employee's own evidence photo, which conflated
-   * evidence with a work instruction — CompleteJobCardDialog/MyJobs.tsx
-   * still capture and show that evidence photo exactly as before, it
-   * just no longer auto-prints on Page 1).
+   * overall product/project this Job Card belongs to) — large, on the
+   * right of the upper band on Page 1, whenever the Project has one.
+   * projectPhotoCaption: that photo's own caption/filename, shown
+   * beneath it, when available.
    *
    * referencePhotoUrl: THIS Job Card's own selected "Work Reference"
    * photo — the expected visual result of the operation, admin-picked
@@ -2026,20 +2020,26 @@ interface JobCardDocProps {
    * on (the caller is responsible for that gate — this component only
    * renders what it's given).
    *
-   * drawingImageDataUrl: the existing linked engineering Drawing,
-   * already composed into its own established print layout by
-   * drawingEditor's own composeLatestView — this component embeds it
-   * as a flat image, it does not render or know anything about
-   * drawings itself (no second drawing renderer). Page 3+, same
-   * caller-side gating as above (printDrawing flag + a link existing).
+   * drawingImages: the existing linked engineering Drawing's pages,
+   * already composed into their own established print layout by
+   * drawingEditor's own composeAllPageViews (one flat image per page,
+   * in order) — this component embeds them, it does not render or know
+   * anything about drawings itself (no second drawing renderer). Page
+   * 3+, one page per image, same caller-side gating as above
+   * (printDrawing flag + a link existing). drawingTitle/Number/Revision
+   * are the linked drawing's own title-block fields (see chat, "show its
+   * actual drawing title") — the page heading falls back to "Engineering
+   * Drawing" only when the drawing has none of them set.
    *
-   * All three are optional and independent; each section simply does
-   * not render when its URL is undefined — a Job Card with none of
-   * them prints byte-for-byte the same single-page layout as before
-   * this feature existed. */
+   * All three groups are optional and independent; each section simply
+   * does not render when nothing was resolved for it. */
   projectPhotoUrl?: string;
+  projectPhotoCaption?: string;
   referencePhotoUrl?: string;
-  drawingImageDataUrl?: string;
+  drawingImages?: string[];
+  drawingTitle?: string;
+  drawingNumber?: string;
+  drawingRevision?: string;
 }
 
 function formatPrintedOn(ms: number): string {
@@ -2118,17 +2118,28 @@ function PriorityPill({ priority }: { priority: JobCard["priority"] }) {
 export function JobCardDocContent({
   id,
   jobCard,
-  projectLabel,
-  stageLabel,
+  projectCode,
+  projectName,
   settings,
   printedAt,
+  totalPages,
   projectPhotoUrl,
+  projectPhotoCaption,
   referencePhotoUrl,
-  drawingImageDataUrl,
+  drawingImages,
+  drawingTitle,
+  drawingNumber,
+  drawingRevision,
 }: JobCardDocProps) {
-  const activeTimeDisplay = formatJobCardDuration(
-    getJobCardActiveSeconds(jobCard),
-  );
+  const pageCount = totalPages ?? 1;
+  // Target for This Job — expectedQuantity is a Postgres GENERATED
+  // column (derived from Allocated Time / Standard Time), always a real
+  // number; expectedQuantityOverride, when set, is the deliberate manual
+  // override. Always printed as a value, never a blank line — same
+  // effective-value rule used everywhere else in this feature
+  // (jobCardCheckpoints.ts, the View dialog).
+  const targetQty =
+    jobCard.expectedQuantityOverride ?? jobCard.expectedQuantity;
 
   return (
     <div
@@ -2140,10 +2151,10 @@ export function JobCardDocContent({
         color: "#1a1a1a",
       }}
     >
-      {/* WHO/WHAT — FabFlow/company identity + the Job Card's own
-          number, always the first thing a shop-floor reader sees. A
-          thin accent bar under the rule (not a colored card) keeps this
-          a manufacturing document rather than a generic printed form. */}
+      {/* HEADER — FabFlow/company identity + the Job Card's own number,
+          always the first thing a shop-floor reader sees. A thin accent
+          bar under the rule keeps this a manufacturing document rather
+          than a generic printed form. */}
       <div
         style={{
           display: "flex",
@@ -2211,9 +2222,10 @@ export function JobCardDocContent({
           </div>
           {/* Printed On — computed by the caller at print-generation time
               (client clock), never the Job Card's own createdAt and
-              never written back to the Job Card. */}
+              never written back to the Job Card. Page count is likewise
+              caller-computed (see JobCardDocProps.totalPages). */}
           <div style={{ fontSize: "10.5px", color: "#666", marginTop: "2px" }}>
-            Printed {formatPrintedOn(printedAt)}
+            Printed {formatPrintedOn(printedAt)} · Page 1 of {pageCount}
           </div>
         </div>
       </div>
@@ -2225,13 +2237,280 @@ export function JobCardDocContent({
         }}
       />
 
-      {/* JOB IDENTIFICATION — one compact 2-row strip combining what was
-          previously two separate boxes (core details + time/status): row
-          1 is real identifying data (Project/Employee/Operation/Stage),
-          row 2 pairs the shop floor's own blank Start/Targeted-End
-          fields with the two values that ARE already known (Active
-          Time, Status) — never pre-filling Start/End from jobCard.start
-          Time/endTime, exactly as before. */}
+      {/* UPPER BAND — Job identification on the left, a LARGE Project
+          Reference Photo on the right (see chat, uploaded A4 reference:
+          the photo is given real visual weight here, not a thumbnail).
+          The left column widens to the full row when there is no photo
+          to show — never a blank placeholder box. */}
+      <div
+        style={{
+          display: "flex",
+          gap: "16px",
+          alignItems: "stretch",
+          marginBottom: "12px",
+        }}
+      >
+        <div
+          style={{
+            flex: projectPhotoUrl ? "0 0 42%" : "1 1 100%",
+            border: "1px solid #bbb",
+            borderRadius: "3px",
+            padding: "10px 12px",
+          }}
+        >
+          {(
+            [
+              ["Project", projectName || "—"],
+              ["Project Code", projectCode || "—"],
+              ["Operation", jobCard.operationType],
+              ["Employee", jobCard.employeeName || "—"],
+              [
+                "Start Date",
+                jobCard.startDate
+                  ? new Date(jobCard.startDate).toLocaleDateString("en-IN", {
+                      day: "numeric",
+                      month: "short",
+                      year: "numeric",
+                    })
+                  : "—",
+              ],
+            ] as const
+          ).map(([label, value]) => (
+            <div
+              key={label}
+              style={{
+                display: "flex",
+                gap: "6px",
+                fontSize: "12.5px",
+                marginBottom: "6px",
+              }}
+            >
+              <div style={{ fontWeight: 700, color: "#333", minWidth: "88px" }}>
+                {label}
+              </div>
+              <div style={{ color: "#111" }}>: {value}</div>
+            </div>
+          ))}
+          <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+            <div
+              style={{
+                fontWeight: 700,
+                color: "#333",
+                minWidth: "88px",
+                fontSize: "12.5px",
+              }}
+            >
+              Priority
+            </div>
+            <div style={{ fontSize: "12.5px" }}>:</div>
+            <PriorityPill priority={jobCard.priority} />
+          </div>
+        </div>
+
+        {/* PROJECT REFERENCE PHOTO — identifies the product/project this
+            Job Card belongs to; NOT an evidence or completion photo.
+            Large and on the right, aspect-ratio preserved (object-fit:
+            contain, never stretched). */}
+        {projectPhotoUrl && (
+          <div
+            style={{
+              flex: "0 0 58%",
+              border: "1px solid #bbb",
+              borderRadius: "3px",
+              padding: "8px 10px 10px",
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+            }}
+          >
+            <div
+              style={{
+                fontSize: "10.5px",
+                fontWeight: 800,
+                color: "#333",
+                textTransform: "uppercase",
+                letterSpacing: "0.8px",
+                marginBottom: "6px",
+                alignSelf: "flex-start",
+              }}
+            >
+              Project Reference Photo
+            </div>
+            <img
+              src={projectPhotoUrl}
+              alt="Project reference"
+              style={{
+                display: "block",
+                width: "100%",
+                maxHeight: "210px",
+                objectFit: "contain",
+                flex: "1 1 auto",
+              }}
+            />
+            {projectPhotoCaption && (
+              <div
+                style={{
+                  fontSize: "11px",
+                  fontWeight: 600,
+                  color: "#555",
+                  marginTop: "6px",
+                }}
+              >
+                {projectPhotoCaption}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* PRODUCTION PLANNING — real, persisted numbers only. Total
+          Quantity is the only one of these four that's genuinely
+          optional (Time per Piece/Allocated Time are required at
+          creation; Target is the GENERATED expectedQuantity or its
+          override) — it alone falls back to a blank ink-fill line when
+          not configured, exactly like the uploaded reference does for
+          whichever of these a given Job Card hasn't set. */}
+      <div style={{ marginBottom: "10px" }}>
+        <SectionEyebrow>Production Planning</SectionEyebrow>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1fr 1fr 1fr 1fr",
+            border: "1px solid #bbb",
+            borderRadius: "3px",
+            overflow: "hidden",
+          }}
+        >
+          {(
+            [
+              ["Total Quantity", jobCard.totalQuantity, "Nos"],
+              ["Time per Piece", jobCard.standardTimePerUnitMinutes, "Min"],
+              ["Allocated Time", jobCard.allocatedTimeMinutes, "Min"],
+              ["Target for This Job", targetQty, "Nos"],
+            ] as const
+          ).map(([label, value, unit], i) => (
+            <div
+              key={label}
+              style={{
+                padding: "8px 10px",
+                textAlign: "center",
+                borderLeft: i > 0 ? "1px solid #ddd" : undefined,
+              }}
+            >
+              <div style={{ fontSize: "9.5px", color: "#666" }}>{label}</div>
+              {value == null ? (
+                <div
+                  style={{
+                    borderBottom: "1px solid #999",
+                    height: "16px",
+                    margin: "4px 10px 2px",
+                  }}
+                />
+              ) : (
+                <div
+                  style={{ fontSize: "15px", fontWeight: 700, color: "#111" }}
+                >
+                  {value}
+                </div>
+              )}
+              <div style={{ fontSize: "9px", color: "#888" }}>{unit}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ACTUAL WORK — Section 3/7: physically handwritten by the
+          employee/supervisor. Never pre-filled from jobCard's own
+          startTime/endTime/activeSeconds/status (those are the DIGITAL
+          record's own live state, not the paper record). */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr 1fr",
+          border: "1px solid #bbb",
+          borderRadius: "3px",
+          overflow: "hidden",
+          marginBottom: "8px",
+          fontSize: "12px",
+        }}
+      >
+        {["Start Time (Actual)", "End Time (Actual)", "Total Time Taken"].map(
+          (label, i) => (
+            <div
+              key={label}
+              style={{
+                padding: "8px 10px",
+                borderLeft: i > 0 ? "1px solid #ddd" : undefined,
+              }}
+            >
+              <div style={JOB_CARD_LABEL_STYLE}>{label}</div>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "baseline",
+                  gap: "6px",
+                }}
+              >
+                <div
+                  style={{
+                    borderBottom: "1px solid #999",
+                    height: "16px",
+                    flex: "1 1 auto",
+                  }}
+                />
+                {label === "Total Time Taken" && (
+                  <span style={{ fontSize: "10px", color: "#888" }}>Min</span>
+                )}
+              </div>
+            </div>
+          ),
+        )}
+      </div>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr 1fr 1fr",
+          border: "1px solid #bbb",
+          borderRadius: "3px",
+          overflow: "hidden",
+          marginBottom: "12px",
+          fontSize: "12px",
+        }}
+      >
+        {[
+          "Total Received / Issued",
+          "Completed OK",
+          "Failed / Rejected",
+          "Remaining",
+        ].map((label, i) => (
+          <div
+            key={label}
+            style={{
+              padding: "8px 10px",
+              borderLeft: i > 0 ? "1px solid #ddd" : undefined,
+            }}
+          >
+            <div style={JOB_CARD_LABEL_STYLE}>{label}</div>
+            <div
+              style={{ display: "flex", alignItems: "baseline", gap: "6px" }}
+            >
+              <div
+                style={{
+                  borderBottom: "1px solid #999",
+                  height: "16px",
+                  flex: "1 1 auto",
+                }}
+              />
+              <span style={{ fontSize: "10px", color: "#888" }}>Nos</span>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* WORK INSTRUCTION — a numbered instruction table (one row per
+          line of jobDescription when the user entered several, else a
+          single numbered row), matching the uploaded reference's table
+          treatment rather than a plain paragraph box. */}
       <div
         style={{
           border: "1px solid #bbb",
@@ -2242,265 +2521,71 @@ export function JobCardDocContent({
       >
         <div
           style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 1fr 1fr",
-            fontSize: "12px",
+            background: "#eef2f7",
+            borderBottom: "1px solid #bbb",
+            padding: "5px 12px",
+            fontSize: "10.5px",
+            fontWeight: 800,
+            color: "#1a1a1a",
+            textTransform: "uppercase",
+            letterSpacing: "0.8px",
           }}
         >
-          {[
-            ["Project", projectLabel || "—"],
-            ["Operation", jobCard.operationType],
-            ["Assigned Employee", jobCard.employeeName || "—"],
-          ].map(([label, value], i) => (
-            <div
-              key={label}
-              style={{
-                padding: "8px 10px",
-                borderLeft: i > 0 ? "1px solid #ddd" : undefined,
-                borderBottom: "1px solid #ddd",
-              }}
-            >
-              <div style={JOB_CARD_LABEL_STYLE}>{label}</div>
-              <div style={{ fontWeight: 700, fontSize: "13px", color: "#111" }}>
-                {value}
-              </div>
-            </div>
-          ))}
+          Work Instruction
         </div>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 1fr 1fr 1fr",
-            fontSize: "12px",
-          }}
-        >
-          <div style={{ padding: "8px 10px", borderBottom: "1px solid #ddd" }}>
-            <div style={JOB_CARD_LABEL_STYLE}>Production Stage</div>
-            <div style={{ fontWeight: 700, fontSize: "13px", color: "#111" }}>
-              {stageLabel ?? "Ad-hoc (no stage)"}
-            </div>
-          </div>
-          <div
-            style={{
-              padding: "8px 10px",
-              borderLeft: "1px solid #ddd",
-              borderBottom: "1px solid #ddd",
-            }}
-          >
-            <div style={JOB_CARD_LABEL_STYLE}>Start Date</div>
-            <div style={{ fontWeight: 700, fontSize: "13px", color: "#111" }}>
-              {jobCard.startDate
-                ? new Date(jobCard.startDate).toLocaleDateString("en-IN", {
-                    day: "numeric",
-                    month: "short",
-                    year: "numeric",
-                  })
-                : "—"}
-            </div>
-          </div>
-          <div
-            style={{
-              padding: "8px 10px",
-              borderLeft: "1px solid #ddd",
-              borderBottom: "1px solid #ddd",
-            }}
-          >
-            <div style={JOB_CARD_LABEL_STYLE}>Priority</div>
-            <PriorityPill priority={jobCard.priority} />
-          </div>
-          <div
-            style={{
-              padding: "8px 10px",
-              borderLeft: "1px solid #ddd",
-              borderBottom: "1px solid #ddd",
-            }}
-          >
-            <div style={JOB_CARD_LABEL_STYLE}>Active Time</div>
-            <div style={{ fontWeight: 700, color: "#111" }}>
-              {activeTimeDisplay}
-            </div>
-          </div>
-        </div>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 1fr 1fr",
-            fontSize: "12px",
-          }}
-        >
-          {(
-            [
-              ["Start Time (actual)", null],
-              ["Targeted End Time", null],
-              ["Status", JOB_CARD_STATUS_LABEL[jobCard.status]],
-            ] as const
-          ).map(([label, value], i) => (
-            <div
-              key={label}
-              style={{
-                padding: "8px 10px",
-                borderLeft: i > 0 ? "1px solid #ddd" : undefined,
-              }}
-            >
-              <div style={JOB_CARD_LABEL_STYLE}>{label}</div>
-              {value === null ? (
-                <div
-                  style={{
-                    borderBottom: "1px solid #999",
-                    height: "16px",
-                    marginTop: "3px",
-                  }}
-                />
-              ) : (
-                <div style={{ fontWeight: 700, color: "#111" }}>{value}</div>
-              )}
-            </div>
-          ))}
-        </div>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <tbody>
+            {(jobCard.jobDescription || "—")
+              .split("\n")
+              .map((line) => line.trim())
+              .filter(Boolean)
+              .map((line, i) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: fixed print snapshot of a plain-text field, never reordered
+                <tr key={i}>
+                  <td
+                    style={{
+                      width: "28px",
+                      padding: "7px 8px",
+                      borderTop: i > 0 ? "1px solid #ddd" : undefined,
+                      textAlign: "center",
+                      color: "#555",
+                      fontSize: "12px",
+                    }}
+                  >
+                    {i + 1}
+                  </td>
+                  <td
+                    style={{
+                      padding: "7px 8px",
+                      borderTop: i > 0 ? "1px solid #ddd" : undefined,
+                      borderLeft: "1px solid #ddd",
+                      fontSize: "12.5px",
+                      color: "#111",
+                    }}
+                  >
+                    {line}
+                  </td>
+                </tr>
+              ))}
+          </tbody>
+        </table>
       </div>
 
-      {/* PROJECT REFERENCE PHOTO — identifies the product/project this
-          Job Card belongs to (Section 1, see chat); NOT an evidence or
-          completion photo. Its own compact block, entirely absent when
-          the caller resolved no Project photo — no placeholder box. */}
-      {projectPhotoUrl && (
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "10px",
-            border: "1px solid #bbb",
-            borderRadius: "3px",
-            padding: "6px 10px",
-            marginBottom: "12px",
-          }}
-        >
-          <img
-            src={projectPhotoUrl}
-            alt="Project reference"
-            style={{
-              display: "block",
-              width: "60px",
-              height: "48px",
-              objectFit: "contain",
-              flexShrink: 0,
-            }}
-          />
-          <div style={{ fontSize: "10px", color: "#777" }}>
-            Project Reference — identifies the overall product
-          </div>
-        </div>
-      )}
-
-      {/* PRODUCTION PLANNING — real, server-computed/persisted numbers
-          only (Expected Quantity is either the GENERATED column or the
-          user's deliberate override — never client math). Total
-          Quantity is a distinct, separately-persisted field, never a
-          substitute for Expected Quantity. */}
-      <div style={{ marginBottom: "12px" }}>
-        <SectionEyebrow>Production Planning</SectionEyebrow>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 1.3fr 1fr 1fr",
-            border: "1px solid #bbb",
-            borderRadius: "3px",
-            overflow: "hidden",
-          }}
-        >
-          <div
-            style={{
-              padding: "10px 12px",
-              textAlign: "center",
-            }}
-          >
-            <div style={{ fontSize: "9.5px", color: "#666" }}>
-              Total Quantity
-            </div>
-            <div style={{ fontSize: "15px", fontWeight: 700, color: "#111" }}>
-              {jobCard.totalQuantity ?? "—"}
-            </div>
-          </div>
-          <div
-            style={{
-              padding: "10px 12px",
-              textAlign: "center",
-              background: "#f4f4f4",
-              borderLeft: "1px solid #ddd",
-            }}
-          >
-            <div style={{ fontSize: "9.5px", color: "#666" }}>
-              Expected Quantity
-            </div>
-            <div style={{ fontSize: "26px", fontWeight: 800, color: "#111" }}>
-              {jobCard.expectedQuantityOverride ?? jobCard.expectedQuantity}{" "}
-              <span style={{ fontSize: "12px", fontWeight: 600 }}>pcs</span>
-            </div>
-            {jobCard.expectedQuantityOverride != null && (
-              <div
-                style={{
-                  fontSize: "8.5px",
-                  color: "#888",
-                  fontStyle: "italic",
-                }}
-              >
-                Edited target
-              </div>
-            )}
-          </div>
-          <div
-            style={{
-              padding: "10px 12px",
-              textAlign: "center",
-              borderLeft: "1px solid #ddd",
-            }}
-          >
-            <div style={{ fontSize: "9.5px", color: "#666" }}>
-              Std Time / Piece
-            </div>
-            <div style={{ fontSize: "15px", fontWeight: 700, color: "#111" }}>
-              {jobCard.standardTimePerUnitMinutes} min
-            </div>
-          </div>
-          <div
-            style={{
-              padding: "10px 12px",
-              textAlign: "center",
-              borderLeft: "1px solid #ddd",
-            }}
-          >
-            <div style={{ fontSize: "9.5px", color: "#666" }}>
-              Allocated Time
-            </div>
-            <div style={{ fontSize: "15px", fontWeight: 700, color: "#111" }}>
-              {jobCard.allocatedTimeMinutes} min
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* WORK INSTRUCTION */}
-      <div
-        style={{
-          border: "1px solid #bbb",
-          borderRadius: "3px",
-          padding: "9px 12px",
-          marginBottom: "12px",
-        }}
-      >
-        <SectionEyebrow>Work Instruction</SectionEyebrow>
-        <div style={{ fontSize: "13px", color: "#111", lineHeight: 1.4 }}>
-          {jobCard.jobDescription}
-        </div>
-      </div>
-
-      {/* INSPECTION PLAN (Section 7, see chat) — real, admin-configured
-          checkpoints only. Not connected to project_qms_inspections, no
-          pass/fail semantics, purely printed. Entirely omitted when
-          empty — no generic blank fallback table. */}
+      {/* INSPECTION PLAN — real, admin-configured checkpoints only, not
+          connected to project_qms_inspections, no pass/fail semantics,
+          purely printed. Deliberately NOT printing Cumulative Qty (see
+          chat — internal ERP triggering math, not a physical shop-floor
+          instruction); "Inspection After" already carries the
+          human-readable delta. Every row gets its OWN Inspector Sign +
+          QC Sign cell (see chat, "every inspection needs its own
+          signature") with real vertical writing room, not one shared
+          signature at the bottom. Entirely omitted when empty — no
+          generic blank fallback table. */}
       {jobCard.inspectionPlan.length > 0 && (
         <div style={{ marginBottom: "14px" }}>
-          <SectionEyebrow>Inspection Plan</SectionEyebrow>
+          <SectionEyebrow>
+            Inspection Plan (As per Total Quantity)
+          </SectionEyebrow>
           <table
             style={{
               width: "100%",
@@ -2514,8 +2599,9 @@ export function JobCardDocContent({
                   "S.No",
                   "Check Point",
                   "Inspection After",
-                  "Cumulative Qty",
                   "To Be Checked",
+                  "Inspector Sign",
+                  "QC Sign",
                 ].map((h) => (
                   <th
                     key={h}
@@ -2534,13 +2620,13 @@ export function JobCardDocContent({
               {[...jobCard.inspectionPlan]
                 .sort((a, b) => a.cumulativeQty - b.cumulativeQty)
                 .map((row, i, sorted) => {
-                  // "Inspection After" wording (Part 10, see chat):
-                  // the FIRST row reads "N Nos" (from zero); the LAST
-                  // row (always Final, when configured via the Create/
-                  // Edit checkpoint UI) reads "Remaining N Nos"; every
-                  // row in between reads "Next N Nos" — all derived
-                  // from row.triggerQty (already the delta from the
-                  // previous checkpoint), never re-computed here.
+                  // "Inspection After" wording (see chat): the FIRST row
+                  // reads "N Nos" (from zero); the LAST row (always
+                  // Final, when configured via the Create/Edit checkpoint
+                  // UI) reads "Remaining N Nos"; every row in between
+                  // reads "Next N Nos" — all derived from
+                  // row.triggerQty (already the delta from the previous
+                  // checkpoint), never re-computed here.
                   const isFirst = i === 0;
                   const isLast = i === sorted.length - 1;
                   const afterWording = isFirst
@@ -2553,40 +2639,49 @@ export function JobCardDocContent({
                       <td
                         style={{
                           border: "1px solid #999",
-                          padding: "6px 8px",
+                          padding: "13px 8px",
                           textAlign: "center",
                         }}
                       >
                         {i + 1}
                       </td>
                       <td
-                        style={{ border: "1px solid #999", padding: "6px 8px" }}
+                        style={{
+                          border: "1px solid #999",
+                          padding: "13px 8px",
+                        }}
                       >
                         {row.label}
                       </td>
                       <td
-                        style={{ border: "1px solid #999", padding: "6px 8px" }}
+                        style={{
+                          border: "1px solid #999",
+                          padding: "13px 8px",
+                        }}
                       >
                         {afterWording}
                       </td>
                       <td
                         style={{
                           border: "1px solid #999",
-                          padding: "6px 8px",
+                          padding: "13px 8px",
                           textAlign: "center",
                         }}
                       >
-                        {row.cumulativeQty}
+                        {row.sampleQty} Nos
                       </td>
                       <td
                         style={{
                           border: "1px solid #999",
-                          padding: "6px 8px",
-                          textAlign: "center",
+                          padding: "13px 8px",
                         }}
-                      >
-                        {row.sampleQty}
-                      </td>
+                      />
+                      <td
+                        style={{
+                          border: "1px solid #999",
+                          padding: "13px 8px",
+                        }}
+                      />
                     </tr>
                   );
                 })}
@@ -2708,7 +2803,8 @@ export function JobCardDocContent({
               EXPECTED RESULT
             </div>
             <div style={{ fontSize: "12px", color: "#555", marginTop: "8px" }}>
-              {jobCard.jobNo} · {projectLabel} · {jobCard.operationType}
+              {jobCard.jobNo} · {projectCode} — {projectName} ·{" "}
+              {jobCard.operationType}
             </div>
           </div>
           <div
@@ -2735,41 +2831,64 @@ export function JobCardDocContent({
         </div>
       )}
 
-      {/* PAGE 3+ — Linked Drawing (Section 4/5, see chat). Reuses the
-          existing Drawing Editor's own composed print layout as a flat
-          image (resolved by the caller via composeLatestView) — no
-          second drawing renderer, no drawing data duplicated here. Only
-          when the caller resolved an image AND printDrawing is on. */}
-      {drawingImageDataUrl && (
-        <div style={{ pageBreakBefore: "always", paddingTop: "20px" }}>
+      {/* PAGE 3+ — Linked Drawing, one page per composed sheet (see
+          chat — multi-page drawings must print all their pages, not
+          just the most-recently-edited one). Reuses the existing
+          Drawing Editor's own composed print layout as flat images
+          (resolved by the caller via composeAllPageViews) — no second
+          drawing renderer, no drawing data duplicated here. Only when
+          the caller resolved at least one image AND printDrawing is on.
+          The heading shows the drawing's own title/number/revision
+          (from its title block) when available, falling back to the
+          generic "Engineering Drawing" only when none of those were
+          set. */}
+      {drawingImages &&
+        drawingImages.length > 0 &&
+        drawingImages.map((imgUrl, i) => (
           <div
-            style={{
-              borderBottom: "2px solid #1a1a1a",
-              paddingBottom: "10px",
-              marginBottom: "16px",
-            }}
+            // biome-ignore lint/suspicious/noArrayIndexKey: fixed print snapshot of an ordered page list, never reordered
+            key={i}
+            style={{ pageBreakBefore: "always", paddingTop: "20px" }}
           >
             <div
-              style={{ fontSize: "18px", fontWeight: 800, color: "#1a1a1a" }}
+              style={{
+                borderBottom: "2px solid #1a1a1a",
+                paddingBottom: "10px",
+                marginBottom: "16px",
+              }}
             >
-              Engineering Drawing
+              <div
+                style={{
+                  fontSize: "18px",
+                  fontWeight: 800,
+                  color: "#1a1a1a",
+                }}
+              >
+                {drawingTitle || "Engineering Drawing"}
+                {drawingNumber ? ` · ${drawingNumber}` : ""}
+                {drawingRevision ? ` · Rev ${drawingRevision}` : ""}
+              </div>
+              <div
+                style={{ fontSize: "12px", color: "#555", marginTop: "4px" }}
+              >
+                {jobCard.jobNo} · {projectCode} — {projectName}
+                {drawingImages.length > 1
+                  ? ` · Sheet ${i + 1} of ${drawingImages.length}`
+                  : ""}
+              </div>
             </div>
-            <div style={{ fontSize: "12px", color: "#555", marginTop: "4px" }}>
-              {jobCard.jobNo} · {projectLabel}
-            </div>
+            <img
+              src={imgUrl}
+              alt={`Linked engineering drawing${drawingImages.length > 1 ? ` — sheet ${i + 1}` : ""}`}
+              style={{
+                display: "block",
+                width: "100%",
+                maxHeight: "260mm",
+                objectFit: "contain",
+              }}
+            />
           </div>
-          <img
-            src={drawingImageDataUrl}
-            alt="Linked engineering drawing"
-            style={{
-              display: "block",
-              width: "100%",
-              maxHeight: "260mm",
-              objectFit: "contain",
-            }}
-          />
-        </div>
-      )}
+        ))}
     </div>
   );
 }

@@ -38,8 +38,9 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
+import { getViewsForDrawing } from "@/drawingEditor/api/drawings";
 import { findWorkingDrawing } from "@/drawingEditor/lib/drawingTree";
-import { composeLatestView } from "@/drawingEditor/lib/workOrderPreview";
+import { composeAllPageViews } from "@/drawingEditor/lib/workOrderPreview";
 import { useDrawingEditorStore } from "@/drawingEditor/store/useDrawingEditorStore";
 import {
   ClipboardList,
@@ -885,10 +886,6 @@ export function JobCards({
           .flatMap((pp) => pp.stages)
           .find((s) => s.stageId === stageId)?.stageName
       : undefined;
-  const projectLabel = (id: string) => {
-    const p = projects.find((x) => x.id === id);
-    return p ? `${p.projectNo} — ${p.projectName}` : "—";
-  };
 
   // Feature: Printable Job Card — physical/paper copy of this exact,
   // existing Job Card record for shop-floor employees without a phone or
@@ -900,21 +897,28 @@ export function JobCards({
   // and nothing here writes to the Job Card or any other table — it only
   // reads the same fields the View dialog above already reads.
   async function handlePrintJobCard(jc: JobCard) {
-    // Job Card print/layout (see chat, Sections 1/3/4/5/9) — resolves
-    // THREE independent, optional images, all BEFORE the synchronous
-    // flushSync render below (an <img> written into a popup via
-    // innerHTML has no chance to await anything itself, same reasoning
-    // settings.companyLogo is already ready-to-use by the time it
-    // reaches JobCardDocContent):
+    // Job Card print/layout (see chat) — resolves THREE independent,
+    // optional images, all BEFORE the synchronous flushSync render below
+    // (an <img> written into a popup via innerHTML has no chance to
+    // await anything itself, same reasoning settings.companyLogo is
+    // already ready-to-use by the time it reaches JobCardDocContent):
     //
     // 1. Project Reference Photo — always resolved when the Project has
-    //    one (Page 1, small); never duplicated into the Job Card's own
-    //    asset_photos. Same resolveProjectPhotoUrl the Create/Edit form
-    //    and View dialog use above — one resolver, not a third copy.
-    const projectPhotoUrl = await resolveProjectPhotoUrl(
-      jc.projectId,
-      assetPhotos,
+    //    one (Page 1, large, right side of the upper band); never
+    //    duplicated into the Job Card's own asset_photos. Found directly
+    //    here (not via the shared resolveProjectPhotoUrl) because the
+    //    print layout also needs the photo's own caption, which that
+    //    shared resolver's other two callers (Create/Edit form, View
+    //    dialog) don't need.
+    const projectPhoto = (assetPhotos || []).find(
+      (p) =>
+        p.ownerType === "project" && p.ownerId === jc.projectId && p.isPrimary,
     );
+    const projectPhotoUrl = projectPhoto
+      ? await getAssetPhotoSignedUrl(resolveCoverStoragePath(projectPhoto))
+      : null;
+    const projectPhotoCaption =
+      projectPhoto?.caption || projectPhoto?.originalFilename || undefined;
 
     // 2. Job Card Reference Photo ("Work Reference") — only resolved
     //    when both a photo is selected AND printReferencePhoto is on;
@@ -928,13 +932,21 @@ export function JobCards({
       : null;
 
     // 3. Linked Drawing — reuses the Drawing Editor's own existing
-    //    composeLatestView (no second drawing renderer, no duplicated
-    //    drawing data), same Original -> Working Drawing resolution
+    //    composeAllPageViews (one composed image PER PAGE of the
+    //    drawing, no second drawing renderer, no duplicated drawing
+    //    data), same Original -> Working Drawing resolution
     //    DrawingEditorPage.tsx's own handlePrintDrawing performs before
     //    printing. Only attempted when printDrawing is on AND a link
-    //    exists; a drawing that was never saved (composeLatestView
-    //    returns null) just means no Page 3, not an error.
-    let drawingImageDataUrl: string | undefined;
+    //    exists; a drawing that was never saved (no views at all) just
+    //    means no Page 3+, not an error. Title/number/revision are read
+    //    straight off the first page's own title block (partName/
+    //    partNo/revision) — the same fields already baked into each
+    //    composed page image itself — so the Job Card page heading
+    //    shows the real drawing identity instead of a generic label.
+    let drawingImages: string[] = [];
+    let drawingTitle: string | undefined;
+    let drawingNumber: string | undefined;
+    let drawingRevision: string | undefined;
     if (jc.printDrawing) {
       const link = (drawingLinks || []).find(
         (l) => l.linkedType === "job_card" && l.linkedId === jc.id,
@@ -949,11 +961,21 @@ export function JobCards({
           drawing.id,
           useDrawingEditorStore.getState().drawings,
         );
-        const canvas = await composeLatestView(working ?? drawing, {
+        const target = working ?? drawing;
+        const canvases = await composeAllPageViews(target, {
           companyName: settings.companyName || "Your Company",
           companyLogoDataUrl: settings.companyLogo || undefined,
         });
-        if (canvas) drawingImageDataUrl = canvas.toDataURL("image/png");
+        drawingImages = canvases.map((c) => c.toDataURL("image/png"));
+        const views = await getViewsForDrawing(target.id);
+        const firstPageView = [...views].sort(
+          (a, b) => a.pageNumber - b.pageNumber,
+        )[0];
+        if (firstPageView) {
+          drawingTitle = firstPageView.titleBlock.partName || undefined;
+          drawingNumber = firstPageView.titleBlock.partNo || undefined;
+          drawingRevision = firstPageView.titleBlock.revision || undefined;
+        }
       }
     }
 
@@ -967,18 +989,29 @@ export function JobCards({
     // own createdAt — computed here, once, right before rendering the
     // print document, and never written back to `jc` or Supabase.
     const printedAt = Date.now();
+    // Page 1 (Job Card core) + Work Reference (if included) + one page
+    // per composed drawing sheet (if included) — computed here since
+    // this is the one place that already knows the final resolved state
+    // of all three.
+    const totalPages = 1 + (referencePhotoUrl ? 1 : 0) + drawingImages.length;
+    const project = projects.find((p) => p.id === jc.projectId);
     flushSync(() => {
       root.render(
         <JobCardDocContent
           id={docId}
           jobCard={jc}
-          projectLabel={projectLabel(jc.projectId)}
-          stageLabel={stageName(jc.stageId) ?? null}
+          projectCode={project?.projectNo || "—"}
+          projectName={project?.projectName || "—"}
           settings={settings as unknown as Record<string, string>}
           printedAt={printedAt}
+          totalPages={totalPages}
           projectPhotoUrl={projectPhotoUrl ?? undefined}
+          projectPhotoCaption={projectPhotoCaption}
           referencePhotoUrl={referencePhotoUrl ?? undefined}
-          drawingImageDataUrl={drawingImageDataUrl}
+          drawingImages={drawingImages.length > 0 ? drawingImages : undefined}
+          drawingTitle={drawingTitle}
+          drawingNumber={drawingNumber}
+          drawingRevision={drawingRevision}
         />,
       );
     });
@@ -1870,6 +1903,7 @@ export function JobCards({
           linkedDrawingIds={currentLinkedDrawingIds}
           onAdd={handleAddDrawingLink}
           onRemove={handleRemoveDrawingLink}
+          projectId={form.projectId || undefined}
           data-ocid="jobcards.form.drawing_link_picker"
         />
       </div>

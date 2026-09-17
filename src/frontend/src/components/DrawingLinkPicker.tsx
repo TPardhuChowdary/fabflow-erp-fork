@@ -41,6 +41,12 @@ interface Props {
   onRemove: (drawingId: string) => void;
   disabled?: boolean;
   "data-ocid"?: string;
+  /** When set, shows a "Project Design Files" quick-add list above the
+   * repository search — the drawings already attached to THIS project
+   * (ownerType "project", ownerId === projectId), one click to link
+   * without re-uploading or searching. Reuses the same already-loaded
+   * `drawings` list the search below reads — no second query. */
+  projectId?: string;
 }
 
 export function DrawingLinkPicker({
@@ -49,6 +55,7 @@ export function DrawingLinkPicker({
   onRemove,
   disabled,
   "data-ocid": dataOcid,
+  projectId,
 }: Props) {
   const { drawings, loaded, loadDrawings } = useDrawingEditorStore();
   const [open, setOpen] = useState(false);
@@ -61,6 +68,11 @@ export function DrawingLinkPicker({
 
   const linkedSet = new Set(linkedDrawingIds);
   const available = (drawings || []).filter((d) => !linkedSet.has(d.id));
+  const projectDrawings = projectId
+    ? available.filter(
+        (d) => d.ownerType === "project" && d.ownerId === projectId,
+      )
+    : [];
 
   const trimmedSearch = search.trim().toLowerCase();
   const filtered = (
@@ -113,6 +125,29 @@ export function DrawingLinkPicker({
                 </button>
               )}
             </div>
+          ))}
+        </div>
+      )}
+
+      {!disabled && projectDrawings.length > 0 && (
+        <div className="space-y-1">
+          <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
+            Project Design Files
+          </div>
+          {projectDrawings.map((d) => (
+            <button
+              type="button"
+              key={d.id}
+              onClick={() => onAdd(d.id)}
+              className="flex w-full items-center justify-between gap-2 rounded-md border px-2 py-1.5 text-xs hover:bg-muted/50"
+              data-ocid={`${dataOcid}.project_file_row`}
+            >
+              <span className="flex items-center gap-1.5 min-w-0">
+                <FileText className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                <span className="truncate">{d.fileName}</span>
+              </span>
+              <Plus className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+            </button>
           ))}
         </div>
       )}

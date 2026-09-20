@@ -2483,6 +2483,38 @@ export function JobCards({
                   </Button>
                 </div>
               </DialogHeader>
+              {/* Sign-Off Status (Part 11, see chat) — supplements the
+                  aggregate "To Be Fulfilled" badge above with per-role
+                  detail, read-only. Reuses the same persisted name fields
+                  the print template and Edit form already read; no new
+                  fetch, no persistence, no change to
+                  needsSignOffFulfillment itself. */}
+              <div
+                className="rounded-md border p-2.5 grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs"
+                data-ocid="jobcards.view.signoff_status"
+              >
+                {(
+                  [
+                    ["Prepared By", viewCard.preparedByName],
+                    ["Assigned By", viewCard.assignedByEmployeeName],
+                    ["In-Process Check", viewCard.inProcessCheckEmployeeName],
+                    ["QC Approved By", viewCard.qcApprovedByEmployeeName],
+                  ] as const
+                ).map(([label, name]) => (
+                  <div key={label} className="flex justify-between gap-2">
+                    <span className="text-muted-foreground">{label}</span>
+                    <span
+                      className={
+                        name
+                          ? "font-medium text-right"
+                          : "text-warning text-right"
+                      }
+                    >
+                      {name || "Pending"}
+                    </span>
+                  </div>
+                ))}
+              </div>
               {/* Project Reference Photo — small, identifies the
                   product/project (Section 1, see chat), not an evidence
                   photo. Entirely absent when the Project has no photo —

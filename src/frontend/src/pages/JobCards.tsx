@@ -44,7 +44,10 @@ import {
 } from "@/drawingEditor/api/drawings";
 import { findWorkingDrawing } from "@/drawingEditor/lib/drawingTree";
 import { loadPdf, renderPageToCanvas } from "@/drawingEditor/lib/pdfRenderer";
-import { composeAllPageViews } from "@/drawingEditor/lib/workOrderPreview";
+import {
+  composeAllPageViews,
+  composeOntoA4Page,
+} from "@/drawingEditor/lib/workOrderPreview";
 import { useDrawingEditorStore } from "@/drawingEditor/store/useDrawingEditorStore";
 import {
   ClipboardList,
@@ -162,13 +165,50 @@ async function resolveProjectPhotoUrl(
   return getAssetPhotoSignedUrl(resolveCoverStoragePath(photo));
 }
 
-function blobToDataUrl(blob: Blob): Promise<string> {
+// Rasterizes an image Blob onto a canvas so it can go through
+// composeOntoA4Page the same way a rendered PDF page does (see chat,
+// "compose all drawings cleanly on A4") — an image drawing needs the
+// same proportional-fit treatment a PDF page gets, not just an
+// unconstrained <img>.
+function blobToCanvas(blob: Blob): Promise<HTMLCanvasElement> {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      canvas.getContext("2d")?.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+      resolve(canvas);
+    };
+    img.onerror = (e) => {
+      URL.revokeObjectURL(url);
+      reject(e);
+    };
+    img.src = url;
   });
+}
+
+// "To Be Fulfilled" fulfillment check (see chat) — the exact same
+// predicate the Edit form's own reminder already used (Assigned By/
+// In-Process Check/QC Approved By all set), extracted so the list/View
+// dialog can show the same reminder next to a Job Card's identity
+// instead of inside the Create form, without duplicating the rule.
+// Status only, never validation — these three fields stay optional.
+function needsSignOffFulfillment(
+  jc: Pick<
+    JobCard,
+    | "assignedByEmployeeId"
+    | "inProcessCheckEmployeeId"
+    | "qcApprovedByEmployeeId"
+  >,
+): boolean {
+  return !(
+    jc.assignedByEmployeeId &&
+    jc.inProcessCheckEmployeeId &&
+    jc.qcApprovedByEmployeeId
+  );
 }
 
 function statusCls(status: JobCardStatus) {
@@ -329,6 +369,20 @@ export function JobCards({
     useState<File | null>(null);
   const [pendingReferencePhotoPreviewUrl, setPendingReferencePhotoPreviewUrl] =
     useState<string | null>(null);
+  // Create-mode preview enlargement (see chat, "Reference Photo should
+  // use Project Photo workflow") — AssetPhotoGallery's own preview
+  // dialog operates on a persisted AssetPhoto row (photo.id), which a
+  // staged pre-save File genuinely doesn't have yet, so it can't be
+  // reused directly here. This is the smallest safe adapter: the same
+  // enlarge-on-click affordance, built from the same Dialog primitive
+  // already used throughout this file, with none of the AI/cover-variant
+  // actions that require a real row — those become available the moment
+  // Create flushes this file into a real asset_photos row and the user
+  // reopens Edit, which already renders the full AssetPhotoGallery.
+  const [
+    pendingReferencePhotoPreviewOpen,
+    setPendingReferencePhotoPreviewOpen,
+  ] = useState(false);
   const [pendingDrawingIds, setPendingDrawingIds] = useState<string[]>([]);
 
   // Reference Photo vs Evidence Photo separation (Edit mode) — asset_photos
@@ -1041,7 +1095,8 @@ export function JobCards({
           try {
             const blob = target.pdfBlob ?? (await getDrawingPdfBlob(target.id));
             if (target.sourceKind === "image") {
-              pageUrls = [await blobToDataUrl(blob)];
+              const imgCanvas = await blobToCanvas(blob);
+              pageUrls = [composeOntoA4Page(imgCanvas).toDataURL("image/png")];
             } else if (target.sourceKind !== "dxf") {
               // Absent sourceKind means "pdf" (pre-Phase-34 rows), same
               // convention DrawingDocument.sourceKind's own doc comment
@@ -1049,9 +1104,18 @@ export function JobCards({
               const pdf = await loadPdf(blob);
               for (let p = 1; p <= pdf.numPages; p++) {
                 const page = await pdf.getPage(p);
-                const canvas = document.createElement("canvas");
-                await renderPageToCanvas(page, canvas, 2);
-                pageUrls.push(canvas.toDataURL("image/png"));
+                const rawCanvas = document.createElement("canvas");
+                await renderPageToCanvas(page, rawCanvas, 2);
+                // Composed onto a fixed A4 portrait page (see chat,
+                // "compose all drawings cleanly on A4") — a source PDF
+                // page can be any sheet size/orientation (A1-A4,
+                // portrait or landscape); this fits it proportionally
+                // inside a consistent printable rectangle instead of
+                // letting the raw page dimensions dictate how large or
+                // small it prints relative to the rest of the document.
+                pageUrls.push(
+                  composeOntoA4Page(rawCanvas).toDataURL("image/png"),
+                );
               }
             }
           } catch {
@@ -1277,6 +1341,21 @@ export function JobCards({
       setAddOpen(false);
 
       const attachmentErrors: string[] = [];
+      // Option A (see chat, "Reference Photo should use Project Photo
+      // workflow") — a staged Reference Photo has no AI/background-
+      // editing available yet (requestAssetPhotoProcessing needs a real
+      // asset_photos.id, which doesn't exist until the flush below
+      // succeeds). Rather than build a second, pre-save-capable
+      // processing path, the smallest safe fix is continuing straight
+      // into the EXISTING Edit flow — the exact same AssetPhotoGallery
+      // Edit already renders — the moment a real, persisted photo
+      // exists. Only set true once the photo has actually been
+      // uploaded AND linked; a failed attach must never open Edit as
+      // though the workflow completed (the existing error toast below,
+      // "You can retry from Edit," already tells the user how to finish
+      // manually in that case).
+      const hadPendingReferencePhoto = !!pendingReferencePhotoFile;
+      let referencePhotoAttached = false;
 
       // Flush the staged Reference Photo, then attach its real asset_photos
       // id to the Job Card. A failure never rolls back or duplicates the
@@ -1338,6 +1417,7 @@ export function JobCards({
             if (patched.status === "success" && patched.data) {
               created = patched.data;
               updateJobCard(created);
+              referencePhotoAttached = true;
             } else {
               attachmentErrors.push(
                 patched.error || "the reference photo could not be linked",
@@ -1381,6 +1461,19 @@ export function JobCards({
         );
       } else {
         toast.success(`${created.jobNo} created`);
+      }
+
+      // Option A transition (see chat) — only once the Reference Photo
+      // has genuinely been persisted (uploaded AND linked to this Job
+      // Card); a failed/absent attach falls through to the ordinary
+      // "just created" state, exactly as before this change, with the
+      // error toast above (when applicable) already telling the user
+      // they can finish from Edit themselves. openEdit(created) is the
+      // SAME function every existing "Edit" click already calls — no
+      // new dialog, no new AssetPhotoGallery usage, just reached
+      // automatically instead of requiring a manual click.
+      if (hadPendingReferencePhoto && referencePhotoAttached) {
+        openEdit(created);
       }
     } finally {
       setIsSaving(false);
@@ -1546,32 +1639,32 @@ export function JobCards({
               )}
             </SelectContent>
           </Select>
-          {/* "To Be Fulfilled" reminder (see chat, Part 8) — a status
-              only, never validation: Assigned By / In-Process Check / QC
-              Approved By are genuinely optional follow-up fields (see
-              their own emptyForm comment) and this never blocks Create/
-              Save. Purely a calculated hint so a supervisor can tell,
-              at a glance, that some sign-off details are still pending
-              without FabFlow forcing them to fill anything in now. */}
-          {!(
-            form.assignedByEmployeeId &&
-            form.inProcessCheckEmployeeId &&
-            form.qcApprovedByEmployeeId
-          ) ? (
-            <p
-              className="text-[10px] text-warning mt-1"
-              data-ocid="jobcards.form.to_be_fulfilled"
-            >
-              ⚠ To Be Fulfilled — some sign-off details are still pending
-            </p>
-          ) : (
-            <p
-              className="text-[10px] text-success mt-1"
-              data-ocid="jobcards.form.to_be_fulfilled"
-            >
-              ✓ Sign-off details complete
-            </p>
-          )}
+          {/* "To Be Fulfilled" reminder (see chat) — Edit-only. A brand
+              new Job Card trivially has all three fields blank, so
+              showing this in the Create flow is never useful — it's
+              purely a calculated hint, once the Job Card exists, that a
+              supervisor can glance at while editing. Never validation:
+              Assigned By/In-Process Check/QC Approved By stay optional
+              and this never blocks Create or Save either way. The same
+              reminder now also shows beside the Job Card's own number
+              wherever Job Cards are listed/identified (list rows, View
+              dialog) — see needsSignOffFulfillment. */}
+          {editCard &&
+            (needsSignOffFulfillment(form) ? (
+              <p
+                className="text-[10px] text-warning mt-1"
+                data-ocid="jobcards.form.to_be_fulfilled"
+              >
+                ⚠ To Be Fulfilled — some sign-off details are still pending
+              </p>
+            ) : (
+              <p
+                className="text-[10px] text-success mt-1"
+                data-ocid="jobcards.form.to_be_fulfilled"
+              >
+                ✓ Sign-off details complete
+              </p>
+            ))}
         </div>
       </div>
 
@@ -1950,11 +2043,19 @@ export function JobCards({
               />
               {pendingReferencePhotoPreviewUrl ? (
                 <div className="flex items-center gap-2">
-                  <img
-                    src={pendingReferencePhotoPreviewUrl}
-                    alt="Staged work reference"
-                    className="h-16 w-16 object-contain rounded border"
-                  />
+                  <button
+                    type="button"
+                    onClick={() => setPendingReferencePhotoPreviewOpen(true)}
+                    className="rounded border overflow-hidden"
+                    title="Click to preview"
+                    data-ocid="jobcards.form.pending_reference_photo_preview_trigger"
+                  >
+                    <img
+                      src={pendingReferencePhotoPreviewUrl}
+                      alt="Staged work reference"
+                      className="h-16 w-16 object-contain"
+                    />
+                  </button>
                   <Button
                     type="button"
                     variant="outline"
@@ -1979,6 +2080,26 @@ export function JobCards({
                   <Plus className="w-3.5 h-3.5 mr-1" /> Add Photo
                 </Button>
               )}
+              <Dialog
+                open={pendingReferencePhotoPreviewOpen}
+                onOpenChange={setPendingReferencePhotoPreviewOpen}
+              >
+                <DialogContent
+                  className="max-w-2xl"
+                  data-ocid="jobcards.form.pending_reference_photo_preview_dialog"
+                >
+                  <DialogHeader>
+                    <DialogTitle>Reference Photo Preview</DialogTitle>
+                  </DialogHeader>
+                  {pendingReferencePhotoPreviewUrl && (
+                    <img
+                      src={pendingReferencePhotoPreviewUrl}
+                      alt="Staged work reference — full preview"
+                      className="max-h-[70vh] w-full object-contain rounded border"
+                    />
+                  )}
+                </DialogContent>
+              </Dialog>
             </div>
           )}
         </div>
@@ -2175,6 +2296,15 @@ export function JobCards({
                     <span className="flex items-center gap-1.5">
                       <ClipboardList className="w-3.5 h-3.5 text-muted-foreground" />
                       {jc.jobNo}
+                      {needsSignOffFulfillment(jc) && (
+                        <span
+                          className="text-[10px] font-sans font-normal text-warning whitespace-nowrap"
+                          data-ocid="jobcards.list.to_be_fulfilled"
+                          title="Some sign-off details are still pending"
+                        >
+                          ⚠ To Be Fulfilled
+                        </span>
+                      )}
                     </span>
                   </TableCell>
                   <TableCell className="font-mono text-xs">
@@ -2331,7 +2461,18 @@ export function JobCards({
             <>
               <DialogHeader>
                 <div className="flex items-center justify-between gap-2">
-                  <DialogTitle>{viewCard.jobNo}</DialogTitle>
+                  <div className="flex items-center gap-2">
+                    <DialogTitle>{viewCard.jobNo}</DialogTitle>
+                    {needsSignOffFulfillment(viewCard) && (
+                      <span
+                        className="text-[10px] font-normal text-warning whitespace-nowrap"
+                        data-ocid="jobcards.view.to_be_fulfilled"
+                        title="Some sign-off details are still pending"
+                      >
+                        ⚠ To Be Fulfilled
+                      </span>
+                    )}
+                  </div>
                   <Button
                     variant="ghost"
                     size="sm"

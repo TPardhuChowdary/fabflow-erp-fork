@@ -76,6 +76,49 @@ export async function composeAllPageViews(
   return Promise.all(ordered.map((v) => composeViewCanvas(v, company)));
 }
 
+// A4 portrait at ~150 DPI — matches this codebase's own print pages
+// (documentRenderers.tsx's Job Card content renders into the same
+// physical A4 sheet via @page{size:A4}), so a composed drawing page
+// sits at a consistent physical size relative to the rest of the
+// printed document. Margin is a plain ~10mm, matching the Job Card
+// print's own @page margin (15mm) closely enough for a full-bleed
+// technical drawing without a second unit system to reconcile.
+const A4_PAGE_WIDTH = 1240;
+const A4_PAGE_HEIGHT = 1754;
+const A4_PAGE_MARGIN = 60;
+
+/** Composes any source canvas — any aspect ratio, any native size — onto
+ * a fixed A4 portrait page: scaled down or up proportionally to fit
+ * inside the printable rectangle (page size minus margins), never
+ * stretched/distorted, centered both ways (see chat, "compose all
+ * drawings cleanly on A4"). Used only by the raw-original drawing
+ * fallback below — composeFinalCanvas's own output (the saved-view
+ * path) is already a complete, professionally laid-out A4 sheet with
+ * its own title block and margins, and must NOT be re-composed through
+ * this a second time. */
+export function composeOntoA4Page(
+  source: HTMLCanvasElement,
+): HTMLCanvasElement {
+  const out = document.createElement("canvas");
+  out.width = A4_PAGE_WIDTH;
+  out.height = A4_PAGE_HEIGHT;
+  const ctx = out.getContext("2d");
+  if (!ctx) return source;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, A4_PAGE_WIDTH, A4_PAGE_HEIGHT);
+
+  const maxW = A4_PAGE_WIDTH - A4_PAGE_MARGIN * 2;
+  const maxH = A4_PAGE_HEIGHT - A4_PAGE_MARGIN * 2;
+  const scale = Math.min(maxW / source.width, maxH / source.height);
+  const drawW = source.width * scale;
+  const drawH = source.height * scale;
+  const x = (A4_PAGE_WIDTH - drawW) / 2;
+  const y = (A4_PAGE_HEIGHT - drawH) / 2;
+
+  ctx.drawImage(source, x, y, drawW, drawH);
+  return out;
+}
+
 /** Prints exactly what a Preview dialog would show for a drawing —
  * composed fresh from its latest saved state, no dialog in between.
  * Returns false (and prints nothing) if the drawing has never been saved. */

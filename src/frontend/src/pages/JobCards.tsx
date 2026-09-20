@@ -38,8 +38,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
-import { getViewsForDrawing } from "@/drawingEditor/api/drawings";
+import {
+  getDrawingPdfBlob,
+  getViewsForDrawing,
+} from "@/drawingEditor/api/drawings";
 import { findWorkingDrawing } from "@/drawingEditor/lib/drawingTree";
+import { loadPdf, renderPageToCanvas } from "@/drawingEditor/lib/pdfRenderer";
 import { composeAllPageViews } from "@/drawingEditor/lib/workOrderPreview";
 import { useDrawingEditorStore } from "@/drawingEditor/store/useDrawingEditorStore";
 import {
@@ -156,6 +160,15 @@ async function resolveProjectPhotoUrl(
   );
   if (!photo) return null;
   return getAssetPhotoSignedUrl(resolveCoverStoragePath(photo));
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
 }
 
 function statusCls(status: JobCardStatus) {
@@ -982,26 +995,82 @@ export function JobCards({
         if (!drawing) continue;
         const working = findWorkingDrawing(drawing.id, allDrawings);
         const target = working ?? drawing;
+
+        // 1. Preferred path — the engineered, title-blocked output from
+        //    a saved drawing_views row (crop + annotations + title
+        //    block), exactly as before.
         const canvases = await composeAllPageViews(target, {
           companyName: settings.companyName || "Your Company",
           companyLogoDataUrl: settings.companyLogo || undefined,
         });
-        if (canvases.length === 0) continue;
-        const views = await getViewsForDrawing(target.id);
-        const firstPageView = [...views].sort(
-          (a, b) => a.pageNumber - b.pageNumber,
-        )[0];
-        const title = firstPageView?.titleBlock.partName || undefined;
-        const number = firstPageView?.titleBlock.partNo || undefined;
-        const revision = firstPageView?.titleBlock.revision || undefined;
-        canvases.forEach((canvas, idx) => {
+
+        let pageUrls: string[];
+        let title: string | undefined;
+        let number: string | undefined;
+        let revision: string | undefined;
+
+        if (canvases.length > 0) {
+          pageUrls = canvases.map((c) => c.toDataURL("image/png"));
+          const views = await getViewsForDrawing(target.id);
+          const firstPageView = [...views].sort(
+            (a, b) => a.pageNumber - b.pageNumber,
+          )[0];
+          title = firstPageView?.titleBlock.partName || undefined;
+          number = firstPageView?.titleBlock.partNo || undefined;
+          revision = firstPageView?.titleBlock.revision || undefined;
+        } else {
+          // 2. Fallback — a drawing linked straight from Project Design
+          //    Files/Drawing Repository Search that's never been opened
+          //    in the Editor has no saved view at all (see chat, "linked
+          //    drawings not printing" — this is the actual majority
+          //    case for a normally-attached drawing, not an edge case).
+          //    Reuses the SAME utilities DesignFilePreviewDialog/
+          //    handlePreviewOriginal already use to show a pristine
+          //    original: getDrawingPdfBlob (private-bucket download, no
+          //    signed URL, no duplicated file) + loadPdf/
+          //    renderPageToCanvas (the exact pair buildThumbnails uses
+          //    to rasterize every page of a PDF). No title block exists
+          //    for an unedited original, so the fallback title is just
+          //    the drawing's own fileName — number/revision stay
+          //    undefined (nothing to preserve that was never set).
+          //    DXF originals are not rasterizable this way and are
+          //    skipped (pageUrls stays empty) rather than producing a
+          //    blank page.
+          pageUrls = [];
+          title = drawing.fileName;
+          try {
+            const blob = target.pdfBlob ?? (await getDrawingPdfBlob(target.id));
+            if (target.sourceKind === "image") {
+              pageUrls = [await blobToDataUrl(blob)];
+            } else if (target.sourceKind !== "dxf") {
+              // Absent sourceKind means "pdf" (pre-Phase-34 rows), same
+              // convention DrawingDocument.sourceKind's own doc comment
+              // establishes.
+              const pdf = await loadPdf(blob);
+              for (let p = 1; p <= pdf.numPages; p++) {
+                const page = await pdf.getPage(p);
+                const canvas = document.createElement("canvas");
+                await renderPageToCanvas(page, canvas, 2);
+                pageUrls.push(canvas.toDataURL("image/png"));
+              }
+            }
+          } catch {
+            // Original file missing/unreadable — contributes zero
+            // pages, same as "never saved", never a print-blocking
+            // error for the rest of the Job Card.
+            pageUrls = [];
+          }
+        }
+
+        if (pageUrls.length === 0) continue;
+        pageUrls.forEach((url, idx) => {
           drawingSheets.push({
-            url: canvas.toDataURL("image/png"),
+            url,
             title,
             number,
             revision,
             sheetIndex: idx + 1,
-            sheetCount: canvases.length,
+            sheetCount: pageUrls.length,
           });
         });
       }

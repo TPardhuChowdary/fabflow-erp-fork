@@ -2020,26 +2020,37 @@ interface JobCardDocProps {
    * on (the caller is responsible for that gate — this component only
    * renders what it's given).
    *
-   * drawingImages: the existing linked engineering Drawing's pages,
-   * already composed into their own established print layout by
+   * drawingSheets: every page of every Drawing linked to this Job Card
+   * (see chat — a Job Card can have MULTIPLE linked drawings, not just
+   * one), already composed into their own established print layout by
    * drawingEditor's own composeAllPageViews (one flat image per page,
-   * in order) — this component embeds them, it does not render or know
-   * anything about drawings itself (no second drawing renderer). Page
-   * 3+, one page per image, same caller-side gating as above
-   * (printDrawing flag + a link existing). drawingTitle/Number/Revision
-   * are the linked drawing's own title-block fields (see chat, "show its
-   * actual drawing title") — the page heading falls back to "Engineering
-   * Drawing" only when the drawing has none of them set.
+   * in order, per drawing) — this component embeds them, it does not
+   * render or know anything about drawings itself (no second drawing
+   * renderer). Page 3+, one page per sheet, same caller-side gating as
+   * above (printDrawing flag + at least one link existing). Each
+   * sheet's own title/number/revision are that DRAWING's own title-
+   * block fields (see chat, "show its actual drawing title") — its page
+   * heading falls back to "Engineering Drawing" only when that drawing
+   * has none of them set.
    *
    * All three groups are optional and independent; each section simply
    * does not render when nothing was resolved for it. */
   projectPhotoUrl?: string;
   projectPhotoCaption?: string;
   referencePhotoUrl?: string;
-  drawingImages?: string[];
-  drawingTitle?: string;
-  drawingNumber?: string;
-  drawingRevision?: string;
+  drawingSheets?: {
+    url: string;
+    title?: string;
+    number?: string;
+    revision?: string;
+    /** 1-based position of this sheet within ITS OWN drawing, and that
+     * drawing's total page count — e.g. "Sheet 2 of 3" — computed by the
+     * caller (who already grouped composeAllPageViews's output per
+     * drawing) rather than inferred here from adjacent title metadata,
+     * which two different drawings could coincidentally share. */
+    sheetIndex: number;
+    sheetCount: number;
+  }[];
 }
 
 function formatPrintedOn(ms: number): string {
@@ -2126,10 +2137,7 @@ export function JobCardDocContent({
   projectPhotoUrl,
   projectPhotoCaption,
   referencePhotoUrl,
-  drawingImages,
-  drawingTitle,
-  drawingNumber,
-  drawingRevision,
+  drawingSheets,
 }: JobCardDocProps) {
   const pageCount = totalPages ?? 1;
   // Target for This Job — expectedQuantity is a Postgres GENERATED
@@ -2240,22 +2248,28 @@ export function JobCardDocContent({
       {/* UPPER BAND — Job identification on the left, a LARGE Project
           Reference Photo on the right (see chat, uploaded A4 reference:
           the photo is given real visual weight here, not a thumbnail).
-          The left column widens to the full row when there is no photo
-          to show — never a blank placeholder box. */}
+          alignItems: "flex-start" is load-bearing — each column's box
+          sizes to its OWN content instead of stretching to match its
+          (much taller) sibling, which is exactly the wasted-white-space
+          bug the compact layout fix addresses: the identification box
+          previously grew to the photo's full height even though its own
+          six rows need far less room. The left column widens to the
+          full row when there is no photo to show — never a blank
+          placeholder box. */}
       <div
         style={{
           display: "flex",
           gap: "16px",
-          alignItems: "stretch",
-          marginBottom: "12px",
+          alignItems: "flex-start",
+          marginBottom: "10px",
         }}
       >
         <div
           style={{
-            flex: projectPhotoUrl ? "0 0 42%" : "1 1 100%",
+            flex: projectPhotoUrl ? "0 0 40%" : "1 1 100%",
             border: "1px solid #bbb",
             borderRadius: "3px",
-            padding: "10px 12px",
+            padding: "8px 10px",
           }}
         >
           {(
@@ -2281,11 +2295,11 @@ export function JobCardDocContent({
               style={{
                 display: "flex",
                 gap: "6px",
-                fontSize: "12.5px",
-                marginBottom: "6px",
+                fontSize: "12px",
+                marginBottom: "4px",
               }}
             >
-              <div style={{ fontWeight: 700, color: "#333", minWidth: "88px" }}>
+              <div style={{ fontWeight: 700, color: "#333", minWidth: "80px" }}>
                 {label}
               </div>
               <div style={{ color: "#111" }}>: {value}</div>
@@ -2296,13 +2310,13 @@ export function JobCardDocContent({
               style={{
                 fontWeight: 700,
                 color: "#333",
-                minWidth: "88px",
-                fontSize: "12.5px",
+                minWidth: "80px",
+                fontSize: "12px",
               }}
             >
               Priority
             </div>
-            <div style={{ fontSize: "12.5px" }}>:</div>
+            <div style={{ fontSize: "12px" }}>:</div>
             <PriorityPill priority={jobCard.priority} />
           </div>
         </div>
@@ -2310,14 +2324,16 @@ export function JobCardDocContent({
         {/* PROJECT REFERENCE PHOTO — identifies the product/project this
             Job Card belongs to; NOT an evidence or completion photo.
             Large and on the right, aspect-ratio preserved (object-fit:
-            contain, never stretched). */}
+            contain, never stretched) — its own height is dictated by
+            the photo itself, never forced to match the (now
+            shorter) identification column on the left. */}
         {projectPhotoUrl && (
           <div
             style={{
-              flex: "0 0 58%",
+              flex: "0 0 60%",
               border: "1px solid #bbb",
               borderRadius: "3px",
-              padding: "8px 10px 10px",
+              padding: "6px 8px 8px",
               display: "flex",
               flexDirection: "column",
               alignItems: "center",
@@ -2325,12 +2341,12 @@ export function JobCardDocContent({
           >
             <div
               style={{
-                fontSize: "10.5px",
+                fontSize: "10px",
                 fontWeight: 800,
                 color: "#333",
                 textTransform: "uppercase",
                 letterSpacing: "0.8px",
-                marginBottom: "6px",
+                marginBottom: "4px",
                 alignSelf: "flex-start",
               }}
             >
@@ -2342,18 +2358,17 @@ export function JobCardDocContent({
               style={{
                 display: "block",
                 width: "100%",
-                maxHeight: "210px",
+                maxHeight: "235px",
                 objectFit: "contain",
-                flex: "1 1 auto",
               }}
             />
             {projectPhotoCaption && (
               <div
                 style={{
-                  fontSize: "11px",
+                  fontSize: "10.5px",
                   fontWeight: 600,
                   color: "#555",
-                  marginTop: "6px",
+                  marginTop: "4px",
                 }}
               >
                 {projectPhotoCaption}
@@ -2439,7 +2454,7 @@ export function JobCardDocContent({
             <div
               key={label}
               style={{
-                padding: "8px 10px",
+                padding: "9px 10px 11px",
                 borderLeft: i > 0 ? "1px solid #ddd" : undefined,
               }}
             >
@@ -2454,7 +2469,7 @@ export function JobCardDocContent({
                 <div
                   style={{
                     borderBottom: "1px solid #999",
-                    height: "16px",
+                    height: "22px",
                     flex: "1 1 auto",
                   }}
                 />
@@ -2486,7 +2501,7 @@ export function JobCardDocContent({
           <div
             key={label}
             style={{
-              padding: "8px 10px",
+              padding: "9px 10px 11px",
               borderLeft: i > 0 ? "1px solid #ddd" : undefined,
             }}
           >
@@ -2497,7 +2512,7 @@ export function JobCardDocContent({
               <div
                 style={{
                   borderBottom: "1px solid #999",
-                  height: "16px",
+                  height: "22px",
                   flex: "1 1 auto",
                 }}
               />
@@ -2639,7 +2654,7 @@ export function JobCardDocContent({
                       <td
                         style={{
                           border: "1px solid #999",
-                          padding: "13px 8px",
+                          padding: "16px 8px",
                           textAlign: "center",
                         }}
                       >
@@ -2648,7 +2663,7 @@ export function JobCardDocContent({
                       <td
                         style={{
                           border: "1px solid #999",
-                          padding: "13px 8px",
+                          padding: "16px 8px",
                         }}
                       >
                         {row.label}
@@ -2656,7 +2671,7 @@ export function JobCardDocContent({
                       <td
                         style={{
                           border: "1px solid #999",
-                          padding: "13px 8px",
+                          padding: "16px 8px",
                         }}
                       >
                         {afterWording}
@@ -2664,7 +2679,7 @@ export function JobCardDocContent({
                       <td
                         style={{
                           border: "1px solid #999",
-                          padding: "13px 8px",
+                          padding: "16px 8px",
                           textAlign: "center",
                         }}
                       >
@@ -2673,13 +2688,13 @@ export function JobCardDocContent({
                       <td
                         style={{
                           border: "1px solid #999",
-                          padding: "13px 8px",
+                          padding: "16px 8px",
                         }}
                       />
                       <td
                         style={{
                           border: "1px solid #999",
-                          padding: "13px 8px",
+                          padding: "16px 8px",
                         }}
                       />
                     </tr>
@@ -2831,64 +2846,61 @@ export function JobCardDocContent({
         </div>
       )}
 
-      {/* PAGE 3+ — Linked Drawing, one page per composed sheet (see
-          chat — multi-page drawings must print all their pages, not
-          just the most-recently-edited one). Reuses the existing
-          Drawing Editor's own composed print layout as flat images
-          (resolved by the caller via composeAllPageViews) — no second
-          drawing renderer, no drawing data duplicated here. Only when
-          the caller resolved at least one image AND printDrawing is on.
-          The heading shows the drawing's own title/number/revision
-          (from its title block) when available, falling back to the
-          generic "Engineering Drawing" only when none of those were
-          set. */}
-      {drawingImages &&
-        drawingImages.length > 0 &&
-        drawingImages.map((imgUrl, i) => (
+      {/* PAGE 3+ — Linked Drawing(s), one page per composed sheet across
+          EVERY linked drawing (see chat — a Job Card can have multiple
+          linked drawings, and a multi-page drawing must print all its
+          pages, not just the most-recently-edited one). Reuses the
+          existing Drawing Editor's own composed print layout as flat
+          images (resolved by the caller via composeAllPageViews per
+          linked drawing) — no second drawing renderer, no drawing data
+          duplicated here. Only when the caller resolved at least one
+          sheet AND printDrawing is on. Each page's heading shows THAT
+          drawing's own title/number/revision (from its title block)
+          when available, falling back to the generic "Engineering
+          Drawing" only when none of those were set. */}
+      {drawingSheets?.map((sheet, i) => (
+        <div
+          // biome-ignore lint/suspicious/noArrayIndexKey: fixed print snapshot of an ordered page list, never reordered
+          key={i}
+          style={{ pageBreakBefore: "always", paddingTop: "20px" }}
+        >
           <div
-            // biome-ignore lint/suspicious/noArrayIndexKey: fixed print snapshot of an ordered page list, never reordered
-            key={i}
-            style={{ pageBreakBefore: "always", paddingTop: "20px" }}
+            style={{
+              borderBottom: "2px solid #1a1a1a",
+              paddingBottom: "10px",
+              marginBottom: "16px",
+            }}
           >
             <div
               style={{
-                borderBottom: "2px solid #1a1a1a",
-                paddingBottom: "10px",
-                marginBottom: "16px",
+                fontSize: "18px",
+                fontWeight: 800,
+                color: "#1a1a1a",
               }}
             >
-              <div
-                style={{
-                  fontSize: "18px",
-                  fontWeight: 800,
-                  color: "#1a1a1a",
-                }}
-              >
-                {drawingTitle || "Engineering Drawing"}
-                {drawingNumber ? ` · ${drawingNumber}` : ""}
-                {drawingRevision ? ` · Rev ${drawingRevision}` : ""}
-              </div>
-              <div
-                style={{ fontSize: "12px", color: "#555", marginTop: "4px" }}
-              >
-                {jobCard.jobNo} · {projectCode} — {projectName}
-                {drawingImages.length > 1
-                  ? ` · Sheet ${i + 1} of ${drawingImages.length}`
-                  : ""}
-              </div>
+              {sheet.title || "Engineering Drawing"}
+              {sheet.number ? ` · ${sheet.number}` : ""}
+              {sheet.revision ? ` · Rev ${sheet.revision}` : ""}
             </div>
-            <img
-              src={imgUrl}
-              alt={`Linked engineering drawing${drawingImages.length > 1 ? ` — sheet ${i + 1}` : ""}`}
-              style={{
-                display: "block",
-                width: "100%",
-                maxHeight: "260mm",
-                objectFit: "contain",
-              }}
-            />
+            <div style={{ fontSize: "12px", color: "#555", marginTop: "4px" }}>
+              {jobCard.jobNo} · {projectCode} — {projectName}
+              {sheet.sheetCount > 1
+                ? ` · Sheet ${sheet.sheetIndex} of ${sheet.sheetCount}`
+                : ""}
+            </div>
           </div>
-        ))}
+          <img
+            src={sheet.url}
+            alt={`Linked engineering drawing${sheet.sheetCount > 1 ? ` — sheet ${sheet.sheetIndex}` : ""}`}
+            style={{
+              display: "block",
+              width: "100%",
+              maxHeight: "260mm",
+              objectFit: "contain",
+            }}
+          />
+        </div>
+      ))}
     </div>
   );
 }

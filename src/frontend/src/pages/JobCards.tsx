@@ -931,51 +931,79 @@ export function JobCards({
       ? await getAssetPhotoSignedUrl(resolveCoverStoragePath(referencePhoto))
       : null;
 
-    // 3. Linked Drawing — reuses the Drawing Editor's own existing
-    //    composeAllPageViews (one composed image PER PAGE of the
+    // 3. Linked Drawing(s) — reuses the Drawing Editor's own existing
+    //    composeAllPageViews (one composed image PER PAGE of each
     //    drawing, no second drawing renderer, no duplicated drawing
     //    data), same Original -> Working Drawing resolution
     //    DrawingEditorPage.tsx's own handlePrintDrawing performs before
-    //    printing. Only attempted when printDrawing is on AND a link
-    //    exists; a drawing that was never saved (no views at all) just
-    //    means no Page 3+, not an error. Title/number/revision are read
-    //    straight off the first page's own title block (partName/
-    //    partNo/revision) — the same fields already baked into each
-    //    composed page image itself — so the Job Card page heading
-    //    shows the real drawing identity instead of a generic label.
-    let drawingImages: string[] = [];
-    let drawingTitle: string | undefined;
-    let drawingNumber: string | undefined;
-    let drawingRevision: string | undefined;
+    //    printing. Only attempted when printDrawing is on AND at least
+    //    one link exists; a drawing that was never saved (no views at
+    //    all) just contributes zero pages, not an error. Title/number/
+    //    revision are read straight off each drawing's own first page's
+    //    title block (partName/partNo/revision) — the same fields
+    //    already baked into its composed page images — so each printed
+    //    drawing page heading shows its real identity instead of a
+    //    generic label.
+    //
+    //    BUG FIX #1 (see chat, "linked drawings not printing") — the
+    //    Drawing Repository's own `drawings` list is only ever loaded by
+    //    DrawingLinkPicker's own mount effect, which only mounts while
+    //    the Create/Edit form is open. Printing from the View dialog
+    //    (the normal path — a user opens a Job Card, clicks Print,
+    //    having never opened Edit this session) read
+    //    useDrawingEditorStore.getState().drawings while it was still
+    //    the empty initial array, so every drawing lookup below always
+    //    silently failed. Load on demand here so printing never depends
+    //    on which dialogs happened to be opened first.
+    //
+    //    BUG FIX #2 — a Job Card can have MULTIPLE linked drawings (the
+    //    same DrawingLinkPicker used elsewhere always supported this;
+    //    linkedDrawingIds is an array). The previous code only ever
+    //    resolved the FIRST link found, silently dropping every other
+    //    linked drawing. All matching links are now resolved and
+    //    printed, in link order.
+    const drawingSheets: {
+      url: string;
+      title?: string;
+      number?: string;
+      revision?: string;
+      sheetIndex: number;
+      sheetCount: number;
+    }[] = [];
     if (jc.printDrawing) {
-      const link = (drawingLinks || []).find(
+      const store = useDrawingEditorStore.getState();
+      if (!store.loaded) await store.loadDrawings();
+      const allDrawings = useDrawingEditorStore.getState().drawings || [];
+      const links = (drawingLinks || []).filter(
         (l) => l.linkedType === "job_card" && l.linkedId === jc.id,
       );
-      const drawing = link
-        ? (useDrawingEditorStore.getState().drawings || []).find(
-            (d) => d.id === link.drawingId,
-          )
-        : undefined;
-      if (drawing) {
-        const working = findWorkingDrawing(
-          drawing.id,
-          useDrawingEditorStore.getState().drawings,
-        );
+      for (const link of links) {
+        const drawing = allDrawings.find((d) => d.id === link.drawingId);
+        if (!drawing) continue;
+        const working = findWorkingDrawing(drawing.id, allDrawings);
         const target = working ?? drawing;
         const canvases = await composeAllPageViews(target, {
           companyName: settings.companyName || "Your Company",
           companyLogoDataUrl: settings.companyLogo || undefined,
         });
-        drawingImages = canvases.map((c) => c.toDataURL("image/png"));
+        if (canvases.length === 0) continue;
         const views = await getViewsForDrawing(target.id);
         const firstPageView = [...views].sort(
           (a, b) => a.pageNumber - b.pageNumber,
         )[0];
-        if (firstPageView) {
-          drawingTitle = firstPageView.titleBlock.partName || undefined;
-          drawingNumber = firstPageView.titleBlock.partNo || undefined;
-          drawingRevision = firstPageView.titleBlock.revision || undefined;
-        }
+        const title = firstPageView?.titleBlock.partName || undefined;
+        const number = firstPageView?.titleBlock.partNo || undefined;
+        const revision = firstPageView?.titleBlock.revision || undefined;
+        canvases.forEach((canvas, idx) => {
+          drawingSheets.push({
+            url: canvas.toDataURL("image/png"),
+            title,
+            number,
+            revision,
+            sheetIndex: idx + 1,
+            sheetCount: canvases.length,
+          });
+        });
       }
     }
 
@@ -990,10 +1018,10 @@ export function JobCards({
     // print document, and never written back to `jc` or Supabase.
     const printedAt = Date.now();
     // Page 1 (Job Card core) + Work Reference (if included) + one page
-    // per composed drawing sheet (if included) — computed here since
-    // this is the one place that already knows the final resolved state
-    // of all three.
-    const totalPages = 1 + (referencePhotoUrl ? 1 : 0) + drawingImages.length;
+    // per composed drawing sheet, across every linked drawing (if
+    // included) — computed here since this is the one place that
+    // already knows the final resolved state of all three.
+    const totalPages = 1 + (referencePhotoUrl ? 1 : 0) + drawingSheets.length;
     const project = projects.find((p) => p.id === jc.projectId);
     flushSync(() => {
       root.render(
@@ -1008,10 +1036,7 @@ export function JobCards({
           projectPhotoUrl={projectPhotoUrl ?? undefined}
           projectPhotoCaption={projectPhotoCaption}
           referencePhotoUrl={referencePhotoUrl ?? undefined}
-          drawingImages={drawingImages.length > 0 ? drawingImages : undefined}
-          drawingTitle={drawingTitle}
-          drawingNumber={drawingNumber}
-          drawingRevision={drawingRevision}
+          drawingSheets={drawingSheets.length > 0 ? drawingSheets : undefined}
         />,
       );
     });

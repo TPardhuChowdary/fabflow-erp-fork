@@ -2038,11 +2038,17 @@ export interface AssetPhoto {
   processingStatus?: "processing" | "ready" | "failed";
   processedStoragePath?: string;
   processedFilename?: string;
-  /** Project Photos only (Phase 3) — explicit user choice of which
-   * image this row's cover shows. false (default) = original; true =
-   * processedStoragePath, falling back to original if that's not set.
-   * Never implied by processingStatus — AI processing alone never
-   * changes this. See supabase/migrations/20260916090000_asset_photos_cover_variant.sql. */
+  /** Explicit user choice of which image this row represents. false
+   * (default) = original; true = processedStoragePath, falling back to
+   * original if that's not set. Never implied by processingStatus — AI
+   * processing alone never changes this. For Project/Machine/Die/Tool
+   * this is "which image the cover/hero shows" (Phase 3); for Job Card
+   * (see chat, "multi-print selection") the SAME column instead means
+   * "which variant this photo prints" — job_card has no cover/hero
+   * display to conflict with, so the one column carries two
+   * owner-type-scoped meanings rather than a second field. See
+   * supabase/migrations/20260916090000_asset_photos_cover_variant.sql
+   * and setPhotoCoverVariant's COVER_VARIANT_OWNER_TYPES. */
   coverUsesProcessed?: boolean;
   /** Project Photos only (Phase 4) — hex of the approved palette color
    * the processed derivative's background was rendered in (AI-chosen or
@@ -2053,6 +2059,16 @@ export interface AssetPhoto {
    * supabase/migrations/20260916140000_asset_photos_processed_background_color.sql
    * and BACKGROUND_PALETTE in lib/assetPhotosApi.ts for the allowlist. */
   processedBackgroundColor?: string;
+  /** Job Card Reference Photo print selection (see chat, "multi-print
+   * selection") — independent of attachment: a photo can be attached to
+   * a Job Card's Work Reference gallery without ever being selected for
+   * the physical print. false (default) = not printed. Only meaningful
+   * for owner_type='job_card' today (see
+   * COVER_VARIANT_OWNER_TYPES/setPhotoPrintSelected in
+   * lib/assetPhotosApi.ts); stays false and unused for every other
+   * owner type, same "inert until read" pattern as processingStatus.
+   * See supabase/migrations/20260921090000_asset_photos_print_selected.sql. */
+  printSelected: boolean;
 }
 
 // ── Machine / Service Revenue (§17-28) ──────────────────────────

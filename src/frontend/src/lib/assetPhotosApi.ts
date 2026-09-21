@@ -106,6 +106,7 @@ function rowToAssetPhoto(row: Record<string, unknown>): AssetPhoto {
     coverUsesProcessed: row.cover_uses_processed as boolean,
     processedBackgroundColor:
       (row.processed_background_color as string) ?? undefined,
+    printSelected: row.print_selected as boolean,
   };
 }
 
@@ -315,17 +316,24 @@ export async function setPrimaryAssetPhoto(
 // actually DISPLAY a cover (project's external ProjectDetail/Projects
 // list, and machine/die/tool's own AssetPhotoGallery heroMode — see
 // that component's heroImgUrl, which now reads this same field). NOT
-// inventory_item/job_card: neither has a hero/cover display anywhere
-// (confirmed in the architecture audit — their galleries are plain
-// thumbnail strips), so exposing this toggle for them would set a flag
-// nothing ever reads — a second, meaningless source of "truth" rather
-// than reuse. If either entity grows a hero display later, add its
-// owner_type here rather than inventing a parallel flag.
+// inventory_item: it has no hero/cover display anywhere (confirmed in
+// the architecture audit — its gallery is a plain thumbnail strip), so
+// exposing this toggle for it would set a flag nothing ever reads — a
+// second, meaningless source of "truth" rather than reuse.
+//
+// job_card (see chat, "Reference Photo multi-print selection") — added
+// here with a DIFFERENT meaning than the other four: job_card still has
+// no hero/cover display, but this same column now also answers "which
+// variant does this photo print" (see AssetPhoto.coverUsesProcessed's
+// own doc comment). The write itself is identical either way — this
+// allowlist only ever gates "can this owner_type's cover_uses_processed
+// be written", never which UI concept the value backs.
 const COVER_VARIANT_OWNER_TYPES = [
   "project",
   "machine",
   "die",
   "tool",
+  "job_card",
 ] as const;
 
 export async function setPhotoCoverVariant(
@@ -347,6 +355,39 @@ export async function setPhotoCoverVariant(
       status: "denied",
       error:
         "No row was updated (blocked by RLS, this photo type has no cover concept, or the photo does not exist)",
+    };
+  }
+  return { status: "success" };
+}
+
+// Job Card Reference Photo multi-print selection (see chat) —
+// independent of attachment: a photo can sit in a Job Card's Work
+// Reference gallery without ever being selected for the physical
+// print. Same one-writer-per-concern shape as setPhotoCoverVariant()
+// above (and same authorization boundary — the asset_photos_update RLS
+// policy, not an owner_type allowlist here: unlike the cover variant,
+// print_selected is meaningful to set on any owner_type's row without
+// conflicting with an existing concept, so nothing is gated). Never
+// touches cover_uses_processed — which variant prints and whether a
+// photo prints at all are deliberately separate columns/calls, exactly
+// as the architecture investigation required.
+export async function setPhotoPrintSelected(
+  photoId: string,
+  selected: boolean,
+): Promise<WriteResult<never>> {
+  const gate = await requireSession();
+  if (!gate.ok) return gate.result;
+  const { data, error } = await gate.client
+    .from("asset_photos")
+    .update({ print_selected: selected })
+    .eq("id", photoId)
+    .select("id");
+  if (error) return { status: "error", error: error.message };
+  const rows = (data as unknown as { id: string }[]) ?? [];
+  if (rows.length === 0) {
+    return {
+      status: "denied",
+      error: "No row was updated (blocked by RLS, or the photo does not exist)",
     };
   }
   return { status: "success" };

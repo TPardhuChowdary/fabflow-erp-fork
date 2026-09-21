@@ -546,7 +546,8 @@ const ASSET_PHOTO_COLUMNS =
   "id, owner_type, owner_id, storage_path, original_filename, mime_type, " +
   "size_bytes, display_order, caption, is_primary, uploaded_by, " +
   "created_at, updated_at, processing_status, processed_storage_path, " +
-  "processed_filename, cover_uses_processed, processed_background_color";
+  "processed_filename, cover_uses_processed, processed_background_color, " +
+  "print_selected";
 
 interface AssetPhotoRow {
   id: string;
@@ -567,6 +568,7 @@ interface AssetPhotoRow {
   processed_filename: string | null;
   cover_uses_processed: boolean;
   processed_background_color: string | null;
+  print_selected: boolean;
 }
 
 function rowToAssetPhoto(row: AssetPhotoRow): AssetPhoto {
@@ -590,6 +592,7 @@ function rowToAssetPhoto(row: AssetPhotoRow): AssetPhoto {
     processedFilename: row.processed_filename ?? undefined,
     coverUsesProcessed: row.cover_uses_processed,
     processedBackgroundColor: row.processed_background_color ?? undefined,
+    printSelected: row.print_selected,
   };
 }
 

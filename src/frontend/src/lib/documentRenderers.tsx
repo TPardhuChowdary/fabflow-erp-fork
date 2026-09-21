@@ -2013,12 +2013,16 @@ interface JobCardDocProps {
    * projectPhotoCaption: that photo's own caption/filename, shown
    * beneath it, when available.
    *
-   * referencePhotoUrl: THIS Job Card's own selected "Work Reference"
-   * photo — the expected visual result of the operation, admin-picked
-   * via reference_photo_id. Large, dedicated Page 2, only when the
-   * caller resolved one AND the Job Card's printReferencePhoto flag is
-   * on (the caller is responsible for that gate — this component only
-   * renders what it's given).
+   * referencePhotoUrls: THIS Job Card's own selected "Work Reference"
+   * photo(s) — the expected visual result of the operation. Multi-print
+   * selection (see chat): each entry is one asset_photos row whose
+   * print_selected flag is true, already resolved to Original or AI
+   * Processed per its own cover_uses_processed (the caller does this
+   * via resolveCoverStoragePath, same as the Project Photo above) — one
+   * dedicated page per entry, in array order, starting at Page 2. Empty
+   * array/undefined renders zero photo pages, never a blank one (the
+   * caller is responsible for the print_selected filtering — this
+   * component only renders what it's given).
    *
    * drawingSheets: every page of every Drawing linked to this Job Card
    * (see chat — a Job Card can have MULTIPLE linked drawings, not just
@@ -2037,7 +2041,7 @@ interface JobCardDocProps {
    * does not render when nothing was resolved for it. */
   projectPhotoUrl?: string;
   projectPhotoCaption?: string;
-  referencePhotoUrl?: string;
+  referencePhotoUrls?: { url: string; caption?: string }[];
   drawingSheets?: {
     url: string;
     title?: string;
@@ -2136,7 +2140,7 @@ export function JobCardDocContent({
   totalPages,
   projectPhotoUrl,
   projectPhotoCaption,
-  referencePhotoUrl,
+  referencePhotoUrls,
   drawingSheets,
 }: JobCardDocProps) {
   const pageCount = totalPages ?? 1;
@@ -2779,15 +2783,22 @@ export function JobCardDocContent({
         not treated as a separate record.
       </div>
 
-      {/* PAGE 2 — Work Reference (Section 3/5, see chat). Only when the
-          caller resolved a Job Card Reference Photo AND printReferencePhoto
-          is on; otherwise this whole block doesn't exist, so no blank
-          second page is ever generated. pageBreakBefore forces it onto
-          its own sheet even though this is one continuous element in the
-          DOM (same technique @page/CSS print rules already rely on
-          elsewhere in this file for A4 pagination). */}
-      {referencePhotoUrl && (
-        <div style={{ pageBreakBefore: "always", paddingTop: "10mm" }}>
+      {/* PAGE 2+ — Work Reference (Section 3/5, see chat; multi-print
+          selection extension). One page per selected Reference Photo,
+          in array order — the caller already filtered to
+          print_selected=true and resolved each one's Original/AI
+          Processed variant, so this stays a pure render loop with no
+          selection logic of its own. Zero entries means this whole
+          block renders nothing, so no blank second page is ever
+          generated. pageBreakBefore forces each page onto its own sheet
+          even though these are continuous elements in the DOM (same
+          technique @page/CSS print rules already rely on elsewhere in
+          this file for A4 pagination). */}
+      {(referencePhotoUrls ?? []).map((photo, i) => (
+        <div
+          key={photo.url}
+          style={{ pageBreakBefore: "always", paddingTop: "10mm" }}
+        >
           <div
             style={{
               textAlign: "center",
@@ -2816,10 +2827,13 @@ export function JobCardDocContent({
               }}
             >
               EXPECTED RESULT
+              {(referencePhotoUrls?.length ?? 0) > 1 &&
+                ` — Photo ${i + 1} of ${referencePhotoUrls?.length}`}
             </div>
             <div style={{ fontSize: "12px", color: "#555", marginTop: "8px" }}>
               {jobCard.jobNo} · {projectCode} — {projectName} ·{" "}
               {jobCard.operationType}
+              {photo.caption ? ` · ${photo.caption}` : ""}
             </div>
           </div>
           <div
@@ -2833,7 +2847,7 @@ export function JobCardDocContent({
             }}
           >
             <img
-              src={referencePhotoUrl}
+              src={photo.url}
               alt="Work reference — expected result"
               style={{
                 display: "block",
@@ -2844,9 +2858,11 @@ export function JobCardDocContent({
             />
           </div>
         </div>
-      )}
+      ))}
 
-      {/* PAGE 3+ — Linked Drawing(s), one page per composed sheet across
+      {/* NEXT PAGE(S) — Linked Drawing(s), starting right after however
+          many Reference Photo pages were rendered above (0 or more,
+          multi-print selection). One page per composed sheet across
           EVERY linked drawing (see chat — a Job Card can have multiple
           linked drawings, and a multi-page drawing must print all its
           pages, not just the most-recently-edited one). Reuses the

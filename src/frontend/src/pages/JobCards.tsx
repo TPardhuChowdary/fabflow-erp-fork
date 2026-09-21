@@ -50,6 +50,7 @@ import {
 } from "@/drawingEditor/lib/workOrderPreview";
 import { useDrawingEditorStore } from "@/drawingEditor/store/useDrawingEditorStore";
 import {
+  Check,
   ClipboardList,
   Pencil,
   Plus,
@@ -75,6 +76,8 @@ import {
 import {
   getAssetPhotoSignedUrl,
   resolveCoverStoragePath,
+  setPhotoCoverVariant,
+  setPhotoPrintSelected,
   uploadAssetPhoto,
   validateAssetPhotoFile,
 } from "../lib/assetPhotosApi";
@@ -318,6 +321,7 @@ export function JobCards({
     deleteJobCard,
     updateJobCardExceptionLocal,
     addAssetPhotoLocal,
+    updateAssetPhotoLocal,
   } = useStore();
   const pCreate = canCreate(currentUser, "job_cards");
   const pEdit = canEdit(currentUser, "job_cards");
@@ -398,6 +402,136 @@ export function JobCards({
   const [referencePhotoExcludeIds, setReferencePhotoExcludeIds] = useState<
     string[]
   >([]);
+  // Reference Photo print selection (see chat, "multi-print selection")
+  // — the same non-excluded set the gallery/chip-list above already
+  // computed, just derived once here instead of inline at each of the
+  // three JSX spots that need it (list + Select All + Clear All).
+  const jobCardPrintablePhotos = editCard
+    ? (assetPhotos || []).filter(
+        (p) =>
+          p.ownerType === "job_card" &&
+          p.ownerId === editCard.id &&
+          !referencePhotoExcludeIds.includes(p.id),
+      )
+    : [];
+  const [printSelectionBusy, setPrintSelectionBusy] = useState(false);
+  const isBusy = printSelectionBusy;
+
+  async function handleTogglePrintSelected(
+    photo: AssetPhoto,
+    selected: boolean,
+  ) {
+    if (printSelectionBusy) return;
+    setPrintSelectionBusy(true);
+    const result = await setPhotoPrintSelected(photo.id, selected);
+    if (result.status === "success") {
+      updateAssetPhotoLocal({ ...photo, printSelected: selected });
+    } else {
+      toast.error(result.error || "Could not update print selection.");
+    }
+    setPrintSelectionBusy(false);
+  }
+
+  async function handleSetPrintVariant(
+    photo: AssetPhoto,
+    useProcessed: boolean,
+  ) {
+    if (printSelectionBusy) return;
+    setPrintSelectionBusy(true);
+    const result = await setPhotoCoverVariant(photo.id, useProcessed);
+    if (result.status === "success") {
+      updateAssetPhotoLocal({ ...photo, coverUsesProcessed: useProcessed });
+    } else {
+      toast.error(result.error || "Could not update print variant.");
+    }
+    setPrintSelectionBusy(false);
+  }
+
+  // Image-first print-selection thumbnails (see chat, "redesign
+  // reference photo print selection") — one signed URL per distinct
+  // storage path actually needed for the cards below (each photo's
+  // original, plus its processed derivative when one exists), reusing
+  // the exact same getAssetPhotoSignedUrl() the rest of this file and
+  // AssetPhotoGallery already call. Keyed on storage path (not photo
+  // id) since Original/AI Processed render as two separate cards for
+  // the same row. Same effect shape as viewProjectPhotoUrl above —
+  // keyed on editCard/assetPhotos identity, not the derived
+  // jobCardPrintablePhotos array, so it doesn't refetch every render.
+  const [printPhotoThumbUrls, setPrintPhotoThumbUrls] = useState<
+    Record<string, string>
+  >({});
+  useEffect(() => {
+    if (!editCard) return;
+    let cancelled = false;
+    const photos = (assetPhotos || []).filter(
+      (p) => p.ownerType === "job_card" && p.ownerId === editCard.id,
+    );
+    const paths = new Set<string>();
+    for (const p of photos) {
+      paths.add(p.storagePath);
+      if (p.processedStoragePath) paths.add(p.processedStoragePath);
+    }
+    Promise.all(
+      [...paths].map(
+        async (path) => [path, await getAssetPhotoSignedUrl(path)] as const,
+      ),
+    ).then((entries) => {
+      if (cancelled) return;
+      setPrintPhotoThumbUrls((prev) => {
+        const next = { ...prev };
+        for (const [path, url] of entries) if (url) next[path] = url;
+        return next;
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [editCard, assetPhotos]);
+
+  // Selecting an Original/AI Processed card (see chat) — a photo WITH a
+  // processed derivative shows as two cards for the same underlying
+  // asset_photos row, not two rows: they are mutually-exclusive
+  // alternates of that row's ONE print slot, never independently
+  // selected (preserves the existing one-row-one-variant architecture,
+  // no schema change). Clicking the already-selected variant's card
+  // turns printing off for this photo; clicking the other variant turns
+  // printing on (if it wasn't) and switches the variant.
+  async function handleSelectVariantCard(
+    photo: AssetPhoto,
+    variant: "original" | "processed",
+  ) {
+    const wantsProcessed = variant === "processed";
+    const alreadyThisVariant = !!photo.coverUsesProcessed === wantsProcessed;
+    if (photo.printSelected && alreadyThisVariant) {
+      await handleTogglePrintSelected(photo, false);
+      return;
+    }
+    if (!alreadyThisVariant) {
+      await handleSetPrintVariant(photo, wantsProcessed);
+    }
+    if (!photo.printSelected) {
+      await handleTogglePrintSelected(
+        { ...photo, coverUsesProcessed: wantsProcessed },
+        true,
+      );
+    }
+  }
+
+  async function handleSelectAllPrintPhotos(selected: boolean) {
+    if (printSelectionBusy || jobCardPrintablePhotos.length === 0) return;
+    setPrintSelectionBusy(true);
+    for (const photo of jobCardPrintablePhotos) {
+      if (photo.printSelected === selected) continue;
+      const result = await setPhotoPrintSelected(photo.id, selected);
+      if (result.status === "success") {
+        updateAssetPhotoLocal({ ...photo, printSelected: selected });
+      } else {
+        toast.error(result.error || "Could not update print selection.");
+        break;
+      }
+    }
+    setPrintSelectionBusy(false);
+  }
 
   // Job Card Drawing Link (Section 4, see chat) — same Drawing Repository
   // store Dies.tsx/MachineDetail.tsx/ProjectDetail.tsx already use, now
@@ -987,16 +1121,36 @@ export function JobCards({
     const projectPhotoCaption =
       projectPhoto?.caption || projectPhoto?.originalFilename || undefined;
 
-    // 2. Job Card Reference Photo ("Work Reference") — only resolved
-    //    when both a photo is selected AND printReferencePhoto is on;
-    //    otherwise Page 2 simply never renders (no blank page).
-    const referencePhoto =
-      jc.printReferencePhoto && jc.referencePhotoId
-        ? (assetPhotos || []).find((p) => p.id === jc.referencePhotoId)
-        : undefined;
-    const referencePhotoUrl = referencePhoto
-      ? await getAssetPhotoSignedUrl(resolveCoverStoragePath(referencePhoto))
-      : null;
+    // 2. Job Card Reference Photo(s) ("Work Reference") — multi-print
+    //    selection (see chat): the source of truth is each photo's own
+    //    print_selected flag, NOT jc.referencePhotoId/printReferencePhoto
+    //    (that single-photo pair is legacy — left untouched on the row
+    //    for backward compatibility, see the migration's own comment,
+    //    but no longer read here). Zero selected photos means zero
+    //    pages, never a blank one. No separate "is this an evidence
+    //    photo" check is needed here: printSelected can only ever be
+    //    set true through the Work Reference print-selection list in
+    //    the Edit form, which already excludes Evidence Photos via the
+    //    same referencePhotoExcludeIds snapshot the gallery uses — an
+    //    Evidence Photo's print_selected can never organically become
+    //    true. Each selected photo's variant (Original vs AI Processed)
+    //    comes from resolveCoverStoragePath, exactly like the Project
+    //    Photo above — cover_uses_processed=false -> Original,
+    //    =true -> Processed, per photo.
+    const selectedReferencePhotos = (assetPhotos || []).filter(
+      (p) =>
+        p.ownerType === "job_card" && p.ownerId === jc.id && p.printSelected,
+    );
+    const referencePhotoUrls: { url: string; caption?: string }[] = [];
+    for (const photo of selectedReferencePhotos) {
+      const url = await getAssetPhotoSignedUrl(resolveCoverStoragePath(photo));
+      if (url) {
+        referencePhotoUrls.push({
+          url,
+          caption: photo.caption || photo.originalFilename || undefined,
+        });
+      }
+    }
 
     // 3. Linked Drawing(s) — reuses the Drawing Editor's own existing
     //    composeAllPageViews (one composed image PER PAGE of each
@@ -1150,11 +1304,11 @@ export function JobCards({
     // own createdAt — computed here, once, right before rendering the
     // print document, and never written back to `jc` or Supabase.
     const printedAt = Date.now();
-    // Page 1 (Job Card core) + Work Reference (if included) + one page
-    // per composed drawing sheet, across every linked drawing (if
-    // included) — computed here since this is the one place that
+    // Page 1 (Job Card core) + one page per selected Reference Photo +
+    // one page per composed drawing sheet, across every linked drawing
+    // (if included) — computed here since this is the one place that
     // already knows the final resolved state of all three.
-    const totalPages = 1 + (referencePhotoUrl ? 1 : 0) + drawingSheets.length;
+    const totalPages = 1 + referencePhotoUrls.length + drawingSheets.length;
     const project = projects.find((p) => p.id === jc.projectId);
     flushSync(() => {
       root.render(
@@ -1168,7 +1322,7 @@ export function JobCards({
           totalPages={totalPages}
           projectPhotoUrl={projectPhotoUrl ?? undefined}
           projectPhotoCaption={projectPhotoCaption}
-          referencePhotoUrl={referencePhotoUrl ?? undefined}
+          referencePhotoUrls={referencePhotoUrls}
           drawingSheets={drawingSheets.length > 0 ? drawingSheets : undefined}
         />,
       );
@@ -1993,42 +2147,108 @@ export function JobCards({
                 excludeIds={referencePhotoExcludeIds}
                 data-ocid="jobcards.form.reference_photo_gallery"
               />
-              {(assetPhotos || []).filter(
-                (p) =>
-                  p.ownerType === "job_card" &&
-                  p.ownerId === editCard.id &&
-                  !referencePhotoExcludeIds.includes(p.id),
-              ).length > 0 && (
-                <div className="flex flex-wrap gap-1.5 pt-1">
-                  {(assetPhotos || [])
-                    .filter(
-                      (p) =>
-                        p.ownerType === "job_card" &&
-                        p.ownerId === editCard.id &&
-                        !referencePhotoExcludeIds.includes(p.id),
-                    )
-                    .map((p) => (
-                      <button
-                        key={p.id}
+              {/* Print selection (see chat, "Reference Photo multi-print
+                  selection") — independent of attachment: uploading a
+                  photo above (AssetPhotoGallery) never selects it for
+                  print. Reuses the SAME referencePhotoExcludeIds
+                  snapshot the gallery above already filters by, so
+                  Evidence Photos can never appear here to be checked
+                  either — there is no separate "is this an evidence
+                  photo" check needed at print time (see
+                  handlePrintJobCard) because a photo can only ever gain
+                  printSelected=true through this list. Each row's own
+                  print_selected/cover_uses_processed writes go straight
+                  to asset_photos via setPhotoPrintSelected/
+                  setPhotoCoverVariant — no job_cards column, no
+                  form.referencePhotoId involvement (that field/its
+                  chip-select UI is retired here; the legacy column
+                  itself is left untouched on the server, see the
+                  migration's own comment). */}
+              {jobCardPrintablePhotos.length > 0 && (
+                <div
+                  className="space-y-2 pt-1"
+                  data-ocid="jobcards.form.reference_photo_print_selection"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
+                      Print Selection
+                    </span>
+                    <div className="flex gap-1.5">
+                      <Button
                         type="button"
-                        className={`text-xs rounded-md border px-2 py-1 ${
-                          form.referencePhotoId === p.id
-                            ? "border-primary bg-primary/10 font-semibold"
-                            : "border-input"
-                        }`}
-                        onClick={() =>
-                          setForm((f) => ({
-                            ...f,
-                            referencePhotoId:
-                              f.referencePhotoId === p.id ? "" : p.id,
-                          }))
-                        }
-                        data-ocid={`jobcards.form.reference_photo_select.${p.id}`}
+                        variant="outline"
+                        size="sm"
+                        className="h-6 px-2 text-[11px]"
+                        disabled={isBusy}
+                        onClick={() => handleSelectAllPrintPhotos(true)}
+                        data-ocid="jobcards.form.reference_photo_select_all"
                       >
-                        {form.referencePhotoId === p.id ? "✓ " : ""}
-                        {p.originalFilename ?? p.id.slice(0, 8)}
-                      </button>
-                    ))}
+                        Select All
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-6 px-2 text-[11px]"
+                        disabled={isBusy}
+                        onClick={() => handleSelectAllPrintPhotos(false)}
+                        data-ocid="jobcards.form.reference_photo_clear_all"
+                      >
+                        Clear All
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {jobCardPrintablePhotos.map((p) => {
+                      const originalSelected =
+                        p.printSelected && !p.coverUsesProcessed;
+                      const processedSelected =
+                        p.printSelected && !!p.coverUsesProcessed;
+                      const originalUrl = printPhotoThumbUrls[p.storagePath];
+                      const processedUrl = p.processedStoragePath
+                        ? printPhotoThumbUrls[p.processedStoragePath]
+                        : undefined;
+                      // A photo WITH a processed derivative renders as
+                      // TWO cards (Original / AI Processed) — mutually
+                      // exclusive alternates of this ONE row's print
+                      // slot, see handleSelectVariantCard. A photo with
+                      // none renders as a single plain card.
+                      return (
+                        <div
+                          key={p.id}
+                          className="contents"
+                          data-ocid={`jobcards.form.reference_photo_print_row.${p.id}`}
+                        >
+                          <PrintPhotoCard
+                            url={originalUrl}
+                            label={
+                              p.processedStoragePath
+                                ? "Original"
+                                : (p.originalFilename ?? "Photo")
+                            }
+                            selected={originalSelected}
+                            disabled={isBusy}
+                            onClick={() =>
+                              handleSelectVariantCard(p, "original")
+                            }
+                            data-ocid={`jobcards.form.reference_photo_variant_original.${p.id}`}
+                          />
+                          {p.processedStoragePath && (
+                            <PrintPhotoCard
+                              url={processedUrl}
+                              label="AI Processed"
+                              selected={processedSelected}
+                              disabled={isBusy}
+                              onClick={() =>
+                                handleSelectVariantCard(p, "processed")
+                              }
+                              data-ocid={`jobcards.form.reference_photo_variant_processed.${p.id}`}
+                            />
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
             </>
@@ -2124,24 +2344,17 @@ export function JobCards({
       </div>
 
       {sectionLabel("Print Options")}
+      {/* "Print Reference Photo" (form.printReferencePhoto/
+          referencePhotoId) retired from this UI (see chat, "legacy
+          conflict") — the new per-photo Print Selection controls above
+          are now the sole way to choose which Reference Photos print;
+          handlePrintJobCard stopped reading these two fields, so a
+          surviving checkbox here would silently do nothing. The fields
+          themselves, their save/hydration, and the job_cards columns
+          are untouched — only this dead control is gone. */}
       <div className="space-y-2 rounded-md border p-3">
         <div className="space-y-2">
-          <Label className="text-xs">Print Reference Photo / Drawing</Label>
-          <div className="flex items-center gap-2">
-            <Checkbox
-              id="jc-print-reference"
-              checked={form.printReferencePhoto}
-              disabled={
-                editCard ? !form.referencePhotoId : !pendingReferencePhotoFile
-              }
-              onCheckedChange={(v) =>
-                setForm((f) => ({ ...f, printReferencePhoto: v === true }))
-              }
-            />
-            <Label htmlFor="jc-print-reference" className="text-xs font-normal">
-              Print Reference Photo (adds a dedicated page)
-            </Label>
-          </div>
+          <Label className="text-xs">Print Drawing</Label>
           <div className="flex items-center gap-2">
             <Checkbox
               id="jc-print-drawing"
@@ -2380,17 +2593,25 @@ export function JobCards({
         </div>
       </div>
 
-      {/* Add */}
+      {/* Add — widened + scroll-contained (see chat, "same treatment as
+          the View dialog"): same max-w-[calc(100%-2rem)] sm:max-w-3xl
+          max-h-[90vh] p-0 gap-0 flex flex-col overflow-hidden shell,
+          sticky header/footer (border-b/border-t, shrink-0), only the
+          middle form region scrolls (flex-1 min-h-0 overflow-y-auto
+          overflow-x-hidden) — purely layout, formFields/handleSaveAdd
+          and every field inside are untouched. */}
       <Dialog open={addOpen} onOpenChange={setAddOpen}>
         <DialogContent
-          className="max-w-lg max-h-[90vh] overflow-y-auto"
+          className="max-w-[calc(100%-2rem)] sm:max-w-3xl max-h-[90vh] p-0 gap-0 flex flex-col overflow-hidden"
           data-ocid="jobcards.add.dialog"
         >
-          <DialogHeader>
+          <DialogHeader className="shrink-0 border-b p-4 sm:p-6">
             <DialogTitle>New Job Card</DialogTitle>
           </DialogHeader>
-          {formFields}
-          <DialogFooter>
+          <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 sm:p-6">
+            {formFields}
+          </div>
+          <DialogFooter className="shrink-0 border-t p-4 sm:p-6">
             <Button
               type="button"
               variant="outline"
@@ -2412,7 +2633,7 @@ export function JobCards({
         </DialogContent>
       </Dialog>
 
-      {/* Edit */}
+      {/* Edit — same widened + scroll-contained shell as Add above. */}
       <Dialog
         open={!!editCard}
         onOpenChange={(o) => {
@@ -2420,14 +2641,16 @@ export function JobCards({
         }}
       >
         <DialogContent
-          className="max-w-lg max-h-[90vh] overflow-y-auto"
+          className="max-w-[calc(100%-2rem)] sm:max-w-3xl max-h-[90vh] p-0 gap-0 flex flex-col overflow-hidden"
           data-ocid="jobcards.edit.dialog"
         >
-          <DialogHeader>
+          <DialogHeader className="shrink-0 border-b p-4 sm:p-6">
             <DialogTitle>Edit {editCard?.jobNo}</DialogTitle>
           </DialogHeader>
-          {formFields}
-          <DialogFooter>
+          <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 sm:p-6">
+            {formFields}
+          </div>
+          <DialogFooter className="shrink-0 border-t p-4 sm:p-6">
             <Button
               type="button"
               variant="outline"
@@ -2456,10 +2679,27 @@ export function JobCards({
           if (!o) setViewCard(null);
         }}
       >
-        <DialogContent className="max-w-md" data-ocid="jobcards.view.dialog">
+        {/* Widened + scroll-contained (see chat, "View dialog too narrow")
+            — max-w-[calc(100%-2rem)] keeps the base component's own
+            phone-safe margin below the sm: breakpoint, then steps up to
+            max-w-3xl (~768px) on larger screens, comfortably fitting
+            the sign-off/planning/timer/checkpoints/completion content
+            this dialog holds without the heavy wrapping the old
+            max-w-md caused. flex flex-col + p-0 moves padding onto the
+            header/body/footer individually so the header and footer
+            can stay put (border-b/border-t, shrink-0) while only the
+            middle content region scrolls (overflow-y-auto, min-h-0 is
+            load-bearing inside a flex column for a scrollable child to
+            actually shrink instead of pushing the dialog taller than
+            max-h-[90vh]) — no business logic below this line changed,
+            purely a layout restructure. */}
+        <DialogContent
+          className="max-w-[calc(100%-2rem)] sm:max-w-3xl max-h-[90vh] p-0 gap-0 flex flex-col overflow-hidden"
+          data-ocid="jobcards.view.dialog"
+        >
           {viewCard && (
             <>
-              <DialogHeader>
+              <DialogHeader className="shrink-0 border-b p-4 sm:p-6">
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2">
                     <DialogTitle>{viewCard.jobNo}</DialogTitle>
@@ -2483,215 +2723,222 @@ export function JobCards({
                   </Button>
                 </div>
               </DialogHeader>
-              {/* Sign-Off Status (Part 11, see chat) — supplements the
+              <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 sm:p-6 space-y-4">
+                {/* Sign-Off Status (Part 11, see chat) — supplements the
                   aggregate "To Be Fulfilled" badge above with per-role
                   detail, read-only. Reuses the same persisted name fields
                   the print template and Edit form already read; no new
                   fetch, no persistence, no change to
                   needsSignOffFulfillment itself. */}
-              <div
-                className="rounded-md border p-2.5 grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs"
-                data-ocid="jobcards.view.signoff_status"
-              >
-                {(
-                  [
-                    ["Prepared By", viewCard.preparedByName],
-                    ["Assigned By", viewCard.assignedByEmployeeName],
-                    ["In-Process Check", viewCard.inProcessCheckEmployeeName],
-                    ["QC Approved By", viewCard.qcApprovedByEmployeeName],
-                  ] as const
-                ).map(([label, name]) => (
-                  <div key={label} className="flex justify-between gap-2">
-                    <span className="text-muted-foreground">{label}</span>
-                    <span
-                      className={
-                        name
-                          ? "font-medium text-right"
-                          : "text-warning text-right"
-                      }
-                    >
-                      {name || "Pending"}
-                    </span>
-                  </div>
-                ))}
-              </div>
-              {/* Project Reference Photo — small, identifies the
+                <div
+                  className="rounded-md border p-2.5 grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs"
+                  data-ocid="jobcards.view.signoff_status"
+                >
+                  {(
+                    [
+                      ["Prepared By", viewCard.preparedByName],
+                      ["Assigned By", viewCard.assignedByEmployeeName],
+                      ["In-Process Check", viewCard.inProcessCheckEmployeeName],
+                      ["QC Approved By", viewCard.qcApprovedByEmployeeName],
+                    ] as const
+                  ).map(([label, name]) => (
+                    <div key={label} className="flex justify-between gap-2">
+                      <span className="text-muted-foreground">{label}</span>
+                      <span
+                        className={
+                          name
+                            ? "font-medium text-right"
+                            : "text-warning text-right"
+                        }
+                      >
+                        {name || "Pending"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                {/* Project Reference Photo — small, identifies the
                   product/project (Section 1, see chat), not an evidence
                   photo. Entirely absent when the Project has no photo —
                   no empty/broken image, no space-consuming placeholder. */}
-              {viewProjectPhotoUrl && (
-                <img
-                  src={viewProjectPhotoUrl}
-                  alt="Project reference"
-                  className="w-full max-h-32 object-contain rounded-md border"
-                  data-ocid="jobcards.view.project_photo"
-                />
-              )}
-              {/* Feature: Printable Job Card — physical/paper copy for a
+                {viewProjectPhotoUrl && (
+                  <img
+                    src={viewProjectPhotoUrl}
+                    alt="Project reference"
+                    className="w-full max-h-32 object-contain rounded-md border"
+                    data-ocid="jobcards.view.project_photo"
+                  />
+                )}
+                {/* Feature: Printable Job Card — physical/paper copy for a
                   shop-floor employee without a phone/login. Reuses this
                   exact Job Card's own data; nothing here writes to it. */}
-              <Button
-                variant="outline"
-                className="w-full"
-                onClick={() => handlePrintJobCard(viewCard)}
-                data-ocid="jobcards.view.print_button"
-              >
-                <Printer className="w-4 h-4 mr-2" /> Print Job Card
-              </Button>
-              <div className="space-y-3 text-sm">
-                <div className="grid grid-cols-2 gap-2">
+                <Button
+                  variant="outline"
+                  className="w-full"
+                  onClick={() => handlePrintJobCard(viewCard)}
+                  data-ocid="jobcards.view.print_button"
+                >
+                  <Printer className="w-4 h-4 mr-2" /> Print Job Card
+                </Button>
+                <div className="space-y-3 text-sm">
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <p className="text-xs text-muted-foreground">Project</p>
+                      {onViewProject ? (
+                        <button
+                          type="button"
+                          className="font-mono hover:underline text-left"
+                          onClick={() => onViewProject(viewCard.projectId)}
+                          data-ocid="jobcards.view.project_link"
+                        >
+                          {projectNo(viewCard.projectId)}
+                        </button>
+                      ) : (
+                        <p className="font-mono">
+                          {projectNo(viewCard.projectId)}
+                        </p>
+                      )}
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Employee</p>
+                      <p>{viewCard.employeeName}</p>
+                    </div>
+                  </div>
                   <div>
-                    <p className="text-xs text-muted-foreground">Project</p>
-                    {onViewProject ? (
-                      <button
-                        type="button"
-                        className="font-mono hover:underline text-left"
-                        onClick={() => onViewProject(viewCard.projectId)}
-                        data-ocid="jobcards.view.project_link"
-                      >
-                        {projectNo(viewCard.projectId)}
-                      </button>
-                    ) : (
-                      <p className="font-mono">
-                        {projectNo(viewCard.projectId)}
+                    <p className="text-xs text-muted-foreground">Job / Task</p>
+                    <p>{viewCard.jobDescription}</p>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <p className="text-xs text-muted-foreground">
+                        Operation Type
                       </p>
-                    )}
+                      <p>{viewCard.operationType}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">
+                        Production Stage
+                      </p>
+                      <p>
+                        {stageName(viewCard.stageId) ?? "Ad-hoc (no stage)"}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Status</p>
+                      <Badge
+                        className={`text-xs ${statusCls(viewCard.status)}`}
+                      >
+                        {STATUS_LABEL[viewCard.status]}
+                      </Badge>
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground">Employee</p>
-                    <p>{viewCard.employeeName}</p>
+                  <div className="grid grid-cols-2 gap-2 rounded-md border bg-muted/30 p-2.5">
+                    <div>
+                      <p className="text-xs text-muted-foreground">
+                        Standard Time / Unit
+                      </p>
+                      <p className="font-mono">
+                        {viewCard.standardTimePerUnitMinutes} min
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">
+                        Allocated Time
+                      </p>
+                      <p className="font-mono">
+                        {viewCard.allocatedTimeMinutes} min
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">
+                        Expected Quantity
+                      </p>
+                      <p className="font-mono font-semibold">
+                        {viewCard.expectedQuantity} pcs
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">
+                        Actual Time Spent
+                      </p>
+                      <p className="font-mono">
+                        {viewCard.actualTimeSpentMinutes != null
+                          ? `${viewCard.actualTimeSpentMinutes} min`
+                          : "—"}
+                      </p>
+                    </div>
                   </div>
-                </div>
-                <div>
-                  <p className="text-xs text-muted-foreground">Job / Task</p>
-                  <p>{viewCard.jobDescription}</p>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <p className="text-xs text-muted-foreground">
-                      Operation Type
-                    </p>
-                    <p>{viewCard.operationType}</p>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <p className="text-xs text-muted-foreground">Completed</p>
+                      <p className="font-mono">{viewCard.actualCompletedQty}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Rejected</p>
+                      <p className="font-mono text-destructive">
+                        {viewCard.rejectedQty}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Rework</p>
+                      <p className="font-mono text-warning">
+                        {viewCard.reworkQty}
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground">
-                      Production Stage
-                    </p>
-                    <p>{stageName(viewCard.stageId) ?? "Ad-hoc (no stage)"}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground">Status</p>
-                    <Badge className={`text-xs ${statusCls(viewCard.status)}`}>
-                      {STATUS_LABEL[viewCard.status]}
-                    </Badge>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-2 rounded-md border bg-muted/30 p-2.5">
-                  <div>
-                    <p className="text-xs text-muted-foreground">
-                      Standard Time / Unit
-                    </p>
-                    <p className="font-mono">
-                      {viewCard.standardTimePerUnitMinutes} min
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground">
-                      Allocated Time
-                    </p>
-                    <p className="font-mono">
-                      {viewCard.allocatedTimeMinutes} min
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground">
-                      Expected Quantity
-                    </p>
-                    <p className="font-mono font-semibold">
-                      {viewCard.expectedQuantity} pcs
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground">
-                      Actual Time Spent
-                    </p>
-                    <p className="font-mono">
-                      {viewCard.actualTimeSpentMinutes != null
-                        ? `${viewCard.actualTimeSpentMinutes} min`
-                        : "—"}
-                    </p>
-                  </div>
-                </div>
-                <div className="grid grid-cols-3 gap-2">
-                  <div>
-                    <p className="text-xs text-muted-foreground">Completed</p>
-                    <p className="font-mono">{viewCard.actualCompletedQty}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground">Rejected</p>
-                    <p className="font-mono text-destructive">
-                      {viewCard.rejectedQty}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground">Rework</p>
-                    <p className="font-mono text-warning">
-                      {viewCard.reworkQty}
-                    </p>
-                  </div>
-                </div>
-                {viewCard.notes && (
-                  <div>
-                    <p className="text-xs text-muted-foreground">Notes</p>
-                    <p>{viewCard.notes}</p>
-                  </div>
-                )}
-                {/* Persisted timer timestamps — server-set only, never a
+                  {viewCard.notes && (
+                    <div>
+                      <p className="text-xs text-muted-foreground">Notes</p>
+                      <p>{viewCard.notes}</p>
+                    </div>
+                  )}
+                  {/* Persisted timer timestamps — server-set only, never a
                     form field (see JobCardTimerPanel below for the
                     Start/Pause/Resume/Complete controls that set them).
                     Reopening this dialog after a reload always reads
                     these straight from the database row. */}
-                <div className="grid grid-cols-3 gap-2 rounded-md border bg-muted/30 p-2.5">
-                  <div>
-                    <p className="text-xs text-muted-foreground">
-                      Start Date &amp; Time
-                    </p>
-                    <p className="text-xs font-medium">
-                      {viewCard.startTime
-                        ? formatJobCardTimestamp(viewCard.startTime)
-                        : "Not started yet"}
-                    </p>
+                  <div className="grid grid-cols-3 gap-2 rounded-md border bg-muted/30 p-2.5">
+                    <div>
+                      <p className="text-xs text-muted-foreground">
+                        Start Date &amp; Time
+                      </p>
+                      <p className="text-xs font-medium">
+                        {viewCard.startTime
+                          ? formatJobCardTimestamp(viewCard.startTime)
+                          : "Not started yet"}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">
+                        End Date &amp; Time
+                      </p>
+                      <p className="text-xs font-medium">
+                        {viewCard.endTime
+                          ? formatJobCardTimestamp(viewCard.endTime)
+                          : "Not completed yet"}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">
+                        Active Time
+                      </p>
+                      <p className="text-xs font-mono font-semibold">
+                        {viewCardActiveTime}
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground">
-                      End Date &amp; Time
-                    </p>
-                    <p className="text-xs font-medium">
-                      {viewCard.endTime
-                        ? formatJobCardTimestamp(viewCard.endTime)
-                        : "Not completed yet"}
-                    </p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground">Active Time</p>
-                    <p className="text-xs font-mono font-semibold">
-                      {viewCardActiveTime}
-                    </p>
-                  </div>
-                </div>
-                <JobCardTimerPanel
-                  jobCard={viewCard}
-                  canEdit={pEdit}
-                  canPause={pApprove}
-                  onStart={() => handleStart(viewCard)}
-                  onPause={() => handlePause(viewCard)}
-                  onResume={() => handleResume(viewCard)}
-                  onComplete={() => setCompleteOpen(true)}
-                  isSaving={isSaving}
-                  dataOcidPrefix="jobcards.view.timer"
-                />
+                  <JobCardTimerPanel
+                    jobCard={viewCard}
+                    canEdit={pEdit}
+                    canPause={pApprove}
+                    onStart={() => handleStart(viewCard)}
+                    onPause={() => handlePause(viewCard)}
+                    onResume={() => handleResume(viewCard)}
+                    onComplete={() => setCompleteOpen(true)}
+                    isSaving={isSaving}
+                    dataOcidPrefix="jobcards.view.timer"
+                  />
 
-                {/* Production Progress (see chat, Part 5) — reuses the
+                  {/* Production Progress (see chat, Part 5) — reuses the
                     EXISTING actual_completed_qty column, just widens
                     WHEN it can be written (also while InProgress/
                     OnHold, not only at Complete) so checkpoints below
@@ -2699,268 +2946,269 @@ export function JobCards({
                     the very end. Never auto-marks any checkpoint
                     Passed — this only moves the quantity the checkpoint
                     list compares against. */}
-                {(viewCard.status === "InProgress" ||
-                  viewCard.status === "OnHold") &&
-                  pEdit && (
+                  {(viewCard.status === "InProgress" ||
+                    viewCard.status === "OnHold") &&
+                    pEdit && (
+                      <div
+                        className="rounded-md border p-2.5 space-y-1.5"
+                        data-ocid="jobcards.view.production_progress"
+                      >
+                        <Label className="text-xs">Production Progress</Label>
+                        <div className="flex items-center gap-2">
+                          <Input
+                            type="number"
+                            min="0"
+                            className="h-8 w-28 text-xs"
+                            value={progressInput}
+                            onChange={(e) => setProgressInput(e.target.value)}
+                          />
+                          <span className="text-xs text-muted-foreground">
+                            of {viewCard.totalQuantity ?? "—"} pcs
+                          </span>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={savingProgress}
+                            onClick={handleSaveProgress}
+                            data-ocid="jobcards.view.production_progress.save"
+                          >
+                            Update
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+
+                  {/* Inspection Checkpoints (see chat, Part 4-8) — each
+                    row is an INDEPENDENT inspection event; recording one
+                    never touches any other checkpoint's own state. */}
+                  {viewCard.inspectionPlan.length > 0 && (
                     <div
-                      className="rounded-md border p-2.5 space-y-1.5"
-                      data-ocid="jobcards.view.production_progress"
+                      className="rounded-md border p-2.5 space-y-2"
+                      data-ocid="jobcards.view.checkpoints"
                     >
-                      <Label className="text-xs">Production Progress</Label>
-                      <div className="flex items-center gap-2">
-                        <Input
-                          type="number"
-                          min="0"
-                          className="h-8 w-28 text-xs"
-                          value={progressInput}
-                          onChange={(e) => setProgressInput(e.target.value)}
+                      <Label className="text-xs">Inspection Checkpoints</Label>
+                      {[...viewCard.inspectionPlan]
+                        .sort((a, b) => a.cumulativeQty - b.cumulativeQty)
+                        .map((cp) => {
+                          const status = getCheckpointStatus(
+                            cp,
+                            viewCard.actualCompletedQty,
+                            viewCardEvents,
+                          );
+                          const cls =
+                            status === "Passed"
+                              ? "bg-success/10 text-success border-success/30"
+                              : status === "Failed"
+                                ? "bg-destructive/10 text-destructive border-destructive/30"
+                                : status === "Due"
+                                  ? "bg-warning/15 text-warning border-warning/30"
+                                  : "bg-muted text-muted-foreground";
+                          return (
+                            <div
+                              key={cp.id}
+                              className="rounded border p-2 space-y-1.5"
+                              data-ocid={`jobcards.view.checkpoints.${cp.id}`}
+                            >
+                              <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-xs font-medium">
+                                    {cp.label}
+                                  </span>
+                                  <Badge
+                                    variant="outline"
+                                    className={`text-[9px] px-1.5 py-0 ${CHECKPOINT_SOURCE_CLS[cp.source]}`}
+                                  >
+                                    {CHECKPOINT_SOURCE_LABEL[cp.source]}
+                                  </Badge>
+                                  <span className="text-[10px] text-muted-foreground">
+                                    @ {cp.cumulativeQty} pcs
+                                  </span>
+                                </div>
+                                <Badge className={`text-[10px] ${cls}`}>
+                                  {status}
+                                </Badge>
+                              </div>
+                              {pEdit &&
+                                (status === "Due" ||
+                                  status === "Upcoming" ||
+                                  status === "Failed") &&
+                                (recordingCheckpointId === cp.id ? (
+                                  <div className="space-y-1.5">
+                                    <Textarea
+                                      className="text-xs"
+                                      placeholder="Remarks (optional)"
+                                      rows={2}
+                                      value={checkpointRemarks}
+                                      onChange={(e) =>
+                                        setCheckpointRemarks(e.target.value)
+                                      }
+                                    />
+                                    <div className="flex gap-1.5">
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        disabled={savingCheckpoint}
+                                        onClick={() =>
+                                          handleRecordCheckpoint(cp, "Pass")
+                                        }
+                                        data-ocid={`jobcards.view.checkpoints.${cp.id}.pass`}
+                                      >
+                                        Pass
+                                      </Button>
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="destructive"
+                                        disabled={savingCheckpoint}
+                                        onClick={() =>
+                                          handleRecordCheckpoint(cp, "Fail")
+                                        }
+                                        data-ocid={`jobcards.view.checkpoints.${cp.id}.fail`}
+                                      >
+                                        Fail
+                                      </Button>
+                                      <Button
+                                        type="button"
+                                        size="sm"
+                                        variant="ghost"
+                                        onClick={() => {
+                                          setRecordingCheckpointId(null);
+                                          setCheckpointRemarks("");
+                                        }}
+                                      >
+                                        Cancel
+                                      </Button>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    variant="outline"
+                                    onClick={() =>
+                                      setRecordingCheckpointId(cp.id)
+                                    }
+                                    data-ocid={`jobcards.view.checkpoints.${cp.id}.inspect`}
+                                  >
+                                    Inspect
+                                  </Button>
+                                ))}
+                            </div>
+                          );
+                        })}
+                    </div>
+                  )}
+
+                  {/* Completed Job Card attachment (see chat, Parts 12-14)
+                    — the scanned/photographed, manually completed and
+                    signed physical Job Card. Distinct from Reference
+                    Photo/Project Reference Photo/Evidence Photo. */}
+                  <div
+                    className="rounded-md border p-2.5 space-y-1.5"
+                    data-ocid="jobcards.view.completed_document"
+                  >
+                    <Label className="text-xs">Completed Job Card</Label>
+                    {viewCard.completedDocumentStoragePath ? (
+                      <div className="space-y-1.5">
+                        <p className="text-xs">
+                          {viewCard.completedDocumentFilename}
+                        </p>
+                        <p className="text-[10px] text-muted-foreground">
+                          Uploaded by{" "}
+                          {viewCard.completedDocumentUploadedByName ?? "—"}
+                          {viewCard.completedDocumentUploadedAt &&
+                            ` on ${new Date(viewCard.completedDocumentUploadedAt).toLocaleString("en-IN")}`}
+                        </p>
+                        <div className="flex gap-1.5">
+                          {completedDocSignedUrl && (
+                            <Button
+                              asChild
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                            >
+                              <a
+                                href={completedDocSignedUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                data-ocid="jobcards.view.completed_document.view"
+                              >
+                                View
+                              </a>
+                            </Button>
+                          )}
+                          {pEdit && (
+                            <>
+                              <input
+                                type="file"
+                                accept="application/pdf,image/jpeg,image/png"
+                                id="jc-completed-doc-replace"
+                                className="hidden"
+                                onChange={handleUploadCompletedDocument}
+                              />
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                disabled={savingDocument}
+                                onClick={() =>
+                                  document
+                                    .getElementById("jc-completed-doc-replace")
+                                    ?.click()
+                                }
+                                data-ocid="jobcards.view.completed_document.replace"
+                              >
+                                Replace
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                disabled={savingDocument}
+                                onClick={handleRemoveCompletedDocument}
+                                data-ocid="jobcards.view.completed_document.remove"
+                              >
+                                Remove
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    ) : pEdit ? (
+                      <div>
+                        <input
+                          type="file"
+                          accept="application/pdf,image/jpeg,image/png"
+                          id="jc-completed-doc-upload"
+                          className="hidden"
+                          onChange={handleUploadCompletedDocument}
                         />
-                        <span className="text-xs text-muted-foreground">
-                          of {viewCard.totalQuantity ?? "—"} pcs
-                        </span>
                         <Button
                           type="button"
                           size="sm"
                           variant="outline"
-                          disabled={savingProgress}
-                          onClick={handleSaveProgress}
-                          data-ocid="jobcards.view.production_progress.save"
+                          disabled={savingDocument}
+                          onClick={() =>
+                            document
+                              .getElementById("jc-completed-doc-upload")
+                              ?.click()
+                          }
+                          data-ocid="jobcards.view.completed_document.upload"
                         >
-                          Update
+                          <Plus className="w-3.5 h-3.5 mr-1" /> Upload Completed
+                          Job Card
                         </Button>
                       </div>
-                    </div>
-                  )}
-
-                {/* Inspection Checkpoints (see chat, Part 4-8) — each
-                    row is an INDEPENDENT inspection event; recording one
-                    never touches any other checkpoint's own state. */}
-                {viewCard.inspectionPlan.length > 0 && (
-                  <div
-                    className="rounded-md border p-2.5 space-y-2"
-                    data-ocid="jobcards.view.checkpoints"
-                  >
-                    <Label className="text-xs">Inspection Checkpoints</Label>
-                    {[...viewCard.inspectionPlan]
-                      .sort((a, b) => a.cumulativeQty - b.cumulativeQty)
-                      .map((cp) => {
-                        const status = getCheckpointStatus(
-                          cp,
-                          viewCard.actualCompletedQty,
-                          viewCardEvents,
-                        );
-                        const cls =
-                          status === "Passed"
-                            ? "bg-success/10 text-success border-success/30"
-                            : status === "Failed"
-                              ? "bg-destructive/10 text-destructive border-destructive/30"
-                              : status === "Due"
-                                ? "bg-warning/15 text-warning border-warning/30"
-                                : "bg-muted text-muted-foreground";
-                        return (
-                          <div
-                            key={cp.id}
-                            className="rounded border p-2 space-y-1.5"
-                            data-ocid={`jobcards.view.checkpoints.${cp.id}`}
-                          >
-                            <div className="flex items-center justify-between gap-2 flex-wrap">
-                              <div className="flex items-center gap-1.5">
-                                <span className="text-xs font-medium">
-                                  {cp.label}
-                                </span>
-                                <Badge
-                                  variant="outline"
-                                  className={`text-[9px] px-1.5 py-0 ${CHECKPOINT_SOURCE_CLS[cp.source]}`}
-                                >
-                                  {CHECKPOINT_SOURCE_LABEL[cp.source]}
-                                </Badge>
-                                <span className="text-[10px] text-muted-foreground">
-                                  @ {cp.cumulativeQty} pcs
-                                </span>
-                              </div>
-                              <Badge className={`text-[10px] ${cls}`}>
-                                {status}
-                              </Badge>
-                            </div>
-                            {pEdit &&
-                              (status === "Due" ||
-                                status === "Upcoming" ||
-                                status === "Failed") &&
-                              (recordingCheckpointId === cp.id ? (
-                                <div className="space-y-1.5">
-                                  <Textarea
-                                    className="text-xs"
-                                    placeholder="Remarks (optional)"
-                                    rows={2}
-                                    value={checkpointRemarks}
-                                    onChange={(e) =>
-                                      setCheckpointRemarks(e.target.value)
-                                    }
-                                  />
-                                  <div className="flex gap-1.5">
-                                    <Button
-                                      type="button"
-                                      size="sm"
-                                      disabled={savingCheckpoint}
-                                      onClick={() =>
-                                        handleRecordCheckpoint(cp, "Pass")
-                                      }
-                                      data-ocid={`jobcards.view.checkpoints.${cp.id}.pass`}
-                                    >
-                                      Pass
-                                    </Button>
-                                    <Button
-                                      type="button"
-                                      size="sm"
-                                      variant="destructive"
-                                      disabled={savingCheckpoint}
-                                      onClick={() =>
-                                        handleRecordCheckpoint(cp, "Fail")
-                                      }
-                                      data-ocid={`jobcards.view.checkpoints.${cp.id}.fail`}
-                                    >
-                                      Fail
-                                    </Button>
-                                    <Button
-                                      type="button"
-                                      size="sm"
-                                      variant="ghost"
-                                      onClick={() => {
-                                        setRecordingCheckpointId(null);
-                                        setCheckpointRemarks("");
-                                      }}
-                                    >
-                                      Cancel
-                                    </Button>
-                                  </div>
-                                </div>
-                              ) : (
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  variant="outline"
-                                  onClick={() =>
-                                    setRecordingCheckpointId(cp.id)
-                                  }
-                                  data-ocid={`jobcards.view.checkpoints.${cp.id}.inspect`}
-                                >
-                                  Inspect
-                                </Button>
-                              ))}
-                          </div>
-                        );
-                      })}
+                    ) : (
+                      <p className="text-xs text-muted-foreground">
+                        Not uploaded yet.
+                      </p>
+                    )}
                   </div>
-                )}
-
-                {/* Completed Job Card attachment (see chat, Parts 12-14)
-                    — the scanned/photographed, manually completed and
-                    signed physical Job Card. Distinct from Reference
-                    Photo/Project Reference Photo/Evidence Photo. */}
-                <div
-                  className="rounded-md border p-2.5 space-y-1.5"
-                  data-ocid="jobcards.view.completed_document"
-                >
-                  <Label className="text-xs">Completed Job Card</Label>
-                  {viewCard.completedDocumentStoragePath ? (
-                    <div className="space-y-1.5">
-                      <p className="text-xs">
-                        {viewCard.completedDocumentFilename}
-                      </p>
-                      <p className="text-[10px] text-muted-foreground">
-                        Uploaded by{" "}
-                        {viewCard.completedDocumentUploadedByName ?? "—"}
-                        {viewCard.completedDocumentUploadedAt &&
-                          ` on ${new Date(viewCard.completedDocumentUploadedAt).toLocaleString("en-IN")}`}
-                      </p>
-                      <div className="flex gap-1.5">
-                        {completedDocSignedUrl && (
-                          <Button
-                            asChild
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                          >
-                            <a
-                              href={completedDocSignedUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              data-ocid="jobcards.view.completed_document.view"
-                            >
-                              View
-                            </a>
-                          </Button>
-                        )}
-                        {pEdit && (
-                          <>
-                            <input
-                              type="file"
-                              accept="application/pdf,image/jpeg,image/png"
-                              id="jc-completed-doc-replace"
-                              className="hidden"
-                              onChange={handleUploadCompletedDocument}
-                            />
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              disabled={savingDocument}
-                              onClick={() =>
-                                document
-                                  .getElementById("jc-completed-doc-replace")
-                                  ?.click()
-                              }
-                              data-ocid="jobcards.view.completed_document.replace"
-                            >
-                              Replace
-                            </Button>
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="ghost"
-                              disabled={savingDocument}
-                              onClick={handleRemoveCompletedDocument}
-                              data-ocid="jobcards.view.completed_document.remove"
-                            >
-                              Remove
-                            </Button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  ) : pEdit ? (
-                    <div>
-                      <input
-                        type="file"
-                        accept="application/pdf,image/jpeg,image/png"
-                        id="jc-completed-doc-upload"
-                        className="hidden"
-                        onChange={handleUploadCompletedDocument}
-                      />
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        disabled={savingDocument}
-                        onClick={() =>
-                          document
-                            .getElementById("jc-completed-doc-upload")
-                            ?.click()
-                        }
-                        data-ocid="jobcards.view.completed_document.upload"
-                      >
-                        <Plus className="w-3.5 h-3.5 mr-1" /> Upload Completed
-                        Job Card
-                      </Button>
-                    </div>
-                  ) : (
-                    <p className="text-xs text-muted-foreground">
-                      Not uploaded yet.
-                    </p>
-                  )}
                 </div>
               </div>
-              <DialogFooter>
+              <DialogFooter className="shrink-0 border-t p-4 sm:p-6">
                 {pEdit && (
                   <Button
                     variant="outline"
@@ -3005,6 +3253,69 @@ export function JobCards({
         onConfirm={confirmDelete}
       />
     </div>
+  );
+}
+
+// Image-first print-selection card (see chat, "redesign reference
+// photo print selection") — a plain button so the whole thumbnail is
+// clickable, not just a small checkbox; the checkbox itself is purely
+// visual (overlaid top-right, never independently focusable/clickable)
+// since the button already carries the click and the accessible state.
+// Renders a placeholder box while its signed URL is still loading
+// rather than nothing, so the grid doesn't jump as thumbnails resolve.
+function PrintPhotoCard({
+  url,
+  label,
+  selected,
+  disabled,
+  onClick,
+  "data-ocid": dataOcid,
+}: {
+  url: string | undefined;
+  label: string;
+  selected: boolean;
+  disabled: boolean;
+  onClick: () => void;
+  "data-ocid": string;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className={`relative aspect-square rounded-md border overflow-hidden text-left disabled:opacity-60 ${
+        selected
+          ? "border-primary ring-2 ring-primary"
+          : "border-input hover:border-foreground/40"
+      }`}
+      data-ocid={dataOcid}
+    >
+      {url ? (
+        <img
+          src={url}
+          alt={label}
+          className="absolute inset-0 w-full h-full object-cover"
+        />
+      ) : (
+        <div className="absolute inset-0 bg-muted animate-pulse" />
+      )}
+      {selected && (
+        <div className="absolute inset-0 bg-primary/10" aria-hidden="true" />
+      )}
+      <div
+        className={`absolute top-1 right-1 w-5 h-5 rounded-full border flex items-center justify-center ${
+          selected
+            ? "bg-primary border-primary text-primary-foreground"
+            : "bg-background/90 border-input"
+        }`}
+        aria-hidden="true"
+      >
+        {selected && <Check className="w-3.5 h-3.5" />}
+      </div>
+      <div className="absolute bottom-0 inset-x-0 bg-background/85 px-1.5 py-0.5 text-[10px] font-medium truncate">
+        {label}
+      </div>
+    </button>
   );
 }
 

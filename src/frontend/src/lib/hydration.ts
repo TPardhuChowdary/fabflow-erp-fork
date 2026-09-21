@@ -3636,6 +3636,16 @@ export function transformJobCardRow(row: JobCardRow): JobCard {
     completedDocumentUploadedAt: row.completed_document_uploaded_at
       ? new Date(row.completed_document_uploaded_at).getTime()
       : undefined,
+    // Continuation Job Card (see chat, print template redesign, and the
+    // later corrective pass) — always defaulted here since
+    // is_continuation/previous_job_card_id are deliberately NOT part of
+    // JOB_CARD_COLUMNS yet (see JobCard's own doc comment in types.ts
+    // for why). A real value only ever arrives via a subsequent
+    // fetchJobCardContinuation() call once its migration is approved
+    // and applied.
+    isContinuation: false,
+    previousJobCardId: undefined,
+    previousJobCardNo: undefined,
     createdAt: new Date(row.created_at).getTime(),
     updatedAt: new Date(row.updated_at).getTime(),
   };

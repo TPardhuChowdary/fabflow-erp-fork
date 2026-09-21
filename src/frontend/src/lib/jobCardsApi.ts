@@ -36,6 +36,13 @@ export type JobCardWritable = Omit<
   | "currentRunStartedAt"
   | "createdAt"
   | "updatedAt"
+  // Continuation Job Card fields are deliberately excluded from the
+  // main create/update payload — see fetchJobCardContinuation/
+  // updateJobCardContinuation's own comments, and JobCard.
+  // isContinuation's doc comment in types.ts, for why.
+  | "isContinuation"
+  | "previousJobCardId"
+  | "previousJobCardNo"
 >;
 
 // Both migrations (20260917180000 sign-off/inspection-events,
@@ -403,6 +410,105 @@ async function updateJobCardStatusRemote(
     };
   }
   return { status: "success", data: transformJobCardRow(rows[0]) };
+}
+
+// Continuation Job Card (see chat, print template redesign, and the
+// later "correct the Continuation Job Card workflow" corrective pass) —
+// a dedicated, best-effort read/write pair for is_continuation/
+// previous_job_card_id, deliberately NOT folded into JOB_CARD_COLUMNS/
+// toJobCardFields/createJobCardRemote/updateJobCardRemote (see
+// JobCard.isContinuation's own doc comment in types.ts for why:
+// previous_job_card_id's migration is written but not yet approved/
+// applied, and the combined read/write every OTHER Job Card field goes
+// through must keep working regardless). Same one-writer-per-concern
+// shape as setPrimaryAssetPhoto()/setPhotoPrintSelected() elsewhere in
+// this codebase. Once the migration is applied, both of these become
+// trivially foldable into the main path — not done here.
+//
+// previous_job_card_id is a self-FK to job_cards(id), not free text — a
+// continuation Job Card points BACKWARD to the real, existing Job Card
+// it continues from (e.g. JC-2026-008 continuing JC-2026-007 stores
+// JC-2026-007's id). The printed/displayed "Previous Job Card" NUMBER is
+// always resolved from that record, never stored as a separate text
+// snapshot — one source of truth, no stale-number risk.
+
+/** Fetches the current is_continuation/previous_job_card_id (resolved to
+ * its job_no) for one Job Card, fresh from Supabase (never assumed from
+ * an already-hydrated JobCard, which always carries the static
+ * false/undefined default — see transformJobCardRow). Call this when
+ * opening Edit/View or before printing, exactly like
+ * completedDocumentSignedUrl is re-fetched on viewCard change elsewhere
+ * in JobCards.tsx. */
+export async function fetchJobCardContinuation(jobCardId: string): Promise<
+  WriteResult<{
+    isContinuation: boolean;
+    previousJobCardId?: string;
+    previousJobCardNo?: string;
+  }>
+> {
+  const gate = await requireSession();
+  if (!gate.ok) return gate.result;
+  const { data, error } = await gate.client
+    .from("job_cards")
+    .select("is_continuation, previous_job_card_id")
+    .eq("id", jobCardId)
+    .maybeSingle();
+  if (error) return { status: "error", error: error.message };
+  if (!data) return { status: "denied", error: "Job Card not found" };
+  const row = data as {
+    is_continuation: boolean | null;
+    previous_job_card_id: string | null;
+  };
+  let previousJobCardNo: string | undefined;
+  if (row.previous_job_card_id) {
+    const prev = await gate.client
+      .from("job_cards")
+      .select("job_no")
+      .eq("id", row.previous_job_card_id)
+      .maybeSingle();
+    previousJobCardNo =
+      (prev.data as { job_no: string } | null)?.job_no ?? undefined;
+  }
+  return {
+    status: "success",
+    data: {
+      isContinuation: row.is_continuation ?? false,
+      previousJobCardId: row.previous_job_card_id ?? undefined,
+      previousJobCardNo,
+    },
+  };
+}
+
+/** Persists is_continuation/previous_job_card_id for one Job Card.
+ * Clears previous_job_card_id server-side whenever isContinuation is
+ * false — unchecking "Yes" must never leave a stale relationship
+ * silently printable again if the checkbox is later re-checked without
+ * re-selecting it. */
+export async function updateJobCardContinuation(
+  jobCardId: string,
+  fields: { isContinuation: boolean; previousJobCardId?: string },
+): Promise<WriteResult<never>> {
+  const gate = await requireSession();
+  if (!gate.ok) return gate.result;
+  const { data, error } = await gate.client
+    .from("job_cards")
+    .update({
+      is_continuation: fields.isContinuation,
+      previous_job_card_id: fields.isContinuation
+        ? fields.previousJobCardId || null
+        : null,
+    })
+    .eq("id", jobCardId)
+    .select("id");
+  if (error) return { status: "error", error: error.message };
+  const rows = (data as unknown as { id: string }[]) ?? [];
+  if (rows.length === 0) {
+    return {
+      status: "denied",
+      error: "No row was updated (blocked by RLS, or the row does not exist)",
+    };
+  }
+  return { status: "success" };
 }
 
 /** NotStarted -> InProgress. Server stamps start_time/current_run_started_at. */

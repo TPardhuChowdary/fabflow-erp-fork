@@ -391,6 +391,39 @@ export interface JobCard {
   completedDocumentUploadedBy?: string;
   completedDocumentUploadedByName?: string;
   completedDocumentUploadedAt?: number;
+  /** Continuation Job Card (see chat, print template redesign, and the
+   * later corrective pass) — whether this Job Card continues an
+   * already-printed one, and if so, a real self-FK reference to the
+   * PREVIOUS Job Card it continues from (not a forward-looking "next"
+   * number — a continuation Job Card always points BACKWARD to a real,
+   * already-existing Job Card, e.g. JC-2026-008 continuing JC-2026-007
+   * stores JC-2026-007's id in previousJobCardId). previousJobCardId is
+   * never free text and never manually typed — it is selected from a
+   * searchable picker of existing Job Cards (JobCardSelect). The
+   * printed/displayed Job Card NUMBER (previousJobCardNo) is always
+   * resolved from that referenced record, never stored as a separate
+   * snapshot — one source of truth. Persisted via jobCardsApi.ts's
+   * fetchJobCardContinuation()/updateJobCardContinuation() — a
+   * dedicated, best-effort pair of calls, deliberately NOT part of
+   * JOB_CARD_COLUMNS/toJobCardFields (the single combined read/write
+   * every other Job Card field goes through). That separation exists
+   * only because supabase/migrations/20260922100000_job_card_
+   * continuation_previous_reference.sql (adding previous_job_card_id,
+   * dropping the semantically-wrong next_job_card_no) is written but
+   * not yet applied/approved at the time this was added — folding this
+   * field into the main hydration query before that migration exists
+   * would 400 every single Job Card read/write in the app, not just
+   * this feature. Always present after transformJobCardRow (defaults
+   * isContinuation=false/previousJobCardId=previousJobCardNo=undefined
+   * for every row from the main hydration path, which never selects
+   * this column); a fresh, real value is only loaded on demand by
+   * fetchJobCardContinuation() when the Edit/View dialog opens or a
+   * print is requested. Once the migration is approved and applied,
+   * promoting this column into JOB_CARD_CORE_COLUMNS/toJobCardFields is
+   * a small, separate follow-up — not done here. */
+  isContinuation: boolean;
+  previousJobCardId?: string;
+  previousJobCardNo?: string;
   createdAt: number;
   updatedAt: number;
 }

@@ -67,6 +67,7 @@ import { useAuth } from "../AuthContext";
 import { CompleteJobCardDialog } from "../components/CompleteJobCardDialog";
 import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import { EmployeeSelect } from "../components/EmployeeSelect";
+import { JobCardSelect } from "../components/JobCardSelect";
 import { JobCardTimerPanel } from "../components/JobCardTimerPanel";
 import { ProjectSelect } from "../components/ProjectSelect";
 import {
@@ -102,11 +103,13 @@ import {
   computeNextJobNo,
   createJobCardRemote,
   deleteJobCardRemote,
+  fetchJobCardContinuation,
   fetchJobCardInspectionEvents,
   pauseJobCardRemote,
   recordJobCardInspectionEvent,
   resumeJobCardRemote,
   startJobCardRemote,
+  updateJobCardContinuation,
   updateJobCardProductionProgress,
   updateJobCardRemote,
 } from "../lib/jobCardsApi";
@@ -292,6 +295,16 @@ const emptyForm = {
   completedDocumentUploadedBy: "",
   completedDocumentUploadedByName: "",
   completedDocumentUploadedAt: undefined as number | undefined,
+  // Continuation Job Card (see chat, and the later "correct the
+  // Continuation Job Card workflow" corrective pass) — loaded fresh via
+  // fetchJobCardContinuation() when Edit opens (openEdit), NOT from
+  // the already-hydrated JobCard passed in (which always carries the
+  // static false/undefined default — see transformJobCardRow). Create
+  // mode simply starts at the same default every other boolean field
+  // starts at. previousJobCardId is a real Job Card's id, selected via
+  // JobCardSelect — never free text.
+  isContinuation: false,
+  previousJobCardId: "",
 };
 
 interface JobCardsProps {
@@ -1039,6 +1052,27 @@ export function JobCards({
       completedDocumentUploadedBy: jc.completedDocumentUploadedBy ?? "",
       completedDocumentUploadedByName: jc.completedDocumentUploadedByName ?? "",
       completedDocumentUploadedAt: jc.completedDocumentUploadedAt,
+      // Placeholder until the fresh fetch below resolves — jc itself
+      // never carries a real value here (see JobCard.isContinuation's
+      // own doc comment).
+      isContinuation: false,
+      previousJobCardId: "",
+    });
+    // Continuation Job Card (see chat, and the later corrective pass) —
+    // fetched fresh on demand, exactly like this file's other per-card
+    // side-fetches (e.g. resolveProjectPhotoUrl on viewCard/projectId
+    // change). Fire-and-patch: if it resolves after the user already
+    // navigated away from this Job Card, editCard will have changed and
+    // this patch simply gets overwritten by whatever opens next — never
+    // a stale write.
+    fetchJobCardContinuation(jc.id).then((result) => {
+      if (result.status === "success" && result.data) {
+        setForm((f) => ({
+          ...f,
+          isContinuation: result.data?.isContinuation ?? false,
+          previousJobCardId: result.data?.previousJobCardId ?? "",
+        }));
+      }
     });
   };
 
@@ -1098,6 +1132,28 @@ export function JobCards({
   // and nothing here writes to the Job Card or any other table — it only
   // reads the same fields the View dialog above already reads.
   async function handlePrintJobCard(jc: JobCard) {
+    // Continuation Job Card (see chat, and the later corrective pass) —
+    // resolved fresh here, same as this function already does for
+    // reference photos/drawings, since isContinuation/previousJobCardNo
+    // are never trusted from whatever `jc` the caller happened to pass
+    // in (View dialog's viewCard always carries the static
+    // false/undefined default — see JobCard.isContinuation's own doc
+    // comment). Best-effort: if this call fails for any reason,
+    // printing still proceeds with the safe false/undefined default
+    // rather than blocking the print entirely. previousJobCardNo is
+    // already resolved (from the referenced Job Card's own job_no) by
+    // fetchJobCardContinuation() itself — never computed here.
+    const continuation = await fetchJobCardContinuation(jc.id);
+    const printableJobCard: JobCard =
+      continuation.status === "success" && continuation.data
+        ? {
+            ...jc,
+            isContinuation: continuation.data.isContinuation,
+            previousJobCardId: continuation.data.previousJobCardId,
+            previousJobCardNo: continuation.data.previousJobCardNo,
+          }
+        : jc;
+
     // Job Card print/layout (see chat) — resolves THREE independent,
     // optional images, all BEFORE the synchronous flushSync render below
     // (an <img> written into a popup via innerHTML has no chance to
@@ -1314,7 +1370,7 @@ export function JobCards({
       root.render(
         <JobCardDocContent
           id={docId}
-          jobCard={jc}
+          jobCard={printableJobCard}
           projectCode={project?.projectNo || "—"}
           projectName={project?.projectName || "—"}
           settings={settings as unknown as Record<string, string>}
@@ -1338,7 +1394,12 @@ export function JobCards({
       return;
     }
     win.document.write(
-      `<html><head><title>Job Card ${jc.jobNo}</title><style>body{font-family:Arial,sans-serif;padding:20px;color:#000;background:#fff;}table{border-collapse:collapse;width:100%;}@page{size:A4;margin:15mm;}@media print{body{padding:0;}}</style></head><body>${content}</body></html>`,
+      // Fixed A4 print template (see chat, "Job Card print template
+      // redesign") — @page margin is 0 here because JOB_CARD_PAGE_STYLE
+      // (documentRenderers.tsx) now gives every page div its own 15mm
+      // padding directly, one place controlling the physical margin
+      // instead of splitting it between @page and inline styles.
+      `<html><head><title>Job Card ${jc.jobNo}</title><style>body{font-family:Arial,sans-serif;margin:0;padding:0;color:#000;background:#fff;}table{border-collapse:collapse;width:100%;}@page{size:A4 portrait;margin:0;}</style></head><body>${content}</body></html>`,
     );
     win.document.close();
     win.focus();
@@ -1418,6 +1479,13 @@ export function JobCards({
       toast.error("Allocated time must be 0 or more");
       return false;
     }
+    // Continuation Job Card (see chat, "correct the Continuation Job
+    // Card workflow") — Yes without a selected Previous Job Card must
+    // never silently save as a continuation pointing at nothing.
+    if (form.isContinuation && !form.previousJobCardId) {
+      toast.error("Select the Previous Job Card, or turn off Continuation");
+      return false;
+    }
     return true;
   };
 
@@ -1493,6 +1561,40 @@ export function JobCards({
       let created = result.data;
       addJobCard(created);
       setAddOpen(false);
+
+      // Continuation Job Card (see chat, and the later corrective pass)
+      // — same "attach optional extra to an already-real record" shape
+      // as the reference-photo flush below; skipped entirely when the
+      // user never touched the Continuation control (new Job Cards
+      // default to No/false in the database already, nothing to write).
+      if (form.isContinuation) {
+        const continuationResult = await updateJobCardContinuation(created.id, {
+          isContinuation: true,
+          previousJobCardId: form.previousJobCardId || undefined,
+        });
+        created = {
+          ...created,
+          isContinuation:
+            continuationResult.status === "success"
+              ? true
+              : created.isContinuation,
+          previousJobCardId:
+            continuationResult.status === "success"
+              ? form.previousJobCardId || undefined
+              : created.previousJobCardId,
+          previousJobCardNo:
+            continuationResult.status === "success"
+              ? jobCards.find((c) => c.id === form.previousJobCardId)?.jobNo
+              : created.previousJobCardNo,
+        };
+        updateJobCard(created);
+        if (continuationResult.status !== "success") {
+          toast.error(
+            continuationResult.error ||
+              "Job Card created, but Continuation status could not be saved. You can retry from Edit.",
+          );
+        }
+      }
 
       const attachmentErrors: string[] = [];
       // Option A (see chat, "Reference Photo should use Project Photo
@@ -1685,7 +1787,30 @@ export function JobCards({
         toast.error(result.error || "Failed to update Job Card");
         return;
       }
-      updateJobCard(result.data);
+      updateJobCard({
+        ...result.data,
+        isContinuation: form.isContinuation,
+        previousJobCardId: form.isContinuation
+          ? form.previousJobCardId || undefined
+          : undefined,
+        previousJobCardNo: form.isContinuation
+          ? jobCards.find((c) => c.id === form.previousJobCardId)?.jobNo
+          : undefined,
+      });
+      // Continuation Job Card (see chat, and the later corrective pass)
+      // — a separate, best-effort call (see updateJobCardContinuation's
+      // own comment for why); a failure here must never be reported as
+      // the main Job Card save failing, since it didn't.
+      const continuationResult = await updateJobCardContinuation(editCard.id, {
+        isContinuation: form.isContinuation,
+        previousJobCardId: form.previousJobCardId || undefined,
+      });
+      if (continuationResult.status !== "success") {
+        toast.error(
+          continuationResult.error ||
+            "Job Card saved, but Continuation status could not be saved.",
+        );
+      }
       toast.success("Job Card updated");
       setEditCard(null);
     } finally {
@@ -2369,6 +2494,48 @@ export function JobCards({
             </Label>
           </div>
         </div>
+      </div>
+
+      {sectionLabel("Continuation")}
+      {/* Continuation Job Card (see chat, and the later "correct the
+          Continuation Job Card workflow" corrective pass) — real,
+          persisted state via fetchJobCardContinuation()/
+          updateJobCardContinuation() (see those functions' own
+          comments for why they're separate from the main Job Card
+          save). A continuation points BACKWARD to a real, existing Job
+          Card — Previous Job Card is selected from JobCardSelect
+          (searchable, id-based), never typed as free text, and only
+          ever saved when the checkbox is on; unchecking clears it
+          server-side too (see updateJobCardContinuation). */}
+      <div className="space-y-2 rounded-md border p-3">
+        <div className="flex items-center gap-2">
+          <Checkbox
+            id="jc-is-continuation"
+            checked={form.isContinuation}
+            onCheckedChange={(v) =>
+              setForm((f) => ({ ...f, isContinuation: v === true }))
+            }
+          />
+          <Label htmlFor="jc-is-continuation" className="text-xs font-normal">
+            This Job Card is a continuation of a previous one
+          </Label>
+        </div>
+        {form.isContinuation && (
+          <div className="space-y-1">
+            <Label htmlFor="jc-previous-job-card" className="text-xs">
+              Previous Job Card
+            </Label>
+            <JobCardSelect
+              value={form.previousJobCardId}
+              onChange={(id) =>
+                setForm((f) => ({ ...f, previousJobCardId: id }))
+              }
+              excludeId={editCard?.id}
+              className="h-8 text-xs w-full"
+              data-ocid="jobcards.form.previous_job_card"
+            />
+          </div>
+        )}
       </div>
     </div>
   );

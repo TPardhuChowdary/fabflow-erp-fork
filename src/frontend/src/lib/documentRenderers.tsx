@@ -1,3 +1,4 @@
+import { BarChart3, Box, Clock, Factory, Hourglass } from "lucide-react";
 /**
  * Shared document content components.
  * Used as hidden off-screen containers in page files so html2canvas
@@ -2057,14 +2058,14 @@ interface JobCardDocProps {
   }[];
 }
 
-function formatPrintedOn(ms: number): string {
-  return new Date(ms).toLocaleString("en-IN", {
+/** The print-generation timestamp (client clock, see handlePrintJobCard),
+ * shown as the title bar's "Date:" field — the reference shows a plain
+ * date there, never the Job Card's own createdAt and never persisted. */
+function formatPrintDate(ms: number): string {
+  return new Date(ms).toLocaleDateString("en-IN", {
     day: "numeric",
     month: "short",
     year: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: true,
   });
 }
 
@@ -2077,52 +2078,62 @@ const JOB_CARD_LABEL_STYLE: React.CSSProperties = {
   marginBottom: "6px",
 };
 
-// Small uppercase "section eyebrow" — the one repeated visual device
-// that gives the redesigned sheet its hierarchy (WHO/WHAT vs PRODUCTION
-// TARGET vs QUALITY/INSPECTION vs RESPONSIBILITY, per the design brief)
-// without resorting to boxed "UI cards" that print poorly. Deliberately
-// text-only, no background fill — a manufacturing traveler reads by
-// section labels and rules, not by colored chrome.
-function SectionEyebrow({ children }: { children: React.ReactNode }) {
-  return (
-    <div
-      style={{
-        fontSize: "10.5px",
-        fontWeight: 800,
-        color: "#1a1a1a",
-        textTransform: "uppercase",
-        letterSpacing: "1px",
-        borderBottom: "1.5px solid #1a1a1a",
-        paddingBottom: "3px",
-        marginBottom: "8px",
-      }}
-    >
-      {children}
-    </div>
-  );
-}
+// Fixed-A4 industrial print palette (see chat, "Job Card print template
+// redesign" — matched against the supplied paper reference). Kept as
+// named constants rather than scattered hex literals since the whole
+// point of this redesign is visual consistency with one reference
+// image across many small boxed sections.
+const JOB_CARD_NAVY = "#15325c";
+const JOB_CARD_BLUE_BG = "#dce8f5";
+const JOB_CARD_BORDER_BLUE = "#a9c3de";
+
+// Every physical sheet (Page 1, and each Reference Photo/Drawing page
+// that follows it) gets the SAME fixed A4 box — width/min-height in mm,
+// not px, with its own 15mm padding now that the print popup's own
+// @page margin is 0 (see handlePrintJobCard's print CSS). 15mm matches
+// EXACTLY what the popup's @page margin used to be, so the two
+// already-shipped page types this redesign must NOT touch (Reference
+// Photo pages, Drawing pages — see chat, "keep the existing design")
+// render at the identical physical size/position as before; only WHERE
+// the margin comes from moved, from the browser's print margin into
+// this one shared content box.
+const JOB_CARD_PAGE_STYLE: React.CSSProperties = {
+  width: "210mm",
+  minHeight: "297mm",
+  boxSizing: "border-box",
+  padding: "15mm",
+};
 
 // Compact Priority pill (Section 5, see chat) — a single small inline
 // badge, not a boxed metric cell, so it never grows the Job Identification
 // strip past its existing row layout.
-const PRIORITY_PILL_COLORS: Record<JobCard["priority"], string> = {
-  Low: "#666",
-  Normal: "#333",
-  High: "#b45309",
-  Urgent: "#b91c1c",
+// Filled pill (see chat, minimalist redesign) — a soft tint background
+// + matching text color per priority, not just a bordered outline,
+// matching the reference's own "HIGH" pill treatment.
+const PRIORITY_PILL_COLORS: Record<
+  JobCard["priority"],
+  { bg: string; text: string }
+> = {
+  Low: { bg: "#eef0f2", text: "#555" },
+  Normal: { bg: "#e6ecf3", text: "#334" },
+  High: { bg: "#fde3e3", text: "#b13a3a" },
+  Urgent: { bg: "#fbd5d5", text: "#8f1f1f" },
 };
 
 function PriorityPill({ priority }: { priority: JobCard["priority"] }) {
+  const colors = PRIORITY_PILL_COLORS[priority];
   return (
     <span
       style={{
         display: "inline-block",
-        fontSize: "11px",
-        fontWeight: 700,
-        color: PRIORITY_PILL_COLORS[priority],
-        border: `1px solid ${PRIORITY_PILL_COLORS[priority]}`,
+        fontSize: "10.5px",
+        fontWeight: 800,
+        color: colors.text,
+        background: colors.bg,
         borderRadius: "10px",
-        padding: "1px 8px",
+        padding: "2px 10px",
+        textTransform: "uppercase",
+        letterSpacing: "0.4px",
       }}
     >
       {priority}
@@ -2139,7 +2150,6 @@ export function JobCardDocContent({
   printedAt,
   totalPages,
   projectPhotoUrl,
-  projectPhotoCaption,
   referencePhotoUrls,
   drawingSheets,
 }: JobCardDocProps) {
@@ -2154,102 +2164,233 @@ export function JobCardDocContent({
     jobCard.expectedQuantityOverride ?? jobCard.expectedQuantity;
 
   return (
-    <div
-      id={id}
-      style={{
-        ...HIDDEN_STYLE,
-        fontSize: "13px",
-        fontFamily: "Arial, Helvetica, sans-serif",
-        color: "#1a1a1a",
-      }}
-    >
-      {/* HEADER — FabFlow/company identity + the Job Card's own number,
-          always the first thing a shop-floor reader sees. A thin accent
-          bar under the rule keeps this a manufacturing document rather
-          than a generic printed form. */}
+    // Plain, unstyled root — only a getElementById hook for
+    // handlePrintJobCard's `el.innerHTML` read. Deliberately NOT the
+    // physical A4 page box itself: `.innerHTML` returns this element's
+    // CHILDREN, so if the page sizing lived here it would be silently
+    // discarded the moment the caller reads innerHTML, leaving Page 1
+    // unconstrained while only the later photo/drawing page divs (true
+    // siblings) kept their width. Each physical page — including Page 1
+    // now — is its own explicit JOB_CARD_PAGE_STYLE child div instead,
+    // exactly like the photo/drawing pages below already are.
+    <div id={id}>
       <div
         style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
-          paddingBottom: "10px",
-          marginBottom: "3px",
+          ...JOB_CARD_PAGE_STYLE,
+          fontSize: "13px",
+          fontFamily: "Arial, Helvetica, sans-serif",
+          color: "#1a1a1a",
+          background: "#fff",
         }}
       >
-        <div style={{ display: "flex", alignItems: "flex-start", gap: "14px" }}>
-          {settings.companyLogo && (
-            <img
-              src={settings.companyLogo}
-              alt="logo"
+        {/* BRAND ROW (see chat, Job Card print template redesign — matched
+          against the supplied paper reference) — FabFlow's own software
+          brand on the left (the same Factory glyph the live app's own
+          sidebar uses, see components/Layout.tsx, not a separate logo
+          asset), the TENANT's company identity centered (settings.
+          companyName/companyAddress — the actual authoritative source,
+          same one Invoice's own header reads), and the static BUILD /
+          FABRICATE / DELIVER tagline on the right, thin vertical rules
+          between each third exactly like the reference. No job card
+          number here — that lives in the title bar below, once, not
+          duplicated across two header rows. */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            paddingBottom: "6px",
+            marginBottom: "6px",
+            borderBottom: `2px solid ${JOB_CARD_NAVY}`,
+          }}
+        >
+          <div
+            style={{
+              flex: "0 0 30%",
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              borderRight: "1px solid #ccc",
+              paddingRight: "12px",
+            }}
+          >
+            <div
               style={{
-                maxHeight: "52px",
-                maxWidth: "110px",
-                objectFit: "contain",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                width: "30px",
+                height: "30px",
+                borderRadius: "6px",
+                background: JOB_CARD_NAVY,
+                color: "#fff",
+                flexShrink: 0,
               }}
-            />
-          )}
-          <div>
-            {/* Same settings.companyName/companyLogo source Invoice's own
-                header reads — falls back to "FABFLOW" only when Company
-                Profile is genuinely unset, not a hardcoded brand. */}
-            <div style={{ fontSize: "18px", fontWeight: 800, color: "#111" }}>
-              {settings.companyName || "FABFLOW"}
+            >
+              <Factory size={17} strokeWidth={2.25} />
+            </div>
+            <div>
+              <div
+                style={{
+                  fontSize: "16px",
+                  fontWeight: 800,
+                  color: JOB_CARD_NAVY,
+                  letterSpacing: "0.5px",
+                  lineHeight: 1.1,
+                }}
+              >
+                FABFLOW
+              </div>
+              <div
+                style={{
+                  fontSize: "7.5px",
+                  fontWeight: 700,
+                  color: "#666",
+                  letterSpacing: "0.8px",
+                  textTransform: "uppercase",
+                }}
+              >
+                Manufacturing ERP
+              </div>
+            </div>
+          </div>
+          <div
+            style={{
+              flex: "1 1 auto",
+              textAlign: "center",
+              padding: "0 12px",
+              borderRight: "1px solid #ccc",
+            }}
+          >
+            {/* Same settings.companyName/companyAddress source Invoice's
+              own header reads — falls back to "Company Name" only when
+              Company Profile is genuinely unset, not a hardcoded brand. */}
+            <div
+              style={{
+                fontSize: "15px",
+                fontWeight: 800,
+                color: JOB_CARD_NAVY,
+              }}
+            >
+              {settings.companyName || "Company Name"}
             </div>
             {settings.companyAddress && (
               <div
-                style={{ fontSize: "11px", color: "#555", marginTop: "2px" }}
+                style={{ fontSize: "11px", color: "#555", marginTop: "1px" }}
               >
                 {settings.companyAddress}
               </div>
             )}
-            {settings.companyPhone && (
-              <div style={{ fontSize: "11px", color: "#555" }}>
-                Ph: {settings.companyPhone}
-              </div>
-            )}
           </div>
-        </div>
-        <div style={{ textAlign: "right" }}>
           <div
             style={{
-              fontSize: "12px",
+              flex: "0 0 20%",
+              textAlign: "right",
+              paddingLeft: "12px",
+              fontSize: "10px",
               fontWeight: 700,
-              color: "#888",
-              letterSpacing: "2px",
-              textTransform: "uppercase",
+              color: JOB_CARD_NAVY,
+              letterSpacing: "1px",
+              lineHeight: 1.6,
             }}
           >
-            Job Card
+            <div>BUILD</div>
+            <div>FABRICATE</div>
+            <div>DELIVER</div>
+          </div>
+        </div>
+
+        {/* TITLE BAR — the light-blue banded strip from the reference:
+          document title (left), Job Card No. (center), Date/Page
+          (right). jobCard.jobNo/printedAt/pageCount are the same
+          authoritative values the old header row used — this is a pure
+          layout move, not a new data source. */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "stretch",
+            border: `1px solid ${JOB_CARD_BORDER_BLUE}`,
+            borderRadius: "3px",
+            background: JOB_CARD_BLUE_BG,
+            marginBottom: "8px",
+            overflow: "hidden",
+          }}
+        >
+          <div
+            style={{
+              flex: "1 1 auto",
+              padding: "8px 14px",
+              borderRight: `1px solid ${JOB_CARD_BORDER_BLUE}`,
+            }}
+          >
+            <div
+              style={{
+                fontSize: "20px",
+                fontWeight: 800,
+                color: JOB_CARD_NAVY,
+              }}
+            >
+              JOB CARD
+            </div>
+            <div
+              style={{
+                fontSize: "8.5px",
+                fontWeight: 700,
+                color: "#3a5a82",
+                letterSpacing: "0.8px",
+                textTransform: "uppercase",
+              }}
+            >
+              One Operation. One Team. Better Results.
+            </div>
           </div>
           <div
             style={{
-              fontSize: "22px",
-              fontWeight: 800,
-              color: "#111",
-              fontFamily: "'Courier New', monospace",
-              lineHeight: 1.15,
+              flex: "0 0 32%",
+              padding: "8px 14px",
+              textAlign: "center",
+              borderRight: `1px solid ${JOB_CARD_BORDER_BLUE}`,
             }}
           >
-            {jobCard.jobNo}
+            <div
+              style={{
+                fontSize: "9.5px",
+                fontWeight: 700,
+                color: "#3a5a82",
+                textTransform: "uppercase",
+                letterSpacing: "0.6px",
+              }}
+            >
+              Job Card No.
+            </div>
+            <div
+              style={{
+                fontSize: "19px",
+                fontWeight: 800,
+                color: JOB_CARD_NAVY,
+                fontFamily: "'Courier New', monospace",
+              }}
+            >
+              {jobCard.jobNo}
+            </div>
           </div>
-          {/* Printed On — computed by the caller at print-generation time
-              (client clock), never the Job Card's own createdAt and
-              never written back to the Job Card. Page count is likewise
-              caller-computed (see JobCardDocProps.totalPages). */}
-          <div style={{ fontSize: "10.5px", color: "#666", marginTop: "2px" }}>
-            Printed {formatPrintedOn(printedAt)} · Page 1 of {pageCount}
+          <div
+            style={{
+              flex: "0 0 22%",
+              padding: "8px 14px",
+              fontSize: "10.5px",
+              color: "#333",
+              display: "flex",
+              flexDirection: "column",
+              justifyContent: "center",
+              gap: "3px",
+            }}
+          >
+            <div>Date: {formatPrintDate(printedAt)}</div>
+            <div>Page 1 of {pageCount}</div>
           </div>
         </div>
-      </div>
-      <div
-        style={{
-          height: "3px",
-          background: "#1a1a1a",
-          marginBottom: "14px",
-        }}
-      />
 
-      {/* UPPER BAND — Job identification on the left, a LARGE Project
+        {/* UPPER BAND — Job identification on the left, a LARGE Project
           Reference Photo on the right (see chat, uploaded A4 reference:
           the photo is given real visual weight here, not a thumbnail).
           alignItems: "flex-start" is load-bearing — each column's box
@@ -2260,527 +2401,703 @@ export function JobCardDocContent({
           six rows need far less room. The left column widens to the
           full row when there is no photo to show — never a blank
           placeholder box. */}
-      <div
-        style={{
-          display: "flex",
-          gap: "16px",
-          alignItems: "flex-start",
-          marginBottom: "10px",
-        }}
-      >
         <div
           style={{
-            flex: projectPhotoUrl ? "0 0 40%" : "1 1 100%",
-            border: "1px solid #bbb",
-            borderRadius: "3px",
-            padding: "8px 10px",
+            display: "flex",
+            gap: "16px",
+            alignItems: "flex-start",
+            marginBottom: "10px",
           }}
         >
-          {(
-            [
-              ["Project", projectName || "—"],
-              ["Project Code", projectCode || "—"],
-              ["Operation", jobCard.operationType],
-              ["Employee", jobCard.employeeName || "—"],
-              [
-                "Start Date",
-                jobCard.startDate
-                  ? new Date(jobCard.startDate).toLocaleDateString("en-IN", {
-                      day: "numeric",
-                      month: "short",
-                      year: "numeric",
-                    })
-                  : "—",
-              ],
-            ] as const
-          ).map(([label, value]) => (
-            <div
-              key={label}
-              style={{
-                display: "flex",
-                gap: "6px",
-                fontSize: "12px",
-                marginBottom: "4px",
-              }}
-            >
-              <div style={{ fontWeight: 700, color: "#333", minWidth: "80px" }}>
-                {label}
-              </div>
-              <div style={{ color: "#111" }}>: {value}</div>
-            </div>
-          ))}
-          <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
-            <div
-              style={{
-                fontWeight: 700,
-                color: "#333",
-                minWidth: "80px",
-                fontSize: "12px",
-              }}
-            >
-              Priority
-            </div>
-            <div style={{ fontSize: "12px" }}>:</div>
-            <PriorityPill priority={jobCard.priority} />
-          </div>
-        </div>
-
-        {/* PROJECT REFERENCE PHOTO — identifies the product/project this
-            Job Card belongs to; NOT an evidence or completion photo.
-            Large and on the right, aspect-ratio preserved (object-fit:
-            contain, never stretched) — its own height is dictated by
-            the photo itself, never forced to match the (now
-            shorter) identification column on the left. */}
-        {projectPhotoUrl && (
           <div
             style={{
-              flex: "0 0 60%",
-              border: "1px solid #bbb",
-              borderRadius: "3px",
-              padding: "6px 8px 8px",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
+              flex: projectPhotoUrl ? "0 0 40%" : "1 1 100%",
+              border: `1px solid ${JOB_CARD_BORDER_BLUE}`,
+              borderRadius: "4px",
+              overflow: "hidden",
             }}
           >
             <div
               style={{
+                background: JOB_CARD_BLUE_BG,
+                borderBottom: `1px solid ${JOB_CARD_BORDER_BLUE}`,
+                padding: "5px 10px",
                 fontSize: "10px",
                 fontWeight: 800,
-                color: "#333",
+                color: JOB_CARD_NAVY,
                 textTransform: "uppercase",
                 letterSpacing: "0.8px",
-                marginBottom: "4px",
-                alignSelf: "flex-start",
               }}
             >
-              Project Reference Photo
+              Job Details
             </div>
+            <div style={{ padding: "8px 10px" }}>
+              {(
+                [
+                  ["Project", projectName || "—"],
+                  ["Project Code", projectCode || "—"],
+                  ["Operation", jobCard.operationType],
+                  ["Employee", jobCard.employeeName || "—"],
+                  // Drawing No. (see chat, minimalist redesign) — the
+                  // FIRST linked drawing's own title-block number, the
+                  // exact same value the Drawing page(s) below already
+                  // print (drawingSheets[i].number). Reused, not a new
+                  // field/fetch. Omitted entirely (not "—") when no
+                  // drawing is linked/resolved, or that drawing's title
+                  // block never had a number set — never a fabricated
+                  // value.
+                  ...(drawingSheets?.[0]?.number
+                    ? [["Drawing No.", drawingSheets[0].number]]
+                    : []),
+                  // Previous Job Card (see chat, "correct the
+                  // Continuation Job Card workflow") — printed ONLY when
+                  // this Job Card is a real, persisted continuation of
+                  // an existing one; jobCard.previousJobCardNo is
+                  // resolved from the referenced Job Card's own job_no
+                  // by fetchJobCardContinuation(), never computed or
+                  // invented here. Omitted entirely (not a blank row)
+                  // when continuation is No or no previous card is set.
+                  ...(jobCard.isContinuation && jobCard.previousJobCardNo
+                    ? [["Previous Job Card", jobCard.previousJobCardNo]]
+                    : []),
+                  [
+                    "Start Date",
+                    jobCard.startDate
+                      ? new Date(jobCard.startDate).toLocaleDateString(
+                          "en-IN",
+                          { day: "numeric", month: "short", year: "numeric" },
+                        )
+                      : "—",
+                  ],
+                ] as [string, string][]
+              ).map(([label, value]) => (
+                <div
+                  key={label}
+                  style={{
+                    display: "flex",
+                    gap: "6px",
+                    fontSize: "12px",
+                    marginBottom: "5px",
+                  }}
+                >
+                  <div
+                    style={{
+                      fontWeight: 700,
+                      color: "#333",
+                      minWidth: "80px",
+                    }}
+                  >
+                    {label}
+                  </div>
+                  <div style={{ color: "#111" }}>: {value}</div>
+                </div>
+              ))}
+              <div
+                style={{ display: "flex", gap: "6px", alignItems: "center" }}
+              >
+                <div
+                  style={{
+                    fontWeight: 700,
+                    color: "#333",
+                    minWidth: "80px",
+                    fontSize: "12px",
+                  }}
+                >
+                  Priority
+                </div>
+                <div style={{ fontSize: "12px" }}>:</div>
+                <PriorityPill priority={jobCard.priority} />
+              </div>
+            </div>
+          </div>
+
+          {/* PROJECT REFERENCE PHOTO — identifies the product/project this
+            Job Card belongs to; NOT an evidence or completion photo.
+            Integrated presentation (see chat, "Reference Photo
+            presentation" — inspired by the QC Check Sheet reference):
+            borderless, no header band, no caption — just the photograph
+            itself, opaque and sharp, aspect-ratio preserved (object-fit:
+            contain, never stretched/cropped/faded). Its own height is
+            dictated by the photo itself, never forced to match the (now
+            shorter) identification column on the left. */}
+          {projectPhotoUrl && (
             <img
               src={projectPhotoUrl}
               alt="Project reference"
               style={{
+                flex: "0 0 60%",
                 display: "block",
                 width: "100%",
-                maxHeight: "235px",
+                maxHeight: "250px",
                 objectFit: "contain",
               }}
             />
-            {projectPhotoCaption && (
-              <div
-                style={{
-                  fontSize: "10.5px",
-                  fontWeight: 600,
-                  color: "#555",
-                  marginTop: "4px",
-                }}
-              >
-                {projectPhotoCaption}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
+          )}
+        </div>
 
-      {/* PRODUCTION PLANNING — real, persisted numbers only. Total
+        {/* PRODUCTION PLANNING — real, persisted numbers only. Total
           Quantity is the only one of these four that's genuinely
           optional (Time per Piece/Allocated Time are required at
           creation; Target is the GENERATED expectedQuantity or its
           override) — it alone falls back to a blank ink-fill line when
-          not configured, exactly like the uploaded reference does for
-          whichever of these a given Job Card hasn't set. */}
-      <div style={{ marginBottom: "10px" }}>
-        <SectionEyebrow>Production Planning</SectionEyebrow>
+          not configured. Icon tiles (see chat, minimalist redesign) —
+          purely decorative per-metric glyphs, same four values as
+          before, nothing new resolved. */}
         <div
           style={{
-            display: "grid",
-            gridTemplateColumns: "1fr 1fr 1fr 1fr",
-            border: "1px solid #bbb",
-            borderRadius: "3px",
+            marginBottom: "8px",
+            border: `1px solid ${JOB_CARD_BORDER_BLUE}`,
+            borderRadius: "4px",
             overflow: "hidden",
           }}
         >
-          {(
-            [
-              ["Total Quantity", jobCard.totalQuantity, "Nos"],
-              ["Time per Piece", jobCard.standardTimePerUnitMinutes, "Min"],
-              ["Allocated Time", jobCard.allocatedTimeMinutes, "Min"],
-              ["Target for This Job", targetQty, "Nos"],
-            ] as const
-          ).map(([label, value, unit], i) => (
-            <div
-              key={label}
-              style={{
-                padding: "8px 10px",
-                textAlign: "center",
-                borderLeft: i > 0 ? "1px solid #ddd" : undefined,
-              }}
-            >
-              <div style={{ fontSize: "9.5px", color: "#666" }}>{label}</div>
-              {value == null ? (
-                <div
-                  style={{
-                    borderBottom: "1px solid #999",
-                    height: "16px",
-                    margin: "4px 10px 2px",
-                  }}
-                />
-              ) : (
-                <div
-                  style={{ fontSize: "15px", fontWeight: 700, color: "#111" }}
-                >
-                  {value}
-                </div>
-              )}
-              <div style={{ fontSize: "9px", color: "#888" }}>{unit}</div>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* ACTUAL WORK — Section 3/7: physically handwritten by the
-          employee/supervisor. Never pre-filled from jobCard's own
-          startTime/endTime/activeSeconds/status (those are the DIGITAL
-          record's own live state, not the paper record). */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr 1fr",
-          border: "1px solid #bbb",
-          borderRadius: "3px",
-          overflow: "hidden",
-          marginBottom: "8px",
-          fontSize: "12px",
-        }}
-      >
-        {["Start Time (Actual)", "End Time (Actual)", "Total Time Taken"].map(
-          (label, i) => (
-            <div
-              key={label}
-              style={{
-                padding: "9px 10px 11px",
-                borderLeft: i > 0 ? "1px solid #ddd" : undefined,
-              }}
-            >
-              <div style={JOB_CARD_LABEL_STYLE}>{label}</div>
+          <div
+            style={{
+              background: JOB_CARD_BLUE_BG,
+              padding: "5px 10px",
+              fontSize: "10px",
+              fontWeight: 800,
+              color: JOB_CARD_NAVY,
+              textTransform: "uppercase",
+              letterSpacing: "0.8px",
+            }}
+          >
+            Production Planning
+          </div>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr 1fr 1fr",
+              padding: "8px",
+              gap: "8px",
+            }}
+          >
+            {(
+              [
+                [Box, "Total Qty", jobCard.totalQuantity, "pcs"],
+                [
+                  Clock,
+                  "Time / Piece",
+                  jobCard.standardTimePerUnitMinutes,
+                  "mins",
+                ],
+                [
+                  Hourglass,
+                  "Allocated Time",
+                  jobCard.allocatedTimeMinutes,
+                  "hrs",
+                ],
+                [BarChart3, "Expected Qty", targetQty, "pcs"],
+              ] as const
+            ).map(([Icon, label, value, unit]) => (
               <div
-                style={{
-                  display: "flex",
-                  alignItems: "baseline",
-                  gap: "6px",
-                }}
+                key={label}
+                style={{ display: "flex", alignItems: "center", gap: "8px" }}
               >
                 <div
                   style={{
-                    borderBottom: "1px solid #999",
-                    height: "22px",
-                    flex: "1 1 auto",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: "30px",
+                    height: "30px",
+                    borderRadius: "6px",
+                    background: JOB_CARD_BLUE_BG,
+                    color: JOB_CARD_NAVY,
+                    flexShrink: 0,
                   }}
-                />
-                {label === "Total Time Taken" && (
-                  <span style={{ fontSize: "10px", color: "#888" }}>Min</span>
-                )}
+                >
+                  <Icon size={16} strokeWidth={2} />
+                </div>
+                <div>
+                  <div style={{ fontSize: "9.5px", color: "#666" }}>
+                    {label}
+                  </div>
+                  {value == null ? (
+                    <div
+                      style={{
+                        borderBottom: "1px solid #999",
+                        height: "14px",
+                        width: "48px",
+                      }}
+                    />
+                  ) : (
+                    <div style={{ fontSize: "15px", fontWeight: 800 }}>
+                      {value}{" "}
+                      <span
+                        style={{
+                          fontSize: "9px",
+                          fontWeight: 600,
+                          color: "#888",
+                        }}
+                      >
+                        {unit}
+                      </span>
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          ),
-        )}
-      </div>
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr 1fr 1fr",
-          border: "1px solid #bbb",
-          borderRadius: "3px",
-          overflow: "hidden",
-          marginBottom: "12px",
-          fontSize: "12px",
-        }}
-      >
-        {[
-          "Total Received / Issued",
-          "Completed OK",
-          "Failed / Rejected",
-          "Remaining",
-        ].map((label, i) => (
-          <div
-            key={label}
-            style={{
-              padding: "9px 10px 11px",
-              borderLeft: i > 0 ? "1px solid #ddd" : undefined,
-            }}
-          >
-            <div style={JOB_CARD_LABEL_STYLE}>{label}</div>
-            <div
-              style={{ display: "flex", alignItems: "baseline", gap: "6px" }}
-            >
-              <div
-                style={{
-                  borderBottom: "1px solid #999",
-                  height: "22px",
-                  flex: "1 1 auto",
-                }}
-              />
-              <span style={{ fontSize: "10px", color: "#888" }}>Nos</span>
-            </div>
+            ))}
           </div>
-        ))}
-      </div>
+        </div>
 
-      {/* WORK INSTRUCTION — a numbered instruction table (one row per
-          line of jobDescription when the user entered several, else a
-          single numbered row), matching the uploaded reference's table
-          treatment rather than a plain paragraph box. */}
-      <div
-        style={{
-          border: "1px solid #bbb",
-          borderRadius: "3px",
-          overflow: "hidden",
-          marginBottom: "12px",
-        }}
-      >
+        {/* PRODUCTION ACTUAL (see chat, minimalist redesign) — merges
+          what were previously two separate boxed rows (Actual Timing +
+          Quantity Tracking) into ONE continuous row, matching the
+          reference. Physically handwritten by the employee/supervisor;
+          never pre-filled from jobCard's own startTime/endTime/
+          activeSeconds/actualCompletedQty/rejectedQty (those are the
+          DIGITAL record's own live state, not the paper record) —
+          same blank-ink-fill-line rule every other actual-work field
+          in this template already follows. */}
         <div
           style={{
-            background: "#eef2f7",
-            borderBottom: "1px solid #bbb",
-            padding: "5px 12px",
-            fontSize: "10.5px",
-            fontWeight: 800,
-            color: "#1a1a1a",
-            textTransform: "uppercase",
-            letterSpacing: "0.8px",
+            border: `1px solid ${JOB_CARD_BORDER_BLUE}`,
+            borderRadius: "4px",
+            overflow: "hidden",
+            marginBottom: "10px",
           }}
         >
-          Work Instruction
+          <div
+            style={{
+              background: JOB_CARD_BLUE_BG,
+              padding: "5px 10px",
+              fontSize: "10px",
+              fontWeight: 800,
+              color: JOB_CARD_NAVY,
+              textTransform: "uppercase",
+              letterSpacing: "0.8px",
+            }}
+          >
+            Production Actual
+          </div>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(8, 1fr)",
+              fontSize: "10.5px",
+            }}
+          >
+            {[
+              "Start Time",
+              "End Time",
+              "Time Taken",
+              "Total Received",
+              "Completed",
+              "Rejected",
+              "Failed",
+              "Remaining",
+            ].map((label, i) => (
+              <div
+                key={label}
+                style={{
+                  padding: "8px 6px 9px",
+                  borderLeft: i > 0 ? "1px solid #ddd" : undefined,
+                }}
+              >
+                <div style={JOB_CARD_LABEL_STYLE}>{label}</div>
+                <div
+                  style={{
+                    borderBottom: "1px solid #999",
+                    height: "18px",
+                  }}
+                />
+              </div>
+            ))}
+          </div>
         </div>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <tbody>
+
+        {/* WORK INSTRUCTION — a numbered LIST (one line per line of
+          jobDescription when the user entered several, else a single
+          numbered line), matching the minimalist redesign's reference
+          — small navy numbered markers, not a bordered table anymore.
+          Same source/split logic as before, purely a visual change. */}
+        <div
+          style={{
+            border: `1px solid ${JOB_CARD_BORDER_BLUE}`,
+            borderRadius: "4px",
+            overflow: "hidden",
+            marginBottom: "10px",
+          }}
+        >
+          <div
+            style={{
+              background: JOB_CARD_BLUE_BG,
+              borderBottom: `1px solid ${JOB_CARD_BORDER_BLUE}`,
+              padding: "5px 10px",
+              fontSize: "10px",
+              fontWeight: 800,
+              color: JOB_CARD_NAVY,
+              textTransform: "uppercase",
+              letterSpacing: "0.8px",
+            }}
+          >
+            Work Instruction
+          </div>
+          <div style={{ padding: "8px 10px" }}>
             {(jobCard.jobDescription || "—")
               .split("\n")
               .map((line) => line.trim())
               .filter(Boolean)
               .map((line, i) => (
-                // biome-ignore lint/suspicious/noArrayIndexKey: fixed print snapshot of a plain-text field, never reordered
-                <tr key={i}>
-                  <td
+                <div
+                  key={
+                    // biome-ignore lint/suspicious/noArrayIndexKey: fixed print snapshot of a plain-text field, never reordered
+                    i
+                  }
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: "8px",
+                    marginBottom: "5px",
+                  }}
+                >
+                  <span
                     style={{
-                      width: "28px",
-                      padding: "7px 8px",
-                      borderTop: i > 0 ? "1px solid #ddd" : undefined,
-                      textAlign: "center",
-                      color: "#555",
-                      fontSize: "12px",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      width: "16px",
+                      height: "16px",
+                      borderRadius: "3px",
+                      background: JOB_CARD_BLUE_BG,
+                      color: JOB_CARD_NAVY,
+                      fontSize: "9.5px",
+                      fontWeight: 800,
+                      flexShrink: 0,
                     }}
                   >
                     {i + 1}
-                  </td>
-                  <td
+                  </span>
+                  <span style={{ fontSize: "12px", color: "#111" }}>
+                    {line}
+                  </span>
+                </div>
+              ))}
+          </div>
+        </div>
+
+        {/* INSPECTION PLAN — real, admin-configured checkpoints only, not
+          connected to project_qms_inspections, no pass/fail semantics,
+          purely printed. Cumulative Qty (row.cumulativeQty, already on
+          the data model — not computed here) is back per the print
+          template redesign's reference image; "Inspection After" still
+          carries the human-readable delta alongside it. Every row gets
+          its OWN Inspector Sign + QC Sign cell (see chat, "every
+          inspection needs its own signature") with real vertical
+          writing room, not one shared signature at the bottom.
+          Entirely omitted when empty — no generic blank fallback
+          table. Whatever checkpoints actually exist on this Job Card
+          print, in order — never a hardcoded First/Second/Final set. */}
+        {jobCard.inspectionPlan.length > 0 && (
+          <div
+            style={{
+              marginBottom: "10px",
+              border: `1px solid ${JOB_CARD_BORDER_BLUE}`,
+              borderRadius: "4px",
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                background: JOB_CARD_BLUE_BG,
+                padding: "5px 10px",
+                fontSize: "10px",
+                fontWeight: 800,
+                color: JOB_CARD_NAVY,
+                textTransform: "uppercase",
+                letterSpacing: "0.8px",
+              }}
+            >
+              Inspection Plan
+            </div>
+            <table
+              style={{
+                width: "100%",
+                borderCollapse: "collapse",
+                fontSize: "11.5px",
+              }}
+            >
+              <thead>
+                <tr>
+                  {[
+                    "Checkpoint",
+                    "Cumulative Qty",
+                    "Sample Qty",
+                    "Inspection After",
+                    "Inspector Sign",
+                    "QC Sign",
+                  ].map((h) => (
+                    <th
+                      key={h}
+                      style={{
+                        borderBottom: `1px solid ${JOB_CARD_BORDER_BLUE}`,
+                        padding: "6px 8px",
+                        textAlign: "left",
+                        color: JOB_CARD_NAVY,
+                      }}
+                    >
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {[...jobCard.inspectionPlan]
+                  .sort((a, b) => a.cumulativeQty - b.cumulativeQty)
+                  .map((row, i, sorted) => {
+                    // "Inspection After" wording (see chat): the FIRST row
+                    // reads "N Nos" (from zero); the LAST row (always
+                    // Final, when configured via the Create/Edit checkpoint
+                    // UI) reads "Remaining N Nos"; every row in between
+                    // reads "Next N Nos" — all derived from
+                    // row.triggerQty (already the delta from the previous
+                    // checkpoint), never re-computed here.
+                    const isFirst = i === 0;
+                    const isLast = i === sorted.length - 1;
+                    const afterWording = isFirst
+                      ? `${row.triggerQty} Nos`
+                      : isLast && row.source === "final"
+                        ? `Remaining ${row.triggerQty} Nos`
+                        : `Next ${row.triggerQty} Nos`;
+                    return (
+                      <tr key={row.id}>
+                        <td
+                          style={{
+                            borderTop: "1px solid #ddd",
+                            padding: "9px 8px",
+                          }}
+                        >
+                          {row.label}
+                        </td>
+                        <td
+                          style={{
+                            borderTop: "1px solid #ddd",
+                            padding: "9px 8px",
+                            textAlign: "center",
+                          }}
+                        >
+                          {row.cumulativeQty}
+                        </td>
+                        <td
+                          style={{
+                            borderTop: "1px solid #ddd",
+                            padding: "9px 8px",
+                            textAlign: "center",
+                          }}
+                        >
+                          {row.sampleQty}
+                        </td>
+                        <td
+                          style={{
+                            borderTop: "1px solid #ddd",
+                            padding: "9px 8px",
+                          }}
+                        >
+                          {afterWording}
+                        </td>
+                        <td
+                          style={{
+                            borderTop: "1px solid #ddd",
+                            padding: "9px 8px",
+                          }}
+                        />
+                        <td
+                          style={{
+                            borderTop: "1px solid #ddd",
+                            padding: "9px 8px",
+                          }}
+                        />
+                      </tr>
+                    );
+                  })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* SIGN-OFF (see chat, minimalist redesign) — exactly five
+          roles, relabeled to match the reference. Every label change
+          below is presentation-only; the underlying persisted fields
+          are unchanged and nothing is dropped:
+          - "Prepared By" — jobCard.preparedByName, unchanged.
+          - "Assigned To" — jobCard.assignedByEmployeeName (was
+            "Assigned By").
+          - "Performed By" — jobCard.employeeName, the assigned worker
+            who performs the operation (was labeled "Completed By").
+          - "QC Inspected By" — jobCard.inProcessCheckEmployeeName (was
+            "In-Process Check"). Reusing this field's value under this
+            new label is a deliberate choice: an in-process check IS a
+            QC inspection performed during production, and no second
+            "QC Inspected By" field exists or is invented — see chat,
+            "reuse existing fields... do not create duplicate fields."
+          - "Approved By" — jobCard.qcApprovedByEmployeeName (was "QC
+            Approved By").
+          The task's instruction to "remove In-Process By and Completed
+          By" is read as retiring those two LABEL STRINGS from the
+          printed page, not deleting the two data points they carried —
+          both remain visible, just under clearer role names. Prepared
+          By prints the actual persisted preparer (automatic, never a
+          blank line); the other four print the actual selected/
+          assigned name when set, and fall back to a blank ink-fill
+          line only when nothing was selected. No per-cell date — the
+          Job Card's own date is already in the title bar above. */}
+        <div
+          style={{
+            border: `1px solid ${JOB_CARD_BORDER_BLUE}`,
+            borderRadius: "4px",
+            overflow: "hidden",
+            marginBottom: "10px",
+          }}
+        >
+          <div
+            style={{
+              background: JOB_CARD_BLUE_BG,
+              padding: "5px 10px",
+              fontSize: "10px",
+              fontWeight: 800,
+              color: JOB_CARD_NAVY,
+              textTransform: "uppercase",
+              letterSpacing: "0.8px",
+            }}
+          >
+            Sign-Off
+          </div>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr",
+              gap: "12px",
+              padding: "10px",
+            }}
+          >
+            {(
+              [
+                ["Prepared By", jobCard.preparedByName],
+                ["Assigned To", jobCard.assignedByEmployeeName],
+                ["Performed By", jobCard.employeeName],
+                ["QC Inspected By", jobCard.inProcessCheckEmployeeName],
+                ["Approved By", jobCard.qcApprovedByEmployeeName],
+              ] as const
+            ).map(([label, name]) => (
+              <div key={label} style={{ textAlign: "center" }}>
+                {name ? (
+                  <div
                     style={{
-                      padding: "7px 8px",
-                      borderTop: i > 0 ? "1px solid #ddd" : undefined,
-                      borderLeft: "1px solid #ddd",
-                      fontSize: "12.5px",
+                      minHeight: "40px",
+                      borderBottom: "1px solid #555",
+                      marginBottom: "5px",
+                      display: "flex",
+                      alignItems: "flex-end",
+                      justifyContent: "center",
+                      paddingBottom: "4px",
+                      fontSize: "12px",
+                      fontWeight: 600,
                       color: "#111",
                     }}
                   >
-                    {line}
-                  </td>
-                </tr>
-              ))}
-          </tbody>
-        </table>
-      </div>
-
-      {/* INSPECTION PLAN — real, admin-configured checkpoints only, not
-          connected to project_qms_inspections, no pass/fail semantics,
-          purely printed. Deliberately NOT printing Cumulative Qty (see
-          chat — internal ERP triggering math, not a physical shop-floor
-          instruction); "Inspection After" already carries the
-          human-readable delta. Every row gets its OWN Inspector Sign +
-          QC Sign cell (see chat, "every inspection needs its own
-          signature") with real vertical writing room, not one shared
-          signature at the bottom. Entirely omitted when empty — no
-          generic blank fallback table. */}
-      {jobCard.inspectionPlan.length > 0 && (
-        <div style={{ marginBottom: "14px" }}>
-          <SectionEyebrow>
-            Inspection Plan (As per Total Quantity)
-          </SectionEyebrow>
-          <table
-            style={{
-              width: "100%",
-              borderCollapse: "collapse",
-              fontSize: "12px",
-            }}
-          >
-            <thead>
-              <tr style={{ background: "#eee" }}>
-                {[
-                  "S.No",
-                  "Check Point",
-                  "Inspection After",
-                  "To Be Checked",
-                  "Inspector Sign",
-                  "QC Sign",
-                ].map((h) => (
-                  <th
-                    key={h}
+                    {name}
+                  </div>
+                ) : (
+                  <div
                     style={{
-                      border: "1px solid #999",
-                      padding: "6px 8px",
-                      textAlign: "left",
+                      minHeight: "40px",
+                      borderBottom: "1px solid #555",
+                      marginBottom: "5px",
                     }}
-                  >
-                    {h}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {[...jobCard.inspectionPlan]
-                .sort((a, b) => a.cumulativeQty - b.cumulativeQty)
-                .map((row, i, sorted) => {
-                  // "Inspection After" wording (see chat): the FIRST row
-                  // reads "N Nos" (from zero); the LAST row (always
-                  // Final, when configured via the Create/Edit checkpoint
-                  // UI) reads "Remaining N Nos"; every row in between
-                  // reads "Next N Nos" — all derived from
-                  // row.triggerQty (already the delta from the previous
-                  // checkpoint), never re-computed here.
-                  const isFirst = i === 0;
-                  const isLast = i === sorted.length - 1;
-                  const afterWording = isFirst
-                    ? `${row.triggerQty} Nos`
-                    : isLast && row.source === "final"
-                      ? `Remaining ${row.triggerQty} Nos`
-                      : `Next ${row.triggerQty} Nos`;
-                  return (
-                    <tr key={row.id}>
-                      <td
-                        style={{
-                          border: "1px solid #999",
-                          padding: "16px 8px",
-                          textAlign: "center",
-                        }}
-                      >
-                        {i + 1}
-                      </td>
-                      <td
-                        style={{
-                          border: "1px solid #999",
-                          padding: "16px 8px",
-                        }}
-                      >
-                        {row.label}
-                      </td>
-                      <td
-                        style={{
-                          border: "1px solid #999",
-                          padding: "16px 8px",
-                        }}
-                      >
-                        {afterWording}
-                      </td>
-                      <td
-                        style={{
-                          border: "1px solid #999",
-                          padding: "16px 8px",
-                          textAlign: "center",
-                        }}
-                      >
-                        {row.sampleQty} Nos
-                      </td>
-                      <td
-                        style={{
-                          border: "1px solid #999",
-                          padding: "16px 8px",
-                        }}
-                      />
-                      <td
-                        style={{
-                          border: "1px solid #999",
-                          padding: "16px 8px",
-                        }}
-                      />
-                    </tr>
-                  );
-                })}
-            </tbody>
-          </table>
+                  />
+                )}
+                <div
+                  style={{
+                    fontSize: "10.5px",
+                    fontWeight: 600,
+                    color: "#333",
+                  }}
+                >
+                  {label}
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
-      )}
 
-      {/* FINAL SIGN-OFF (Part 9, see chat) — exactly four roles.
-          "Completed By" deliberately REMOVED: the Job Card already
-          names the assigned Employee who performed the operation
-          (Job Identification strip above), so a separate "Completed
-          By" signature is redundant. Individual checkpoint
-          inspector/result/timestamp/signature information stays in the
-          DIGITAL record only (job_card_inspection_events) — this printed
-          block is the physical document's own overall sign-off, not a
-          per-checkpoint log (Part 10). Prepared By prints the actual
-          persisted preparer (automatic, never a blank line); the other
-          three print the actual selected name when set, and fall back
-          to a blank ink-fill line only when nothing was selected. */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr 1fr 1fr",
-          gap: "16px",
-        }}
-      >
-        {(
-          [
-            ["Prepared By", jobCard.preparedByName],
-            ["Assigned By", jobCard.assignedByEmployeeName],
-            ["In-Process Check", jobCard.inProcessCheckEmployeeName],
-            ["QC Approved By", jobCard.qcApprovedByEmployeeName],
-          ] as const
-        ).map(([label, name]) => (
-          <div key={label} style={{ textAlign: "center" }}>
-            {name ? (
-              <div
+        {/* CONTINUATION JOB CARD (see chat, and the later "correct the
+          Continuation Job Card workflow" corrective pass) — real,
+          persisted state now, read straight off
+          jobCard.isContinuation (see types.ts's own doc comment — NOT
+          part of the main JOB_CARD_COLUMNS hydration yet; the caller is
+          responsible for having resolved a fresh value via
+          fetchJobCardContinuation() before printing, same as it already
+          is for print_selected photos). Yes/No is always shown as a
+          real, mutually-exclusive checked pair — never a single
+          ambiguous checkbox. This footer indicator is status-only; the
+          actual PREVIOUS Job Card number (when continuation is Yes)
+          prints once, inside JOB DETAILS above — never here, and never
+          a "Next Job Card No." (that concept doesn't exist — a
+          continuation points backward to a real, already-existing Job
+          Card, never forward to an invented one). */}
+        <div
+          style={{
+            marginTop: "8px",
+            paddingTop: "8px",
+            borderTop: "1px solid #ccc",
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
+            fontSize: "11px",
+            color: "#333",
+          }}
+        >
+          <span style={{ fontWeight: 700, marginRight: "4px" }}>
+            Continuation Job Card:
+          </span>
+          {(["Yes", "No"] as const).map((option) => {
+            const checked = (option === "Yes") === !!jobCard.isContinuation;
+            return (
+              <span
+                key={option}
                 style={{
-                  minHeight: "44px",
-                  borderBottom: "1px solid #555",
-                  marginBottom: "5px",
-                  display: "flex",
-                  alignItems: "flex-end",
-                  justifyContent: "center",
-                  paddingBottom: "4px",
-                  fontSize: "12px",
-                  fontWeight: 600,
-                  color: "#111",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "3px",
                 }}
               >
-                {name}
-              </div>
-            ) : (
-              <div
-                style={{
-                  minHeight: "44px",
-                  borderBottom: "1px solid #555",
-                  marginBottom: "5px",
-                }}
-              />
-            )}
-            <div style={{ fontSize: "10.5px", fontWeight: 600, color: "#333" }}>
-              {label}
-            </div>
-          </div>
-        ))}
-      </div>
+                <span
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: "12px",
+                    height: "12px",
+                    border: "1.5px solid #555",
+                    fontSize: "9px",
+                    fontWeight: 800,
+                    lineHeight: 1,
+                  }}
+                >
+                  {checked ? "✓" : ""}
+                </span>
+                {option}
+              </span>
+            );
+          })}
+        </div>
 
-      <div
-        style={{
-          marginTop: "16px",
-          fontSize: "9.5px",
-          color: "#aaa",
-          textAlign: "center",
-        }}
-      >
-        This is a physical copy of a FabFlow Job Card. The system record remains
-        authoritative — data recorded above must be entered back into FabFlow,
-        not treated as a separate record.
+        {/* FOOTER — subtle, split left/right, matching the reference. */}
+        <div
+          style={{
+            marginTop: "8px",
+            paddingTop: "6px",
+            borderTop: "1px solid #ddd",
+            display: "flex",
+            justifyContent: "space-between",
+            fontSize: "9px",
+            color: "#999",
+          }}
+        >
+          <span style={{ fontWeight: 700, color: "#666" }}>FabFlow ERP</span>
+          <span>Internal Use Only</span>
+        </div>
       </div>
 
       {/* PAGE 2+ — Work Reference (Section 3/5, see chat; multi-print
@@ -2797,7 +3114,7 @@ export function JobCardDocContent({
       {(referencePhotoUrls ?? []).map((photo, i) => (
         <div
           key={photo.url}
-          style={{ pageBreakBefore: "always", paddingTop: "10mm" }}
+          style={{ ...JOB_CARD_PAGE_STYLE, pageBreakBefore: "always" }}
         >
           <div
             style={{
@@ -2878,7 +3195,7 @@ export function JobCardDocContent({
         <div
           // biome-ignore lint/suspicious/noArrayIndexKey: fixed print snapshot of an ordered page list, never reordered
           key={i}
-          style={{ pageBreakBefore: "always", paddingTop: "20px" }}
+          style={{ ...JOB_CARD_PAGE_STYLE, pageBreakBefore: "always" }}
         >
           <div
             style={{

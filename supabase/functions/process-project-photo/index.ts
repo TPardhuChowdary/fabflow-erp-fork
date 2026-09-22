@@ -106,6 +106,16 @@ const OWNER_TABLES: Record<string, string> = {
 };
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
+// Decode/re-encode ONLY — never touches the original file in Storage.
+// No image codec existed anywhere in this project's Edge Functions before
+// this fix; imagescript is a WASM-backed Deno image lib (its JPEG/PNG/GIF
+// decoders are compiled modules loaded at import time, not a native build
+// step this Edge Function has to perform itself) that decodes JPEG/PNG/
+// GIF/BMP into a uniform RGBA buffer and re-encodes PNG, which is exactly
+// the normalization OpenAI's images/edits endpoint needs (it rejects some
+// real-world JPEG variants — unusual chroma subsampling, CMYK, ICC/EXIF
+// quirks iPhones produce — with "Invalid image file or mode for image 1").
+import { Image } from "https://deno.land/x/imagescript@1.3.0/mod.ts";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -296,6 +306,20 @@ interface AssetPhotoRow {
   processed_storage_path: string | null;
 }
 
+// AI-input normalization boundary (the actual fix for "Invalid image file
+// or mode for image 1"). Decodes whatever bytes/mode/format the original
+// upload happens to be in and re-encodes a plain RGBA PNG — a format/mode
+// OpenAI's images/edits endpoint always accepts. Runs ONLY on an in-memory
+// copy of the downloaded bytes; the original object in Storage
+// (storage_path) is never read back into, written to, or mutated by this
+// function. Throws (never returns a fabricated image) on anything it can't
+// decode, so the caller can fail the run cleanly instead of sending OpenAI
+// garbage.
+async function normalizeImageForOpenAI(bytes: Uint8Array): Promise<Uint8Array> {
+  const decoded = await Image.decode(bytes);
+  return await decoded.encode(); // PNG, RGBA — imagescript's only encode() output
+}
+
 function safeErrorMessage(err: unknown, fallback: string): string {
   // Never forward a raw stack trace or an unfiltered vendor response
   // body — just a message string, same discipline openaiProvider.ts's
@@ -475,6 +499,27 @@ Deno.serve(async (req: Request) => {
     return jsonResponse({ error: "Could not read the original photo." }, 502);
   }
 
+  // Normalize a copy of the original's bytes for the AI call only (see
+  // normalizeImageForOpenAI's own header comment) — storage_path itself is
+  // never touched, so the user's uploaded file is unaffected either way.
+  let normalizedForAI: Uint8Array;
+  try {
+    normalizedForAI = await normalizeImageForOpenAI(
+      new Uint8Array(await originalBlob.arrayBuffer()),
+    );
+  } catch (err) {
+    await markFailed(serviceClient, photoId);
+    return jsonResponse(
+      {
+        error: safeErrorMessage(
+          err,
+          "The uploaded image could not be decoded or normalized for AI processing.",
+        ),
+      },
+      502,
+    );
+  }
+
   // The background is chosen BEFORE the edit call (see this file's own
   // header comment for why): the caller's validated manual choice, or
   // one real vision analysis of the actual product photo. Either way
@@ -499,10 +544,16 @@ Deno.serve(async (req: Request) => {
   try {
     const form = new FormData();
     form.append("model", OPENAI_IMAGE_MODEL);
+    // Send the normalized derivative, never the raw original bytes — a
+    // fixed .png name/type since normalizeImageForOpenAI always re-encodes
+    // PNG regardless of the source format/mode.
     form.append(
       "image",
-      new File([originalBlob], photoRow.original_filename || "photo.png", {
-        type: photoRow.mime_type || "image/png",
+      // Cast only: Uint8Array is a valid BlobPart at runtime in Deno (and
+      // browsers) — this is a lib.dom.d.ts ArrayBufferLike/ArrayBuffer
+      // generic nuance under the root tsconfig, not a real type mismatch.
+      new File([normalizedForAI as unknown as ArrayBuffer], "photo.png", {
+        type: "image/png",
       }),
     );
     form.append("prompt", buildEditPrompt(chosenBackground));

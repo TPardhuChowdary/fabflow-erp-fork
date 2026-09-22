@@ -1,4 +1,4 @@
-import { BarChart3, Box, Clock, Factory, Hourglass } from "lucide-react";
+import { Factory } from "lucide-react";
 /**
  * Shared document content components.
  * Used as hidden off-screen containers in page files so html2canvas
@@ -2086,6 +2086,16 @@ const JOB_CARD_LABEL_STYLE: React.CSSProperties = {
 const JOB_CARD_NAVY = "#15325c";
 const JOB_CARD_BLUE_BG = "#dce8f5";
 const JOB_CARD_BORDER_BLUE = "#a9c3de";
+// Solid section-header bar (see chat, "final approved Job Card print
+// copy") — every boxed section's own header strip (Job Identification,
+// Reference Photo, Production Planning, Production Actual, Work
+// Instruction, Inspection Plan, Sign-Off) uses this solid blue fill
+// with white text in the approved print copy, replacing the earlier
+// pale JOB_CARD_BLUE_BG-fill/navy-text treatment those bars used
+// before. JOB_CARD_BLUE_BG/JOB_CARD_NAVY stay in use elsewhere
+// (borders, the header brand row, icon tiles removed from Production
+// Planning, etc.) — this is additive, not a replacement of those.
+const JOB_CARD_HEADER_BLUE = "#1c5ea8";
 
 // Every physical sheet (Page 1, and each Reference Photo/Drawing page
 // that follows it) gets the SAME fixed A4 box — width/min-height in mm,
@@ -2178,205 +2188,139 @@ export function JobCardDocContent({
         style={{
           ...JOB_CARD_PAGE_STYLE,
           fontSize: "13px",
-          fontFamily: "Arial, Helvetica, sans-serif",
+          // Softer, more professional sans-serif (see chat, "newly
+          // approved Job Card print design") — replaces the previous
+          // plain Arial stack. System-font stack (no external @font-face
+          // needed in a print popup): each OS's own humanist UI face,
+          // which reads noticeably less "harsh"/typewriter-like than
+          // Arial at the same sizes/weights used throughout this
+          // template — a typeface change only, no size changed here.
+          fontFamily:
+            '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif',
           color: "#1a1a1a",
           background: "#fff",
         }}
       >
-        {/* BRAND ROW (see chat, Job Card print template redesign — matched
-          against the supplied paper reference) — FabFlow's own software
-          brand on the left (the same Factory glyph the live app's own
-          sidebar uses, see components/Layout.tsx, not a separate logo
-          asset), the TENANT's company identity centered (settings.
-          companyName/companyAddress — the actual authoritative source,
-          same one Invoice's own header reads), and the static BUILD /
-          FABRICATE / DELIVER tagline on the right, thin vertical rules
-          between each third exactly like the reference. No job card
-          number here — that lives in the title bar below, once, not
-          duplicated across two header rows. */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            paddingBottom: "6px",
-            marginBottom: "6px",
-            borderBottom: `2px solid ${JOB_CARD_NAVY}`,
-          }}
-        >
-          <div
-            style={{
-              flex: "0 0 30%",
-              display: "flex",
-              alignItems: "center",
-              gap: "8px",
-              borderRight: "1px solid #ccc",
-              paddingRight: "12px",
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                width: "30px",
-                height: "30px",
-                borderRadius: "6px",
-                background: JOB_CARD_NAVY,
-                color: "#fff",
-                flexShrink: 0,
-              }}
-            >
-              <Factory size={17} strokeWidth={2.25} />
-            </div>
-            <div>
-              <div
-                style={{
-                  fontSize: "16px",
-                  fontWeight: 800,
-                  color: JOB_CARD_NAVY,
-                  letterSpacing: "0.5px",
-                  lineHeight: 1.1,
-                }}
-              >
-                FABFLOW
-              </div>
-              <div
-                style={{
-                  fontSize: "7.5px",
-                  fontWeight: 700,
-                  color: "#666",
-                  letterSpacing: "0.8px",
-                  textTransform: "uppercase",
-                }}
-              >
-                Manufacturing ERP
-              </div>
-            </div>
-          </div>
-          <div
-            style={{
-              flex: "1 1 auto",
-              textAlign: "center",
-              padding: "0 12px",
-              borderRight: "1px solid #ccc",
-            }}
-          >
-            {/* Same settings.companyName/companyAddress source Invoice's
-              own header reads — falls back to "Company Name" only when
-              Company Profile is genuinely unset, not a hardcoded brand. */}
-            <div
-              style={{
-                fontSize: "15px",
-                fontWeight: 800,
-                color: JOB_CARD_NAVY,
-              }}
-            >
-              {settings.companyName || "Company Name"}
-            </div>
-            {settings.companyAddress && (
-              <div
-                style={{ fontSize: "11px", color: "#555", marginTop: "1px" }}
-              >
-                {settings.companyAddress}
-              </div>
-            )}
-          </div>
-          <div
-            style={{
-              flex: "0 0 20%",
-              textAlign: "right",
-              paddingLeft: "12px",
-              fontSize: "10px",
-              fontWeight: 700,
-              color: JOB_CARD_NAVY,
-              letterSpacing: "1px",
-              lineHeight: 1.6,
-            }}
-          >
-            <div>BUILD</div>
-            <div>FABRICATE</div>
-            <div>DELIVER</div>
-          </div>
-        </div>
-
-        {/* TITLE BAR — the light-blue banded strip from the reference:
-          document title (left), Job Card No. (center), Date/Page
-          (right). jobCard.jobNo/printedAt/pageCount are the same
-          authoritative values the old header row used — this is a pure
-          layout move, not a new data source. */}
+        {/* HEADER (see chat, "final approved Job Card print copy") — a
+          single bordered box, three columns split by vertical dividers:
+          company logo/name (+ tagline underneath it, not under "JOB
+          CARD") on the left, a large "JOB CARD" title centered (same
+          20px size — only typeface/weight/letter-spacing changed, per
+          "do not make the title physically larger"), and Job Card
+          No./Date/Page as right-aligned "Label : Value" lines on the
+          right — matching the approved print copy's exact structure.
+          No separate brand strip above this — this IS the complete
+          header. */}
         <div
           style={{
             display: "flex",
             alignItems: "stretch",
+            marginBottom: "10px",
             border: `1px solid ${JOB_CARD_BORDER_BLUE}`,
-            borderRadius: "3px",
-            background: JOB_CARD_BLUE_BG,
-            marginBottom: "8px",
+            borderRadius: "4px",
             overflow: "hidden",
           }}
         >
           <div
             style={{
+              flex: "0 0 34%",
+              display: "flex",
+              alignItems: "center",
+              gap: "10px",
+              padding: "10px 14px",
+              borderRight: `1px solid ${JOB_CARD_BORDER_BLUE}`,
+            }}
+          >
+            {settings.companyLogo ? (
+              <img
+                src={settings.companyLogo}
+                alt="logo"
+                style={{
+                  maxHeight: "38px",
+                  maxWidth: "100px",
+                  objectFit: "contain",
+                }}
+              />
+            ) : (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: "34px",
+                  height: "34px",
+                  borderRadius: "6px",
+                  background: JOB_CARD_NAVY,
+                  color: "#fff",
+                  flexShrink: 0,
+                }}
+              >
+                <Factory size={18} strokeWidth={2.25} />
+              </div>
+            )}
+            <div>
+              {/* Same settings.companyName/companyAddress source
+                Invoice's own header reads — falls back to "Company
+                Name" only when Company Profile is genuinely unset, not
+                a hardcoded brand. */}
+              <div
+                style={{
+                  fontSize: "15px",
+                  fontWeight: 700,
+                  color: JOB_CARD_NAVY,
+                  letterSpacing: "0.2px",
+                  lineHeight: 1.15,
+                }}
+              >
+                {settings.companyName || "Company Name"}
+              </div>
+              <div
+                style={{
+                  fontSize: "8px",
+                  fontWeight: 600,
+                  color: "#5a7ba3",
+                  letterSpacing: "0.6px",
+                  textTransform: "uppercase",
+                  marginTop: "1px",
+                }}
+              >
+                One Operation. One Team. Better Results.
+              </div>
+              {settings.companyAddress && (
+                <div
+                  style={{ fontSize: "10px", color: "#666", marginTop: "1px" }}
+                >
+                  {settings.companyAddress}
+                </div>
+              )}
+            </div>
+          </div>
+          <div
+            style={{
               flex: "1 1 auto",
-              padding: "8px 14px",
+              textAlign: "center",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: "10px 14px",
               borderRight: `1px solid ${JOB_CARD_BORDER_BLUE}`,
             }}
           >
             <div
               style={{
-                fontSize: "20px",
+                fontSize: "28px",
                 fontWeight: 800,
                 color: JOB_CARD_NAVY,
+                letterSpacing: "2px",
               }}
             >
               JOB CARD
             </div>
-            <div
-              style={{
-                fontSize: "8.5px",
-                fontWeight: 700,
-                color: "#3a5a82",
-                letterSpacing: "0.8px",
-                textTransform: "uppercase",
-              }}
-            >
-              One Operation. One Team. Better Results.
-            </div>
           </div>
           <div
             style={{
-              flex: "0 0 32%",
-              padding: "8px 14px",
-              textAlign: "center",
-              borderRight: `1px solid ${JOB_CARD_BORDER_BLUE}`,
-            }}
-          >
-            <div
-              style={{
-                fontSize: "9.5px",
-                fontWeight: 700,
-                color: "#3a5a82",
-                textTransform: "uppercase",
-                letterSpacing: "0.6px",
-              }}
-            >
-              Job Card No.
-            </div>
-            <div
-              style={{
-                fontSize: "19px",
-                fontWeight: 800,
-                color: JOB_CARD_NAVY,
-                fontFamily: "'Courier New', monospace",
-              }}
-            >
-              {jobCard.jobNo}
-            </div>
-          </div>
-          <div
-            style={{
-              flex: "0 0 22%",
-              padding: "8px 14px",
+              flex: "0 0 26%",
+              padding: "10px 14px",
               fontSize: "10.5px",
               color: "#333",
               display: "flex",
@@ -2385,28 +2329,51 @@ export function JobCardDocContent({
               gap: "3px",
             }}
           >
-            <div>Date: {formatPrintDate(printedAt)}</div>
-            <div>Page 1 of {pageCount}</div>
+            {(
+              [
+                ["Job Card No.", jobCard.jobNo],
+                ["Date", formatPrintDate(printedAt)],
+                ["Page", `1 of ${pageCount}`],
+              ] as const
+            ).map(([label, value]) => (
+              <div key={label} style={{ display: "flex", gap: "6px" }}>
+                <span style={{ fontWeight: 700, color: "#333" }}>{label}</span>
+                <span>:</span>
+                <span style={{ fontWeight: 700, color: JOB_CARD_NAVY }}>
+                  {value}
+                </span>
+              </div>
+            ))}
           </div>
         </div>
 
         {/* UPPER BAND — Job identification on the left, a LARGE Project
           Reference Photo on the right (see chat, uploaded A4 reference:
           the photo is given real visual weight here, not a thumbnail).
-          alignItems: "flex-start" is load-bearing — each column's box
-          sizes to its OWN content instead of stretching to match its
-          (much taller) sibling, which is exactly the wasted-white-space
-          bug the compact layout fix addresses: the identification box
-          previously grew to the photo's full height even though its own
-          six rows need far less room. The left column widens to the
-          full row when there is no photo to show — never a blank
-          placeholder box. */}
+          FIXED physical height (see chat, "Reference Photo area
+          height" correction) — height: "66mm" on this row itself (the
+          same ~250px maximum the photo frame already allowed before,
+          converted to a physical unit: 250px @ 96dpi = 66.1mm, so this
+          preserves the exact composition the design was already
+          approved at for a tall/portrait photo) is now UNCONDITIONAL,
+          not a max reached only by some photos. Previously this row
+          used alignItems:"flex-start" so its height was whatever its
+          TALLEST child happened to need — a landscape photo (short at
+          width:100%) left the row short, a portrait photo hit its
+          250px cap and left the row tall, so Production Planning below
+          physically moved up or down depending on which photo was
+          uploaded. alignItems:"stretch" (the default, set explicitly
+          here) + this fixed row height fixes that: both the Job
+          Details column and the photo frame now always fill the SAME
+          66mm, with or without a photo, so every section below always
+          starts at the same position. */}
         <div
           style={{
             display: "flex",
             gap: "16px",
-            alignItems: "flex-start",
+            alignItems: "stretch",
             marginBottom: "10px",
+            height: "66mm",
           }}
         >
           <div
@@ -2415,23 +2382,24 @@ export function JobCardDocContent({
               border: `1px solid ${JOB_CARD_BORDER_BLUE}`,
               borderRadius: "4px",
               overflow: "hidden",
+              display: "flex",
+              flexDirection: "column",
             }}
           >
             <div
               style={{
-                background: JOB_CARD_BLUE_BG,
-                borderBottom: `1px solid ${JOB_CARD_BORDER_BLUE}`,
+                background: JOB_CARD_HEADER_BLUE,
                 padding: "5px 10px",
                 fontSize: "10px",
                 fontWeight: 800,
-                color: JOB_CARD_NAVY,
+                color: "#fff",
                 textTransform: "uppercase",
                 letterSpacing: "0.8px",
               }}
             >
-              Job Details
+              Job Identification
             </div>
-            <div style={{ padding: "8px 10px" }}>
+            <div style={{ flex: "1 1 auto" }}>
               {(
                 [
                   ["Project", projectName || "—"],
@@ -2470,14 +2438,15 @@ export function JobCardDocContent({
                       : "—",
                   ],
                 ] as [string, string][]
-              ).map(([label, value]) => (
+              ).map(([label, value], i) => (
                 <div
                   key={label}
                   style={{
                     display: "flex",
                     gap: "6px",
                     fontSize: "12px",
-                    marginBottom: "5px",
+                    padding: "6px 10px",
+                    borderTop: i > 0 ? "1px solid #e5e5e5" : undefined,
                   }}
                 >
                   <div
@@ -2489,11 +2458,17 @@ export function JobCardDocContent({
                   >
                     {label}
                   </div>
-                  <div style={{ color: "#111" }}>: {value}</div>
+                  <div style={{ color: "#111" }}>{value}</div>
                 </div>
               ))}
               <div
-                style={{ display: "flex", gap: "6px", alignItems: "center" }}
+                style={{
+                  display: "flex",
+                  gap: "6px",
+                  alignItems: "center",
+                  padding: "6px 10px",
+                  borderTop: "1px solid #e5e5e5",
+                }}
               >
                 <div
                   style={{
@@ -2505,44 +2480,87 @@ export function JobCardDocContent({
                 >
                   Priority
                 </div>
-                <div style={{ fontSize: "12px" }}>:</div>
                 <PriorityPill priority={jobCard.priority} />
               </div>
             </div>
           </div>
 
-          {/* PROJECT REFERENCE PHOTO — identifies the product/project this
-            Job Card belongs to; NOT an evidence or completion photo.
-            Integrated presentation (see chat, "Reference Photo
-            presentation" — inspired by the QC Check Sheet reference):
-            borderless, no header band, no caption — just the photograph
-            itself, opaque and sharp, aspect-ratio preserved (object-fit:
-            contain, never stretched/cropped/faded). Its own height is
-            dictated by the photo itself, never forced to match the (now
-            shorter) identification column on the left. */}
+          {/* REFERENCE PHOTO (see chat, "final approved Job Card print
+            copy") — identifies the product/project this Job Card
+            belongs to; NOT an evidence or completion photo. Bordered
+            box with its own solid-blue header bar, matching Job
+            Identification's chrome exactly. FIXED frame (see chat,
+            "Reference Photo area height" correction) — the inner div
+            wrapping the <img>, not the <img> itself, is height:"100%"
+            (which resolves to the parent row's fixed 66mm minus this
+            header bar's own height — see that row's own comment): a
+            real fixed-size container the image is constrained INSIDE,
+            never the other way around. The <img> itself is
+            width:"100%"/height:"100%" + objectFit:"contain", so it
+            scales to fit within this frame and is centered
+            (object-position defaults to 50% 50%) — a portrait,
+            landscape, or square photo all fit proportionally inside
+            the exact same frame, and the frame's size never depends on
+            which one was uploaded. Opaque, sharp, never faded/masked/
+            gradient/shadowed — plain object-fit:contain only. */}
           {projectPhotoUrl && (
-            <img
-              src={projectPhotoUrl}
-              alt="Project reference"
+            <div
               style={{
                 flex: "0 0 60%",
-                display: "block",
-                width: "100%",
-                maxHeight: "250px",
-                objectFit: "contain",
+                height: "100%",
+                border: `1px solid ${JOB_CARD_BORDER_BLUE}`,
+                borderRadius: "4px",
+                overflow: "hidden",
+                display: "flex",
+                flexDirection: "column",
               }}
-            />
+            >
+              <div
+                style={{
+                  background: JOB_CARD_HEADER_BLUE,
+                  padding: "5px 10px",
+                  fontSize: "10px",
+                  fontWeight: 800,
+                  color: "#fff",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.8px",
+                }}
+              >
+                Reference Photo
+              </div>
+              <div
+                style={{
+                  flex: "1 1 auto",
+                  overflow: "hidden",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                <img
+                  src={projectPhotoUrl}
+                  alt="Project reference"
+                  style={{
+                    display: "block",
+                    width: "100%",
+                    height: "100%",
+                    objectFit: "contain",
+                  }}
+                />
+              </div>
+            </div>
           )}
         </div>
 
-        {/* PRODUCTION PLANNING — real, persisted numbers only. Total
-          Quantity is the only one of these four that's genuinely
-          optional (Time per Piece/Allocated Time are required at
-          creation; Target is the GENERATED expectedQuantity or its
-          override) — it alone falls back to a blank ink-fill line when
-          not configured. Icon tiles (see chat, minimalist redesign) —
-          purely decorative per-metric glyphs, same four values as
-          before, nothing new resolved. */}
+        {/* PRODUCTION PLANNING (see chat, "final approved Job Card print
+          copy") — real, persisted numbers only. Total Quantity is the
+          only one of these four that's genuinely optional (Time per
+          Piece/Allocated Time are required at creation; Target is the
+          GENERATED expectedQuantity or its override) — it alone falls
+          back to a blank ink-fill line when not configured. Plain
+          label-above/large-number-below per column, centered, divided
+          by vertical rules — no decorative icon tiles (removed to match
+          the approved print copy, which doesn't have them). */}
         <div
           style={{
             marginBottom: "8px",
@@ -2553,11 +2571,11 @@ export function JobCardDocContent({
         >
           <div
             style={{
-              background: JOB_CARD_BLUE_BG,
+              background: JOB_CARD_HEADER_BLUE,
               padding: "5px 10px",
               fontSize: "10px",
               fontWeight: 800,
-              color: JOB_CARD_NAVY,
+              color: "#fff",
               textTransform: "uppercase",
               letterSpacing: "0.8px",
             }}
@@ -2568,74 +2586,74 @@ export function JobCardDocContent({
             style={{
               display: "grid",
               gridTemplateColumns: "1fr 1fr 1fr 1fr",
-              padding: "8px",
-              gap: "8px",
             }}
           >
             {(
               [
-                [Box, "Total Qty", jobCard.totalQuantity, "pcs"],
-                [
-                  Clock,
-                  "Time / Piece",
-                  jobCard.standardTimePerUnitMinutes,
-                  "mins",
-                ],
-                [
-                  Hourglass,
-                  "Allocated Time",
-                  jobCard.allocatedTimeMinutes,
-                  "hrs",
-                ],
-                [BarChart3, "Expected Qty", targetQty, "pcs"],
+                ["Total Qty", jobCard.totalQuantity, "pcs"],
+                ["Time / Piece", jobCard.standardTimePerUnitMinutes, "mins"],
+                ["Allocated Time", jobCard.allocatedTimeMinutes, "hrs"],
+                ["Expected Qty", targetQty, "pcs"],
               ] as const
-            ).map(([Icon, label, value, unit]) => (
+            ).map(([label, value, unit], i) => (
               <div
                 key={label}
-                style={{ display: "flex", alignItems: "center", gap: "8px" }}
+                style={{
+                  padding: "10px 8px",
+                  textAlign: "center",
+                  borderLeft: i > 0 ? "1px solid #ddd" : undefined,
+                }}
               >
                 <div
                   style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    width: "30px",
-                    height: "30px",
-                    borderRadius: "6px",
-                    background: JOB_CARD_BLUE_BG,
-                    color: JOB_CARD_NAVY,
-                    flexShrink: 0,
+                    fontSize: "9.5px",
+                    fontWeight: 700,
+                    color: "#666",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.5px",
+                    marginBottom: "4px",
                   }}
                 >
-                  <Icon size={16} strokeWidth={2} />
+                  {label}
                 </div>
-                <div>
-                  <div style={{ fontSize: "9.5px", color: "#666" }}>
-                    {label}
-                  </div>
-                  {value == null ? (
-                    <div
+                {value == null ? (
+                  <div
+                    style={{
+                      borderBottom: "1px solid #999",
+                      height: "18px",
+                      width: "60%",
+                      margin: "0 auto",
+                    }}
+                  />
+                ) : (
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "baseline",
+                      justifyContent: "center",
+                      gap: "4px",
+                    }}
+                  >
+                    <span
                       style={{
-                        borderBottom: "1px solid #999",
-                        height: "14px",
-                        width: "48px",
+                        fontSize: "22px",
+                        fontWeight: 800,
+                        color: "#1a1a1a",
                       }}
-                    />
-                  ) : (
-                    <div style={{ fontSize: "15px", fontWeight: 800 }}>
-                      {value}{" "}
-                      <span
-                        style={{
-                          fontSize: "9px",
-                          fontWeight: 600,
-                          color: "#888",
-                        }}
-                      >
-                        {unit}
-                      </span>
-                    </div>
-                  )}
-                </div>
+                    >
+                      {value}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: "10.5px",
+                        fontWeight: 600,
+                        color: "#666",
+                      }}
+                    >
+                      {unit}
+                    </span>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -2660,16 +2678,19 @@ export function JobCardDocContent({
         >
           <div
             style={{
-              background: JOB_CARD_BLUE_BG,
+              background: JOB_CARD_HEADER_BLUE,
               padding: "5px 10px",
               fontSize: "10px",
               fontWeight: 800,
-              color: JOB_CARD_NAVY,
+              color: "#fff",
               textTransform: "uppercase",
               letterSpacing: "0.8px",
             }}
           >
-            Production Actual
+            Production Actual{" "}
+            <span style={{ fontWeight: 600, textTransform: "none" }}>
+              (To Be Filled By Worker / Supervisor)
+            </span>
           </div>
           <div
             style={{
@@ -2688,14 +2709,34 @@ export function JobCardDocContent({
               "Failed",
               "Remaining",
             ].map((label, i) => (
+              // display:flex column + justifyContent:"flex-end" (see
+              // chat, "newly approved Job Card print design") — anchors
+              // every column's underline to the SAME bottom position
+              // regardless of how many lines its own label wraps to.
+              // "Total Received" is the one label long enough to wrap
+              // in this narrow 1/8-width column; without this, its
+              // taller label would push its underline lower than its
+              // seven siblings in the same row. The underline itself
+              // (height: "18px") is untouched — same size for all 8.
               <div
                 key={label}
                 style={{
                   padding: "8px 6px 9px",
                   borderLeft: i > 0 ? "1px solid #ddd" : undefined,
+                  display: "flex",
+                  flexDirection: "column",
+                  justifyContent: "flex-end",
                 }}
               >
-                <div style={JOB_CARD_LABEL_STYLE}>{label}</div>
+                <div
+                  style={
+                    label === "Total Received"
+                      ? { ...JOB_CARD_LABEL_STYLE, fontSize: "8.5px" }
+                      : JOB_CARD_LABEL_STYLE
+                  }
+                >
+                  {label}
+                </div>
                 <div
                   style={{
                     borderBottom: "1px solid #999",
@@ -2722,12 +2763,11 @@ export function JobCardDocContent({
         >
           <div
             style={{
-              background: JOB_CARD_BLUE_BG,
-              borderBottom: `1px solid ${JOB_CARD_BORDER_BLUE}`,
+              background: JOB_CARD_HEADER_BLUE,
               padding: "5px 10px",
               fontSize: "10px",
               fontWeight: 800,
-              color: JOB_CARD_NAVY,
+              color: "#fff",
               textTransform: "uppercase",
               letterSpacing: "0.8px",
             }}
@@ -2777,18 +2817,19 @@ export function JobCardDocContent({
           </div>
         </div>
 
-        {/* INSPECTION PLAN — real, admin-configured checkpoints only, not
-          connected to project_qms_inspections, no pass/fail semantics,
-          purely printed. Cumulative Qty (row.cumulativeQty, already on
-          the data model — not computed here) is back per the print
-          template redesign's reference image; "Inspection After" still
-          carries the human-readable delta alongside it. Every row gets
-          its OWN Inspector Sign + QC Sign cell (see chat, "every
-          inspection needs its own signature") with real vertical
-          writing room, not one shared signature at the bottom.
-          Entirely omitted when empty — no generic blank fallback
-          table. Whatever checkpoints actually exist on this Job Card
-          print, in order — never a hardcoded First/Second/Final set. */}
+        {/* INSPECTION PLAN (see chat, "newly approved Job Card print
+          design") — exactly three columns now: Checkpoint, Inspection
+          After, Inspector Sign. Cumulative Qty, Sample Qty and QC Sign
+          are REMOVED from the printed table per the final approved
+          layout — row.cumulativeQty/row.sampleQty are still real,
+          persisted, admin-configured values on the data model (used
+          below to sort rows and compute afterWording, exactly as
+          before), simply no longer given their own printed columns;
+          nothing is invented or deleted. Inspector Sign keeps generous
+          width/padding for a real handwritten signature. Entirely
+          omitted when empty — no generic blank fallback table.
+          Whatever checkpoints actually exist on this Job Card print,
+          in order — never a hardcoded First/Second/Final set. */}
         {jobCard.inspectionPlan.length > 0 && (
           <div
             style={{
@@ -2800,11 +2841,11 @@ export function JobCardDocContent({
           >
             <div
               style={{
-                background: JOB_CARD_BLUE_BG,
+                background: JOB_CARD_HEADER_BLUE,
                 padding: "5px 10px",
                 fontSize: "10px",
                 fontWeight: 800,
-                color: JOB_CARD_NAVY,
+                color: "#fff",
                 textTransform: "uppercase",
                 letterSpacing: "0.8px",
               }}
@@ -2818,28 +2859,28 @@ export function JobCardDocContent({
                 fontSize: "11.5px",
               }}
             >
+              <colgroup>
+                <col style={{ width: "30%" }} />
+                <col style={{ width: "30%" }} />
+                <col style={{ width: "40%" }} />
+              </colgroup>
               <thead>
                 <tr>
-                  {[
-                    "Checkpoint",
-                    "Cumulative Qty",
-                    "Sample Qty",
-                    "Inspection After",
-                    "Inspector Sign",
-                    "QC Sign",
-                  ].map((h) => (
-                    <th
-                      key={h}
-                      style={{
-                        borderBottom: `1px solid ${JOB_CARD_BORDER_BLUE}`,
-                        padding: "6px 8px",
-                        textAlign: "left",
-                        color: JOB_CARD_NAVY,
-                      }}
-                    >
-                      {h}
-                    </th>
-                  ))}
+                  {["Checkpoint", "Inspection After", "Inspector Sign"].map(
+                    (h) => (
+                      <th
+                        key={h}
+                        style={{
+                          borderBottom: `1px solid ${JOB_CARD_BORDER_BLUE}`,
+                          padding: "6px 8px",
+                          textAlign: "left",
+                          color: JOB_CARD_NAVY,
+                        }}
+                      >
+                        {h}
+                      </th>
+                    ),
+                  )}
                 </tr>
               </thead>
               <tbody>
@@ -2874,24 +2915,6 @@ export function JobCardDocContent({
                           style={{
                             borderTop: "1px solid #ddd",
                             padding: "9px 8px",
-                            textAlign: "center",
-                          }}
-                        >
-                          {row.cumulativeQty}
-                        </td>
-                        <td
-                          style={{
-                            borderTop: "1px solid #ddd",
-                            padding: "9px 8px",
-                            textAlign: "center",
-                          }}
-                        >
-                          {row.sampleQty}
-                        </td>
-                        <td
-                          style={{
-                            borderTop: "1px solid #ddd",
-                            padding: "9px 8px",
                           }}
                         >
                           {afterWording}
@@ -2900,12 +2923,7 @@ export function JobCardDocContent({
                           style={{
                             borderTop: "1px solid #ddd",
                             padding: "9px 8px",
-                          }}
-                        />
-                        <td
-                          style={{
-                            borderTop: "1px solid #ddd",
-                            padding: "9px 8px",
+                            height: "30px",
                           }}
                         />
                       </tr>
@@ -2916,32 +2934,34 @@ export function JobCardDocContent({
           </div>
         )}
 
-        {/* SIGN-OFF (see chat, minimalist redesign) — exactly five
-          roles, relabeled to match the reference. Every label change
-          below is presentation-only; the underlying persisted fields
-          are unchanged and nothing is dropped:
+        {/* SIGN-OFF (see chat, "newly approved Job Card print design")
+          — exactly FOUR roles now, per the final approved layout.
+          Every label below is a presentation-only mapping onto the
+          same persisted fields this template has always used; nothing
+          is deleted and no duplicate field is invented:
           - "Prepared By" — jobCard.preparedByName, unchanged.
-          - "Assigned To" — jobCard.assignedByEmployeeName (was
-            "Assigned By").
-          - "Performed By" — jobCard.employeeName, the assigned worker
-            who performs the operation (was labeled "Completed By").
-          - "QC Inspected By" — jobCard.inProcessCheckEmployeeName (was
-            "In-Process Check"). Reusing this field's value under this
-            new label is a deliberate choice: an in-process check IS a
-            QC inspection performed during production, and no second
-            "QC Inspected By" field exists or is invented — see chat,
-            "reuse existing fields... do not create duplicate fields."
-          - "Approved By" — jobCard.qcApprovedByEmployeeName (was "QC
-            Approved By").
-          The task's instruction to "remove In-Process By and Completed
-          By" is read as retiring those two LABEL STRINGS from the
-          printed page, not deleting the two data points they carried —
-          both remain visible, just under clearer role names. Prepared
-          By prints the actual persisted preparer (automatic, never a
-          blank line); the other four print the actual selected/
-          assigned name when set, and fall back to a blank ink-fill
-          line only when nothing was selected. No per-cell date — the
-          Job Card's own date is already in the title bar above. */}
+          - "In-Process By" — jobCard.employeeName, the assigned worker
+            who actually performs/is in process on this operation (was
+            labeled "Performed By").
+          - "QC By" — jobCard.inProcessCheckEmployeeName. Its own doc
+            comment in types.ts already establishes this field as "who
+            is responsible for the in-process/QC check" (confirmed in
+            an earlier semantic-verification pass) — genuinely a QC
+            role, now under a shorter label (was "QC Inspected By").
+          - "Approved By" — jobCard.qcApprovedByEmployeeName, unchanged
+            (the LATER, final QC approval — distinct from "QC By"
+            above).
+          jobCard.assignedByEmployeeName ("Assigned To" in the previous
+          layout) is the one role dropped from this four-slot strip —
+          its data is still fully persisted and editable from the Edit
+          form, simply not given a printed cell here, same "retiring a
+          printed label ≠ deleting the data" reasoning already used for
+          the prior label changes on this template. Prepared By prints
+          the actual persisted preparer (automatic, never a blank
+          line); the other three print the actual selected name when
+          set, and fall back to a blank ink-fill line only when nothing
+          was selected. No per-cell date — the Job Card's own date is
+          already in the header above. */}
         <div
           style={{
             border: `1px solid ${JOB_CARD_BORDER_BLUE}`,
@@ -2952,11 +2972,11 @@ export function JobCardDocContent({
         >
           <div
             style={{
-              background: JOB_CARD_BLUE_BG,
+              background: JOB_CARD_HEADER_BLUE,
               padding: "5px 10px",
               fontSize: "10px",
               fontWeight: 800,
-              color: JOB_CARD_NAVY,
+              color: "#fff",
               textTransform: "uppercase",
               letterSpacing: "0.8px",
             }}
@@ -2966,7 +2986,7 @@ export function JobCardDocContent({
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr",
+              gridTemplateColumns: "1fr 1fr 1fr 1fr",
               gap: "12px",
               padding: "10px",
             }}
@@ -2974,9 +2994,8 @@ export function JobCardDocContent({
             {(
               [
                 ["Prepared By", jobCard.preparedByName],
-                ["Assigned To", jobCard.assignedByEmployeeName],
-                ["Performed By", jobCard.employeeName],
-                ["QC Inspected By", jobCard.inProcessCheckEmployeeName],
+                ["In-Process By", jobCard.employeeName],
+                ["QC By", jobCard.inProcessCheckEmployeeName],
                 ["Approved By", jobCard.qcApprovedByEmployeeName],
               ] as const
             ).map(([label, name]) => (
@@ -3012,9 +3031,35 @@ export function JobCardDocContent({
                     fontSize: "10.5px",
                     fontWeight: 600,
                     color: "#333",
+                    marginBottom: "8px",
                   }}
                 >
                   {label}
+                </div>
+                {/* Date line (see chat, "final approved Job Card print
+                  copy") — a plain physical writing line, same as every
+                  other worker-filled blank in this template (Production
+                  Actual's underlines); no per-signatory date is
+                  persisted anywhere on the Job Card, so this is never
+                  pre-filled from data. */}
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: "4px",
+                    fontSize: "9px",
+                    color: "#666",
+                  }}
+                >
+                  <span>Date:</span>
+                  <span
+                    style={{
+                      flex: "1 1 auto",
+                      borderBottom: "1px solid #999",
+                      height: "10px",
+                    }}
+                  />
                 </div>
               </div>
             ))}
@@ -3083,19 +3128,25 @@ export function JobCardDocContent({
           })}
         </div>
 
-        {/* FOOTER — subtle, split left/right, matching the reference. */}
+        {/* FOOTER (see chat, "final approved Job Card print copy") —
+          three-part split: FabFlow ERP left, "Build • Fabricate •
+          Deliver" centered, Internal Use Only right. */}
         <div
           style={{
             marginTop: "8px",
             paddingTop: "6px",
             borderTop: "1px solid #ddd",
             display: "flex",
+            alignItems: "center",
             justifyContent: "space-between",
             fontSize: "9px",
             color: "#999",
           }}
         >
           <span style={{ fontWeight: 700, color: "#666" }}>FabFlow ERP</span>
+          <span style={{ fontWeight: 700, color: JOB_CARD_NAVY }}>
+            Build • Fabricate • Deliver
+          </span>
           <span>Internal Use Only</span>
         </div>
       </div>

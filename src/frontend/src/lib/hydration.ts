@@ -4177,7 +4177,7 @@ const PROJECT_PRODUCTION_STAGE_COLUMNS =
   "created_at, updated_at";
 
 const PRODUCTION_STAGE_TRANSACTION_COLUMNS =
-  "id, stage_id, type, quantity, event_time, vendor_id, vendor_name, source_stage_id, created_at";
+  "id, stage_id, type, quantity, event_time, vendor_id, vendor_name, source_stage_id, line_id, created_at";
 
 export async function hydrateProjectProductionStages(): Promise<
   HydrationResult<ProjectProduction[]>

@@ -79,6 +79,7 @@ export interface ProductionStageTransactionRow {
   vendor_id: string | null;
   vendor_name: string | null;
   source_stage_id: string | null;
+  line_id: string | null;
   created_at: string;
 }
 
@@ -131,6 +132,7 @@ export function rowToStageTransaction(
     sentToVendorId: row.vendor_id ?? undefined,
     sentToVendorName: row.vendor_name ?? undefined,
     sourceStageId: row.source_stage_id ?? undefined,
+    lineId: row.line_id ?? undefined,
   };
 }
 
@@ -281,9 +283,15 @@ export async function recordStageTransactionRemote(
       // DB CHECK constraint rejects this on a 'receive' row, and the
       // validating trigger rejects a cross-project/cross-org source.
       source_stage_id: tx.sourceStageId || null,
+      // Set only when this transaction belongs to a specific
+      // production_stage_lines row (Multiple Outsourcing Lines) —
+      // undefined/null keeps meaning exactly what it means today, a
+      // stage-wide transaction. The DB's own per-line trigger validates
+      // this against stage_id and cumulative sent/received.
+      line_id: tx.lineId || null,
     })
     .select(
-      "id, stage_id, type, quantity, event_time, vendor_id, vendor_name, source_stage_id, created_at",
+      "id, stage_id, type, quantity, event_time, vendor_id, vendor_name, source_stage_id, line_id, created_at",
     )
     .single();
 

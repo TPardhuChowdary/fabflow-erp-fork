@@ -24,6 +24,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
 import { DeadlineIndicator } from "../components/DeadlineIndicator";
+import { ProductionStageLines } from "../components/ProductionStageLines";
 import { useUpdateProjectDeadline } from "../hooks/useUpdateProjectDeadline";
 import {
   compareByDeadlinePriority,
@@ -1855,6 +1856,18 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                       )}
                                     </div>
                                   )}
+
+                                  {/* Work Lines (Multiple Outsourcing
+                                    Lines under one stage) — independent
+                                    of the requiresMaterialTracking
+                                    branch above, available for any
+                                    expanded stage. */}
+                                  <ProductionStageLines
+                                    stage={stage}
+                                    projectId={project.id}
+                                    stageIdx={idx}
+                                    pEdit={pEdit}
+                                  />
 
                                   {/* Notes */}
                                   <div className="space-y-1">

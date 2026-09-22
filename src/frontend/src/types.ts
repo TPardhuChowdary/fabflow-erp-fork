@@ -1256,6 +1256,30 @@ export interface StageTransaction {
    * preserving external Send/Receive math unchanged) — it is read
    * separately as "Downstream Consumed". */
   sourceStageId?: string;
+  /** Set when this send/receive belongs to a specific
+   * production_stage_lines row (Multiple Outsourcing Lines under one
+   * stage) instead of the stage as a whole. Undefined for every
+   * pre-existing transaction — those keep meaning exactly what they
+   * mean today: a stage-wide transaction. */
+  lineId?: string;
+}
+
+/** One outsourcing/work line under a production stage — e.g. "Side
+ * Panel / Vendor A / 500 pcs" as one of several lines under a single
+ * "CNC Cutting" stage. Its own Sent/Received/Pending are derived from
+ * StageTransaction rows that carry this line's id as `lineId`, never
+ * stored redundantly here. */
+export interface ProductionStageLine {
+  id: string;
+  stageId: string;
+  workType: string;
+  material?: string;
+  vendorId?: string;
+  vendorName?: string;
+  plannedQty: number;
+  uom: string;
+  notes?: string;
+  createdAt: string;
 }
 
 export interface ProjectProductionStage {

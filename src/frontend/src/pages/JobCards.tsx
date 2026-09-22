@@ -67,6 +67,7 @@ import { useAuth } from "../AuthContext";
 import { CompleteJobCardDialog } from "../components/CompleteJobCardDialog";
 import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import { EmployeeSelect } from "../components/EmployeeSelect";
+import { JobCardEmployeeAssignments } from "../components/JobCardEmployeeAssignments";
 import { JobCardSelect } from "../components/JobCardSelect";
 import { JobCardTimerPanel } from "../components/JobCardTimerPanel";
 import { ProjectSelect } from "../components/ProjectSelect";
@@ -2094,14 +2095,24 @@ export function JobCards({
       </div>
 
       {sectionLabel("Work Instruction")}
+      {/* Multiline (see chat, "Work Instruction — multiline text") — the
+        print template (documentRenderers.tsx's Work Instruction section)
+        already splits jobDescription on "\n" into a numbered list; a
+        single-line <Input> could never produce a "\n" for it to split on.
+        Textarea is the only change needed — same field, same DB column
+        (job_cards.job_description, plain text, no length cap), same
+        save/edit/view/print paths. */}
       <div className="space-y-1">
         <Label className="text-xs">Job / Task *</Label>
-        <Input
+        <Textarea
           value={form.jobDescription}
           onChange={(e) =>
             setForm((f) => ({ ...f, jobDescription: e.target.value }))
           }
-          placeholder="e.g. Cut 3mm MS sheet to size"
+          placeholder={
+            "e.g. Cut 3mm MS sheet to size\n1. Verify drawing revision\n2. Load material\n3. Perform cutting"
+          }
+          rows={4}
         />
       </div>
 
@@ -2972,7 +2983,9 @@ export function JobCards({
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Job / Task</p>
-                    <p>{viewCard.jobDescription}</p>
+                    <p className="whitespace-pre-line">
+                      {viewCard.jobDescription}
+                    </p>
                   </div>
                   <div className="grid grid-cols-2 gap-2">
                     <div>
@@ -3103,6 +3116,17 @@ export function JobCards({
                     onComplete={() => setCompleteOpen(true)}
                     isSaving={isSaving}
                     dataOcidPrefix="jobcards.view.timer"
+                  />
+
+                  {/* Multiple Job Card Employees (Option A — simple
+                    roster, no per-employee timer; see chat "Employee
+                    Architecture Review"). One Job Card, many employees;
+                    the timer above remains the sole elapsed-time
+                    source. */}
+                  <JobCardEmployeeAssignments
+                    jobCardId={viewCard.id}
+                    activeSeconds={viewCard.activeSeconds ?? 0}
+                    canEdit={pEdit}
                   />
 
                   {/* Production Progress (see chat, Part 5) — reuses the

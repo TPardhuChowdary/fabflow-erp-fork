@@ -69,7 +69,7 @@ function getPayableStatus(
   return "Pending";
 }
 
-const emptyForm = { name: "", phone: "", address: "", gstNumber: "" };
+const emptyForm = { name: "", phone: "", email: "", address: "", gstNumber: "" };
 
 export function Vendors({
   onNavigate: _onNavigate,
@@ -122,6 +122,7 @@ export function Vendors({
     setForm({
       name: v.name,
       phone: v.phone,
+      email: v.email ?? "",
       address: v.address,
       gstNumber: v.gstNumber ?? "",
     });
@@ -148,6 +149,7 @@ export function Vendors({
       const result = await createVendorRemote({
         name: form.name.trim(),
         phone: form.phone.trim(),
+        email: form.email.trim() || undefined,
         address: form.address.trim(),
         gstNumber: form.gstNumber.trim() || undefined,
       });
@@ -184,6 +186,7 @@ export function Vendors({
         ...editVendor,
         name: form.name.trim(),
         phone: form.phone.trim(),
+        email: form.email.trim() || undefined,
         address: form.address.trim(),
         gstNumber: form.gstNumber.trim() || undefined,
       });
@@ -290,6 +293,16 @@ export function Vendors({
           onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
           placeholder="9876543210"
           data-ocid="vendors.phone.input"
+        />
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs">Email</Label>
+        <Input
+          type="email"
+          value={form.email}
+          onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
+          placeholder="email@company.com"
+          data-ocid="vendors.email.input"
         />
       </div>
       <div className="space-y-1">
@@ -493,6 +506,11 @@ export function Vendors({
                     {selectedVendor.phone && (
                       <div className="text-xs text-muted-foreground mt-0.5">
                         {selectedVendor.phone}
+                      </div>
+                    )}
+                    {selectedVendor.email && (
+                      <div className="text-xs text-muted-foreground mt-0.5">
+                        {selectedVendor.email}
                       </div>
                     )}
                     {selectedVendor.address && (

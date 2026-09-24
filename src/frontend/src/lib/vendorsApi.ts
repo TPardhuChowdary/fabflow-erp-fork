@@ -38,6 +38,7 @@ interface VendorRow {
   id: string;
   name: string;
   phone: string | null;
+  email: string | null;
   address: string | null;
   gstin: string | null;
   created_at: string;
@@ -48,6 +49,7 @@ function rowToVendor(row: VendorRow): Vendor {
     id: row.id,
     name: row.name,
     phone: row.phone ?? "",
+    email: row.email ?? undefined,
     address: row.address ?? "",
     gstNumber: row.gstin ?? undefined,
     createdAt: new Date(row.created_at).getTime(),
@@ -60,12 +62,13 @@ function toVendorFields(v: Omit<Vendor, "id" | "createdAt">) {
   return {
     name: normalizeBusinessName(v.name),
     phone: v.phone || null,
+    email: v.email || null,
     address: v.address || null,
     gstin: v.gstNumber ?? null,
   };
 }
 
-const SELECT_COLUMNS = "id, name, phone, address, gstin, created_at";
+const SELECT_COLUMNS = "id, name, phone, email, address, gstin, created_at";
 
 async function requireSession() {
   if (!isSupabaseConfigured) {

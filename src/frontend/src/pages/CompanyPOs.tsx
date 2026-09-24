@@ -182,6 +182,23 @@ function CompanyPOsInner() {
   const safePos = companyPOs || [];
   const safeVendors = vendors || [];
 
+  // "Our Company" delivery address option (see chat) — built from the
+  // organization's own Company Profile settings (companySettingsApi.ts,
+  // hydrated into settings via hydration.ts's getCompanySettingsRemote
+  // call), the same single source of truth CompanyPOPrintView.tsx
+  // already reads for the printed PO header. Not a second address
+  // source — just formatted for the delivery-address textarea.
+  const ourCompanyAddress = [
+    settings.companyName,
+    settings.companyAddress,
+    [settings.companyStateName, settings.companyStateCode]
+      .filter(Boolean)
+      .join(" - "),
+    settings.companyGstin ? `GSTIN: ${settings.companyGstin}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
   const [dialogOpen, setDialogOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [viewPO, setViewPO] = useState<CompanyPO | null>(null);
@@ -266,7 +283,10 @@ function CompanyPOsInner() {
     return `CPO-${String(next).padStart(3, "0")}`;
   };
 
-  const subtotal = formItems.reduce((s, i) => s + i.quantity * i.rate, 0);
+  const subtotal = formItems.reduce(
+    (s, i) => s + i.quantity * (Number(i.rate) || 0),
+    0,
+  );
   const gstAmount = subtotal * ((form.gstPercent || 0) / 100);
   const grandTotal = subtotal + gstAmount;
 
@@ -312,7 +332,11 @@ function CompanyPOsInner() {
         if (item.id !== id) return item;
         const updated = { ...item, [field]: value };
         if (field === "quantity" || field === "rate") {
-          updated.amount = updated.quantity * updated.rate;
+          // rate is briefly a string mid-typing (see the rate <Input>'s
+          // onChange below, which no longer coerces every keystroke so a
+          // decimal point survives) - coerce defensively here so amount
+          // is never NaN off a partial value like "0.".
+          updated.amount = updated.quantity * (Number(updated.rate) || 0);
         }
         return updated;
       }),
@@ -376,10 +400,14 @@ function CompanyPOsInner() {
         return;
       }
 
-      const itemsWithAmounts = formItems.map((i) => ({
-        ...i,
-        amount: i.quantity * i.rate,
-      }));
+      // Normalize rate to a real number before persisting - it can be a
+      // string mid-edit (see the rate <Input>'s onChange), and the
+      // saved jsonb item must always store a genuine numeric rate, not
+      // a leftover string, so a reload/print always reads a number.
+      const itemsWithAmounts = formItems.map((i) => {
+        const rate = Number(i.rate) || 0;
+        return { ...i, rate, amount: i.quantity * rate };
+      });
       const computedSubtotal = itemsWithAmounts.reduce(
         (s, i) => s + i.amount,
         0,
@@ -892,10 +920,30 @@ function CompanyPOsInner() {
               {/* Delivery */}
               <div className="space-y-3">
                 <h3 className="font-semibold text-sm">Delivery Details</h3>
-                <div>
+                <div className="space-y-1.5">
                   <Label>Delivery Address</Label>
+                  <Select
+                    value=""
+                    onValueChange={(v) => {
+                      if (v === "our_company") {
+                        setForm((f) => ({
+                          ...f,
+                          deliveryAddress: ourCompanyAddress,
+                        }));
+                      }
+                    }}
+                  >
+                    <SelectTrigger data-ocid="company-po.delivery_address.select">
+                      <SelectValue placeholder="Select address..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="our_company">
+                        Our Company{settings.companyName ? ` — ${settings.companyName}` : ""}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
                   <Textarea
-                    rows={2}
+                    rows={3}
                     value={form.deliveryAddress}
                     onChange={(e) =>
                       setForm((f) => ({
@@ -904,6 +952,7 @@ function CompanyPOsInner() {
                       }))
                     }
                     placeholder="Delivery address"
+                    data-ocid="company-po.delivery_address.textarea"
                   />
                 </div>
                 <div>
@@ -992,13 +1041,18 @@ function CompanyPOsInner() {
                               <Input
                                 type="number"
                                 min={0}
+                                step="0.01"
                                 value={item.rate}
                                 onChange={(e) =>
-                                  updateItem(
-                                    item.id,
-                                    "rate",
-                                    Number(e.target.value),
-                                  )
+                                  // Pass the raw string through - coercing
+                                  // to Number() on every keystroke drops
+                                  // a trailing "." (Number("0.") === 0),
+                                  // making a decimal like 0.45
+                                  // untypeable. updateItem/amount/
+                                  // subtotal all coerce defensively, and
+                                  // the save path normalizes rate back to
+                                  // a real number before persisting.
+                                  updateItem(item.id, "rate", e.target.value)
                                 }
                                 className="h-8"
                               />

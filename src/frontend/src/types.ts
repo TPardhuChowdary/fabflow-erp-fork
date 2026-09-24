@@ -695,6 +695,7 @@ export interface Vendor {
   id: string;
   name: string;
   phone: string;
+  email?: string;
   address: string;
   gstNumber?: string;
   createdAt: number;

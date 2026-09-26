@@ -1679,6 +1679,35 @@ export interface InventoryItem {
   // Pretreatment Chemicals field (category === "pretreatment_chemical")
   // per §4.2 - which tank/process this chemical is associated with.
   pretreatmentTank?: string;
+  // Material Family / Specification (database/20260925100000) - optional
+  // grouping/metadata only, never a second stock-holding entity. NULL
+  // (every pre-existing row) means "no family assigned", identical to
+  // today's behavior. `specifications` keys match the assigned family's
+  // own spec_name template entries; values are plain strings (e.g.
+  // "1.2mm") exactly as the migration stores them - no typing/units
+  // layer, by design, this phase.
+  materialFamilyId?: string;
+  specifications?: Record<string, string>;
+}
+
+// One spec field in a Material Family's template (e.g. "Thickness",
+// position 1) - the template itself, not a value. Values live on each
+// InventoryItem.specifications, keyed by this specName.
+export interface MaterialFamilySpecField {
+  id: string;
+  specName: string;
+  position: number;
+}
+
+// A Material Family (e.g. "MS Sheet") with its full spec template
+// attached - loaded together since the template is always needed
+// wherever the family is used (Add/Edit Inventory Item, the Production
+// picker). Purely grouping/metadata; stock always lives on InventoryItem.
+export interface MaterialFamily {
+  id: string;
+  name: string;
+  notes?: string;
+  specFields: MaterialFamilySpecField[];
 }
 
 export type CompanyPOStatus = "Draft" | "Sent" | "Received";

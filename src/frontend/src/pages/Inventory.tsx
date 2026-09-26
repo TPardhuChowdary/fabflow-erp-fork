@@ -10,6 +10,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import {
   Select,
   SelectContent,
@@ -35,9 +36,11 @@ import {
   ChevronRight,
   FileText,
   Info,
+  Layers,
   Paperclip,
   Pencil,
   Plus,
+  Search,
   ShieldOff,
   ShoppingCart,
   Trash2,
@@ -61,6 +64,13 @@ import {
   updateInventoryPurchaseRemote,
 } from "../lib/inventoryPurchasesApi";
 import {
+  addMaterialFamilySpecRemote,
+  createMaterialFamilyRemote,
+  fetchMaterialFamilies,
+  reorderMaterialFamilySpecsRemote,
+  updateMaterialFamilyRemote,
+} from "../lib/materialFamiliesApi";
+import {
   canCreate,
   canDelete,
   canEdit,
@@ -72,6 +82,7 @@ import type {
   InventoryItem,
   InventoryItemCategory,
   InventoryPurchase,
+  MaterialFamily,
   PurchaseAttachment,
 } from "../types";
 
@@ -150,6 +161,8 @@ export function Inventory({
     finish: string;
     powderType: string;
     pretreatmentTank: string;
+    materialFamilyId: string;
+    specifications: Record<string, string>;
   }>({
     name: "",
     unit: "pcs",
@@ -160,10 +173,72 @@ export function Inventory({
     finish: "",
     powderType: "",
     pretreatmentTank: "",
+    materialFamilyId: "",
+    specifications: {},
   });
   const [categoryFilter, setCategoryFilter] = useState<
     InventoryItemCategory | "all"
   >("all");
+
+  // Material Families (database/20260925100000) — grouping/metadata only,
+  // fetched locally on mount rather than threaded through the global
+  // store (small, infrequently-changed list; same pattern
+  // ProductionMaterialTransactions.tsx already uses for its own data).
+  const [materialFamilies, setMaterialFamilies] = useState<MaterialFamily[]>(
+    [],
+  );
+  const [familyFilter, setFamilyFilter] = useState<"all" | "none" | string>(
+    "all",
+  );
+  const [nameSearch, setNameSearch] = useState("");
+
+  const loadMaterialFamilies = async () => {
+    const result = await fetchMaterialFamilies();
+    if (result.status === "success" && result.data) {
+      setMaterialFamilies(result.data);
+    }
+  };
+  useEffect(() => {
+    loadMaterialFamilies();
+  }, []);
+
+  const familyName = (id?: string) =>
+    (id && materialFamilies.find((f) => f.id === id)?.name) || null;
+
+  // Postgres jsonb does not preserve object-key insertion order (it's
+  // sorted by key length then lexicographically), so Object.entries()
+  // on `specifications` doesn't match the family's own field order.
+  // This reorders by the assigned family's specFields.position instead
+  // — the same order already used for the Add/Edit form's spec inputs —
+  // so the compact list preview reads in the expected order. Unknown
+  // keys (e.g. from a since-edited template) sort after known ones.
+  const orderedSpecEntries = (
+    familyId: string | undefined,
+    specifications: Record<string, string>,
+  ) => {
+    const order = materialFamilies.find((f) => f.id === familyId)?.specFields ?? [];
+    const position = (key: string) => {
+      const idx = order.findIndex((f) => f.specName === key);
+      return idx === -1 ? order.length : idx;
+    };
+    return Object.entries(specifications).sort(
+      (a, b) => position(a[0]) - position(b[0]),
+    );
+  };
+
+  // Family management dialog
+  const [familyMgmtDialog, setFamilyMgmtDialog] = useState(false);
+  const [expandedFamilyId, setExpandedFamilyId] = useState<string | null>(
+    null,
+  );
+  const [familyForm, setFamilyForm] = useState<{
+    id: string | null;
+    name: string;
+    notes: string;
+  }>({ id: null, name: "", notes: "" });
+  const [newSpecName, setNewSpecName] = useState("");
+  const [isFamilySaving, setIsFamilySaving] = useState(false);
+  const [isSpecSaving, setIsSpecSaving] = useState(false);
 
   // Purchase dialog
   const [deletePurchaseRecordTarget, setDeletePurchaseRecordTarget] =
@@ -199,6 +274,8 @@ export function Inventory({
     finish: string;
     powderType: string;
     pretreatmentTank: string;
+    materialFamilyId: string;
+    specifications: Record<string, string>;
   } | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<
     PurchaseAttachment[]
@@ -282,6 +359,11 @@ export function Inventory({
         finish: newItem.finish.trim() || undefined,
         powderType: newItem.powderType.trim() || undefined,
         pretreatmentTank: newItem.pretreatmentTank.trim() || undefined,
+        materialFamilyId: newItem.materialFamilyId || undefined,
+        specifications:
+          Object.keys(newItem.specifications).length > 0
+            ? newItem.specifications
+            : undefined,
       });
       if (result.status === "unauthenticated") {
         toast.error("Sign in required to add inventory items");
@@ -303,6 +385,8 @@ export function Inventory({
         finish: "",
         powderType: "",
         pretreatmentTank: "",
+        materialFamilyId: "",
+        specifications: {},
       });
       setAddDialog(false);
     } finally {
@@ -531,7 +615,7 @@ export function Inventory({
   return (
     <div className="p-6 space-y-6" data-ocid="inventory.panel">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-3">
           <div className="p-2 rounded-lg bg-primary/10">
             <Archive className="w-5 h-5 text-primary" />
@@ -543,14 +627,25 @@ export function Inventory({
             </p>
           </div>
         </div>
-        <Button
-          size="sm"
-          onClick={() => setAddDialog(true)}
-          data-ocid="inventory.add_button"
-          className={!pCreate ? "hidden" : ""}
-        >
-          <Plus className="w-4 h-4 mr-1.5" /> Add Material
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setFamilyMgmtDialog(true)}
+            data-ocid="inventory.manage_families_button"
+            className={!pCreate ? "hidden" : ""}
+          >
+            <Layers className="w-4 h-4 mr-1.5" /> Material Families
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => setAddDialog(true)}
+            data-ocid="inventory.add_button"
+            className={!pCreate ? "hidden" : ""}
+          >
+            <Plus className="w-4 h-4 mr-1.5" /> Add Material
+          </Button>
+        </div>
       </div>
 
       {/* Info notice */}
@@ -575,7 +670,17 @@ export function Inventory({
 
         {/* Stock Table */}
         <TabsContent value="stock" className="mt-4">
-          <div className="flex items-center gap-2 mb-3">
+          <div className="flex flex-wrap items-center gap-2 mb-3">
+            <div className="relative">
+              <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+              <Input
+                className="h-8 w-48 text-xs pl-7"
+                placeholder="Search inventory..."
+                value={nameSearch}
+                onChange={(e) => setNameSearch(e.target.value)}
+                data-ocid="inventory.name_search.input"
+              />
+            </div>
             <Label className="text-xs text-muted-foreground">
               Filter by category
             </Label>
@@ -586,7 +691,7 @@ export function Inventory({
               }
             >
               <SelectTrigger
-                className="h-8 w-56 text-xs"
+                className="h-8 w-48 text-xs"
                 data-ocid="inventory.category_filter.select"
               >
                 <SelectValue />
@@ -596,6 +701,29 @@ export function Inventory({
                 {CATEGORIES.map((c) => (
                   <SelectItem key={c.value} value={c.value}>
                     {c.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Label className="text-xs text-muted-foreground">
+              Filter by family
+            </Label>
+            <Select
+              value={familyFilter}
+              onValueChange={(v) => setFamilyFilter(v)}
+            >
+              <SelectTrigger
+                className="h-8 w-48 text-xs"
+                data-ocid="inventory.family_filter.select"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All Families</SelectItem>
+                <SelectItem value="none">No Family</SelectItem>
+                {materialFamilies.map((f) => (
+                  <SelectItem key={f.id} value={f.id}>
+                    {f.name}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -611,6 +739,9 @@ export function Inventory({
                     </TableHead>
                     <TableHead className="text-xs font-semibold">
                       Category
+                    </TableHead>
+                    <TableHead className="text-xs font-semibold">
+                      Material Family
                     </TableHead>
                     <TableHead className="text-xs font-semibold">
                       Unit
@@ -641,6 +772,18 @@ export function Inventory({
                       (item) =>
                         categoryFilter === "all" ||
                         (item.category ?? "raw_material") === categoryFilter,
+                    )
+                    .filter(
+                      (item) =>
+                        familyFilter === "all" ||
+                        (familyFilter === "none"
+                          ? !item.materialFamilyId
+                          : item.materialFamilyId === familyFilter),
+                    )
+                    .filter((item) =>
+                      item.name
+                        .toLowerCase()
+                        .includes(nameSearch.trim().toLowerCase()),
                     )
                     .map((item, i) => {
                       // Model 3 Workspace comparison (see chat) — hoisted
@@ -690,6 +833,18 @@ export function Inventory({
                               {item.name}
                               <ChevronRight className="w-3.5 h-3.5 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
                             </span>
+                            {item.specifications &&
+                              Object.keys(item.specifications).length > 0 && (
+                                <p className="text-[10px] text-muted-foreground font-normal mt-0.5 truncate max-w-[240px]">
+                                  {orderedSpecEntries(
+                                    item.materialFamilyId,
+                                    item.specifications,
+                                  )
+                                    .slice(0, 3)
+                                    .map(([k, v]) => `${k}: ${v}`)
+                                    .join(" · ")}
+                                </p>
+                              )}
                           </TableCell>
                           <TableCell>
                             <Badge
@@ -698,6 +853,9 @@ export function Inventory({
                             >
                               {CATEGORY_LABEL[item.category ?? "raw_material"]}
                             </Badge>
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {familyName(item.materialFamilyId) || "No Material Family"}
                           </TableCell>
                           <TableCell className="text-sm text-muted-foreground">
                             {item.unit}
@@ -792,6 +950,10 @@ export function Inventory({
                                       powderType: item.powderType ?? "",
                                       pretreatmentTank:
                                         item.pretreatmentTank ?? "",
+                                      materialFamilyId:
+                                        item.materialFamilyId ?? "",
+                                      specifications:
+                                        item.specifications ?? {},
                                     });
                                     setEditItemDialog(true);
                                   }}
@@ -1113,6 +1275,11 @@ export function Inventory({
                   powderType: editingItem.powderType.trim() || undefined,
                   pretreatmentTank:
                     editingItem.pretreatmentTank.trim() || undefined,
+                  materialFamilyId: editingItem.materialFamilyId || undefined,
+                  specifications:
+                    Object.keys(editingItem.specifications).length > 0
+                      ? editingItem.specifications
+                      : undefined,
                 });
                 if (result.status === "unauthenticated") {
                   toast.error("Sign in required to update inventory items");
@@ -1190,6 +1357,84 @@ export function Inventory({
                     </SelectContent>
                   </Select>
                 </div>
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Material Family (optional)</Label>
+                  <SearchableSelect
+                    value={editingItem.materialFamilyId || "__none__"}
+                    onChange={(id) =>
+                      setEditingItem((p) =>
+                        // Switching family never silently carries over the
+                        // previous family's specification values — they
+                        // belong to a different template and could be
+                        // meaningless (or misleading) under the new one.
+                        p
+                          ? {
+                              ...p,
+                              materialFamilyId: id === "__none__" ? "" : id,
+                              specifications: {},
+                            }
+                          : p,
+                      )
+                    }
+                    options={[
+                      { value: "__none__", label: "None", searchText: "None" },
+                      ...materialFamilies.map((f) => ({
+                        value: f.id,
+                        label: f.name,
+                        searchText: f.name,
+                      })),
+                    ]}
+                    placeholder="None"
+                    data-ocid="inventory.edit.family.select"
+                  />
+                </div>
+                {editingItem.materialFamilyId &&
+                  (() => {
+                    const family = materialFamilies.find(
+                      (f) => f.id === editingItem.materialFamilyId,
+                    );
+                    if (!family || family.specFields.length === 0) return null;
+                    return (
+                      <div className="space-y-2 rounded-md border p-2">
+                        <Label className="text-xs text-muted-foreground">
+                          {family.name} Specifications
+                        </Label>
+                        <div className="grid grid-cols-2 gap-3">
+                          {family.specFields
+                            .slice()
+                            .sort((a, b) => a.position - b.position)
+                            .map((spec) => (
+                              <div key={spec.id} className="space-y-1.5">
+                                <Label className="text-xs">
+                                  {spec.specName}
+                                </Label>
+                                <Input
+                                  value={
+                                    editingItem.specifications[
+                                      spec.specName
+                                    ] ?? ""
+                                  }
+                                  onChange={(e) =>
+                                    setEditingItem((p) =>
+                                      p
+                                        ? {
+                                            ...p,
+                                            specifications: {
+                                              ...p.specifications,
+                                              [spec.specName]: e.target.value,
+                                            },
+                                          }
+                                        : p,
+                                    )
+                                  }
+                                  data-ocid={`inventory.edit.spec.${spec.specName}`}
+                                />
+                              </div>
+                            ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
                 {editingItem.category === "powder_coating_powder" && (
                   <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-1.5">
@@ -1407,6 +1652,70 @@ export function Inventory({
                   </SelectContent>
                 </Select>
               </div>
+              <div className="space-y-1.5">
+                <Label>Material Family (optional)</Label>
+                <SearchableSelect
+                  value={newItem.materialFamilyId || "__none__"}
+                  onChange={(id) =>
+                    setNewItem((p) => ({
+                      ...p,
+                      materialFamilyId: id === "__none__" ? "" : id,
+                      specifications: {},
+                    }))
+                  }
+                  options={[
+                    { value: "__none__", label: "None", searchText: "None" },
+                    ...materialFamilies.map((f) => ({
+                      value: f.id,
+                      label: f.name,
+                      searchText: f.name,
+                    })),
+                  ]}
+                  placeholder="None"
+                  data-ocid="inventory.add.family.select"
+                />
+              </div>
+              {newItem.materialFamilyId &&
+                (() => {
+                  const family = materialFamilies.find(
+                    (f) => f.id === newItem.materialFamilyId,
+                  );
+                  if (!family || family.specFields.length === 0) return null;
+                  return (
+                    <div className="space-y-2 rounded-md border p-2">
+                      <Label className="text-xs text-muted-foreground">
+                        {family.name} Specifications
+                      </Label>
+                      <div className="grid grid-cols-2 gap-3">
+                        {family.specFields
+                          .slice()
+                          .sort((a, b) => a.position - b.position)
+                          .map((spec) => (
+                            <div key={spec.id} className="space-y-1.5">
+                              <Label className="text-xs">
+                                {spec.specName}
+                              </Label>
+                              <Input
+                                value={
+                                  newItem.specifications[spec.specName] ?? ""
+                                }
+                                onChange={(e) =>
+                                  setNewItem((p) => ({
+                                    ...p,
+                                    specifications: {
+                                      ...p.specifications,
+                                      [spec.specName]: e.target.value,
+                                    },
+                                  }))
+                                }
+                                data-ocid={`inventory.add.spec.${spec.specName}`}
+                              />
+                            </div>
+                          ))}
+                      </div>
+                    </div>
+                  );
+                })()}
               {newItem.category === "powder_coating_powder" && (
                 <div className="grid grid-cols-2 gap-3">
                   <div className="space-y-1.5">
@@ -1805,6 +2114,298 @@ export function Inventory({
           setDeletePurchaseRecordTarget(null);
         }}
       />
+
+      {/* Material Families management — small, inline (create family,
+        edit name/notes, add/reorder its specification template). No
+        stock lives here; this is grouping/metadata only. Deliberately
+        kept small: no family/spec deletion UI, since nothing asked for
+        that and it's easy to add later without touching this shape. */}
+      <Dialog open={familyMgmtDialog} onOpenChange={setFamilyMgmtDialog}>
+        <DialogContent className="max-w-md max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Material Families</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2">
+            <div className="rounded-md border p-2 space-y-2">
+              <Label className="text-xs">
+                {familyForm.id ? "Edit Family" : "New Family"}
+              </Label>
+              <Input
+                placeholder="Family name (e.g. MS Sheet)"
+                value={familyForm.name}
+                onChange={(e) =>
+                  setFamilyForm((p) => ({ ...p, name: e.target.value }))
+                }
+                data-ocid="inventory.family.name.input"
+              />
+              <Input
+                placeholder="Notes (optional)"
+                value={familyForm.notes}
+                onChange={(e) =>
+                  setFamilyForm((p) => ({ ...p, notes: e.target.value }))
+                }
+                data-ocid="inventory.family.notes.input"
+              />
+              <div className="flex justify-end gap-2">
+                {familyForm.id && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() =>
+                      setFamilyForm({ id: null, name: "", notes: "" })
+                    }
+                  >
+                    Cancel Edit
+                  </Button>
+                )}
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={isFamilySaving || !familyForm.name.trim()}
+                  onClick={async () => {
+                    setIsFamilySaving(true);
+                    try {
+                      if (familyForm.id) {
+                        const result = await updateMaterialFamilyRemote(
+                          familyForm.id,
+                          {
+                            name: familyForm.name,
+                            notes: familyForm.notes || undefined,
+                          },
+                        );
+                        if (result.status !== "success") {
+                          toast.error(
+                            result.error ?? "Could not update family",
+                          );
+                          return;
+                        }
+                        toast.success("Family updated");
+                      } else {
+                        const result = await createMaterialFamilyRemote({
+                          name: familyForm.name,
+                          notes: familyForm.notes || undefined,
+                        });
+                        if (result.status !== "success" || !result.data) {
+                          toast.error(
+                            result.error ?? "Could not create family",
+                          );
+                          return;
+                        }
+                        toast.success(`${result.data.name} created`);
+                        setExpandedFamilyId(result.data.id);
+                      }
+                      setFamilyForm({ id: null, name: "", notes: "" });
+                      await loadMaterialFamilies();
+                    } finally {
+                      setIsFamilySaving(false);
+                    }
+                  }}
+                  data-ocid="inventory.family.save_button"
+                >
+                  {isFamilySaving
+                    ? "Saving..."
+                    : familyForm.id
+                      ? "Save Changes"
+                      : "Create Family"}
+                </Button>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              {materialFamilies.length === 0 && (
+                <p className="text-xs text-muted-foreground text-center py-4">
+                  No material families yet.
+                </p>
+              )}
+              {materialFamilies.map((family) => {
+                const isExpanded = expandedFamilyId === family.id;
+                return (
+                  <div key={family.id} className="rounded-md border">
+                    {/* A <button> cannot legally contain another <button>
+                        (the Edit Family pencil below) — this row toggle is
+                        a div with button semantics/keyboard support instead,
+                        so the pencil can be a real nested button without an
+                        invalid-DOM-nesting/hydration warning. Click/keyboard
+                        toggle behavior is unchanged. */}
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      className="w-full flex items-center justify-between px-3 py-2 text-left cursor-pointer"
+                      onClick={() =>
+                        setExpandedFamilyId(isExpanded ? null : family.id)
+                      }
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setExpandedFamilyId(isExpanded ? null : family.id);
+                        }
+                      }}
+                      data-ocid={`inventory.family.${family.id}.toggle`}
+                    >
+                      <div>
+                        <p className="text-sm font-medium">{family.name}</p>
+                        {family.notes && (
+                          <p className="text-[10px] text-muted-foreground">
+                            {family.notes}
+                          </p>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Badge variant="outline" className="text-[10px]">
+                          {family.specFields.length} field
+                          {family.specFields.length === 1 ? "" : "s"}
+                        </Badge>
+                        <button
+                          type="button"
+                          className="p-1 rounded hover:bg-muted"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setFamilyForm({
+                              id: family.id,
+                              name: family.name,
+                              notes: family.notes ?? "",
+                            });
+                          }}
+                          title="Edit family"
+                        >
+                          <Pencil className="w-3.5 h-3.5 text-muted-foreground hover:text-foreground" />
+                        </button>
+                        {isExpanded ? (
+                          <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />
+                        ) : (
+                          <ChevronRight className="w-3.5 h-3.5 text-muted-foreground" />
+                        )}
+                      </div>
+                    </div>
+                    {isExpanded && (
+                      <div className="border-t p-2 space-y-2">
+                        {family.specFields.length > 0 && (
+                          <ul className="text-xs space-y-1">
+                            {family.specFields
+                              .slice()
+                              .sort((a, b) => a.position - b.position)
+                              .map((spec, idx, arr) => (
+                                <li
+                                  key={spec.id}
+                                  className="flex items-center justify-between rounded bg-muted/40 px-2 py-1"
+                                >
+                                  <span>{spec.specName}</span>
+                                  <div className="flex items-center gap-1">
+                                    <button
+                                      type="button"
+                                      disabled={idx === 0 || isSpecSaving}
+                                      className="p-0.5 rounded hover:bg-muted disabled:opacity-30"
+                                      title="Move up"
+                                      onClick={async () => {
+                                        const order = arr.map((s) => s.id);
+                                        [order[idx - 1], order[idx]] = [
+                                          order[idx],
+                                          order[idx - 1],
+                                        ];
+                                        setIsSpecSaving(true);
+                                        try {
+                                          await reorderMaterialFamilySpecsRemote(
+                                            order,
+                                          );
+                                          await loadMaterialFamilies();
+                                        } finally {
+                                          setIsSpecSaving(false);
+                                        }
+                                      }}
+                                    >
+                                      ↑
+                                    </button>
+                                    <button
+                                      type="button"
+                                      disabled={
+                                        idx === arr.length - 1 || isSpecSaving
+                                      }
+                                      className="p-0.5 rounded hover:bg-muted disabled:opacity-30"
+                                      title="Move down"
+                                      onClick={async () => {
+                                        const order = arr.map((s) => s.id);
+                                        [order[idx], order[idx + 1]] = [
+                                          order[idx + 1],
+                                          order[idx],
+                                        ];
+                                        setIsSpecSaving(true);
+                                        try {
+                                          await reorderMaterialFamilySpecsRemote(
+                                            order,
+                                          );
+                                          await loadMaterialFamilies();
+                                        } finally {
+                                          setIsSpecSaving(false);
+                                        }
+                                      }}
+                                    >
+                                      ↓
+                                    </button>
+                                  </div>
+                                </li>
+                              ))}
+                          </ul>
+                        )}
+                        <div className="flex items-center gap-1.5">
+                          <Input
+                            className="h-7 text-xs"
+                            placeholder="e.g. Thickness"
+                            value={
+                              expandedFamilyId === family.id ? newSpecName : ""
+                            }
+                            onChange={(e) => setNewSpecName(e.target.value)}
+                            data-ocid="inventory.family.new_spec.input"
+                          />
+                          <Button
+                            type="button"
+                            size="sm"
+                            className="h-7 text-xs shrink-0"
+                            disabled={isSpecSaving || !newSpecName.trim()}
+                            onClick={async () => {
+                              setIsSpecSaving(true);
+                              try {
+                                const result = await addMaterialFamilySpecRemote(
+                                  family.id,
+                                  newSpecName,
+                                  family.specFields.length,
+                                );
+                                if (result.status !== "success") {
+                                  toast.error(
+                                    result.error ??
+                                      "Could not add specification field",
+                                  );
+                                  return;
+                                }
+                                setNewSpecName("");
+                                await loadMaterialFamilies();
+                              } finally {
+                                setIsSpecSaving(false);
+                              }
+                            }}
+                            data-ocid="inventory.family.add_spec_button"
+                          >
+                            <Plus className="w-3 h-3 mr-1" /> Add Field
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setFamilyMgmtDialog(false)}
+            >
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

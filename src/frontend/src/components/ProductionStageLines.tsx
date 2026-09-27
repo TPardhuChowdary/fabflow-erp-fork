@@ -36,6 +36,7 @@ import {
 } from "@/lib/productionStageLinesApi";
 import { useStore } from "@/store";
 import type { ProductionStageLine, ProjectProductionStage } from "@/types";
+import type { ReceiptFollowUpInfo } from "@/components/ProductionMaterialTransactions";
 
 type LineStatus =
   | "NotStarted"
@@ -77,6 +78,11 @@ interface Props {
   projectId: string;
   stageIdx: number;
   pEdit: boolean;
+  /** Fired right after a Work Line receipt is successfully recorded,
+   * so Production.tsx can show the "Record Material Conversion / Skip
+   * for Now" follow-up. Purely a UI hand-off — the receipt itself is
+   * already saved by the time this fires; nothing here is re-written. */
+  onReceiptRecorded?: (info: ReceiptFollowUpInfo) => void;
 }
 
 export function ProductionStageLines({
@@ -84,6 +90,7 @@ export function ProductionStageLines({
   projectId,
   stageIdx,
   pEdit,
+  onReceiptRecorded,
 }: Props) {
   const { addStageTransaction, vendors, inventoryItems } = useStore();
   const stageId = stage.stageId;
@@ -246,6 +253,34 @@ export function ProductionStageLines({
       return;
     }
     toast.success(`Received ${qty} ${receiveLine.uom} - ${receiveLine.workType}`);
+
+    // Hand off to Production.tsx's receipt follow-up prompt. Everything
+    // passed here is genuinely known from this Work Line: vendor/uom
+    // are real fields, workType is the free text the user themselves
+    // typed for "what work is this" (used as Operation, not invented).
+    // `material` is also free text with no inventory_item_id — never
+    // used to fill Input Item, only surfaced as an explanatory note so
+    // the user knows why it's blank and what to look for.
+    onReceiptRecorded?.({
+      vendorName: receiveLine.vendorName,
+      receivedQty: qty,
+      uom: receiveLine.uom,
+      plannedQty: receiveLine.plannedQty,
+      pendingQty: Math.max(0, totalSent - (totalReceived + qty)),
+      prefill: {
+        stageId: stage.stageId,
+        performerType: receiveLine.vendorId ? "vendor" : "inhouse",
+        vendorId: receiveLine.vendorId,
+        vendorName: receiveLine.vendorName,
+        operation: receiveLine.workType || undefined,
+        inputQty: String(qty),
+        inputUom: receiveLine.uom,
+        note: receiveLine.material
+          ? `Work Line material: "${receiveLine.material}" — this is free text, not an inventory item, so it wasn't auto-selected. Choose the matching Input Item below. Output Item is never auto-filled.`
+          : "This Work Line has no material specified — choose the Input Item below. Output Item is never auto-filled.",
+      },
+    });
+
     setReceiveLine(null);
     setReceiveForm({ quantity: "", remarks: "" });
   };

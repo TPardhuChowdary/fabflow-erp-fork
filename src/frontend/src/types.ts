@@ -1283,6 +1283,46 @@ export interface ProductionStageLine {
   createdAt: string;
 }
 
+/** One material-conversion event: Input Item -> Operation -> Performer
+ * -> Output Item (database/20260925110000_production_material_transactions.sql).
+ * Additive to, not a replacement for, ProductionStageLine/StageTransaction
+ * above — this is the actual production event/transaction layer; Work
+ * Lines remain the planning/outsourcing layer. Append-only: no update/
+ * delete is exposed anywhere in the app, matching the table's own RLS
+ * (no UPDATE/DELETE policy exists for the authenticated role). */
+export interface ProductionMaterialTransaction {
+  id: string;
+  /** Planning/grouping context only, never a hard gate. */
+  stageId?: string;
+  /** Reference only — never written by this feature, and never used to
+   * derive/modify Job Card quantities, timer, or employee assignments. */
+  jobCardId?: string;
+  /** Free text — no Operations master (Cutting, Bending, Welding, ...). */
+  operation: string;
+  performerType: "inhouse" | "vendor";
+  vendorId?: string;
+  /** Snapshot alongside vendorId, same convention as StageTransaction's
+   * own sentToVendorName. */
+  vendorName?: string;
+  /** Undefined means vendor-supplied semi-finished material with no
+   * tracked raw-material issue — never a substitute for an ordinary
+   * Company PO / Inventory Purchase receipt. */
+  inputItemId?: string;
+  inputQty?: number;
+  inputUom?: string;
+  outputItemId: string;
+  outputQty: number;
+  outputUom: string;
+  rejectedQty: number;
+  notes?: string;
+  /** Server-authoritative (auth.uid() + profiles.username, set by the
+   * DB trigger) — never settable from the client. */
+  performedBy?: string;
+  performedByName?: string;
+  eventTime: string;
+  createdAt: string;
+}
+
 export interface ProjectProductionStage {
   stageName: string;
   status: ProjectStageStatus;

@@ -24,6 +24,11 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
 import { DeadlineIndicator } from "../components/DeadlineIndicator";
+import { ProductionMaterialTransactions } from "../components/ProductionMaterialTransactions";
+import type {
+  MaterialFlowPrefill,
+  ReceiptFollowUpInfo,
+} from "../components/ProductionMaterialTransactions";
 import { ProductionStageLines } from "../components/ProductionStageLines";
 import { useUpdateProjectDeadline } from "../hooks/useUpdateProjectDeadline";
 import {
@@ -296,6 +301,31 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
   );
   // Which stage within the expanded project is expanded
   const [expandedStageIdx, setExpandedStageIdx] = useState<number | null>(null);
+  // Per-project toggle between the Outsourcing/Dispatch view (Work
+  // Lines, Send/Receive, Production Qty), the Material Flow view
+  // (Production Material Transactions), and Production Photos (existing
+  // Job Card photos grouped by stage) — presentation only, none of
+  // these systems' data or behavior changes based on which tab is
+  // active.
+  const [productionTab, setProductionTab] = useState<
+    Record<string, "dispatch" | "material_flow" | "photos">
+  >({});
+
+  // Receipt follow-up prompt (Outsourcing/Dispatch -> Material Flow
+  // hand-off). Set right after a "Mark Received" (stage-wide or
+  // per-Work-Line) succeeds; cleared when the user picks either
+  // action. Purely UI state — the receipt itself is already saved by
+  // the time this is set, and nothing here writes to the database.
+  const [receiptFollowUp, setReceiptFollowUp] = useState<
+    (ReceiptFollowUpInfo & { projectId: string }) | null
+  >(null);
+  // Handed to ProductionMaterialTransactions to open its dialog
+  // pre-filled after "Record Material Conversion" is chosen; cleared
+  // via onPrefillConsumed once applied.
+  const [materialFlowPrefill, setMaterialFlowPrefill] = useState<{
+    projectId: string;
+    prefill: MaterialFlowPrefill;
+  } | null>(null);
 
   // Send Material dialog state
   const [sendDialog, setSendDialog] = useState<{
@@ -649,6 +679,51 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
       toast.error("Could not record material received - please try again");
       return;
     }
+
+    // Which vendor(s) this stage has actually dispatched to, from the
+    // stage's own send transactions — genuinely known data, never
+    // guessed. No uom exists anywhere at the stage-wide level (the
+    // Send/Receive dialogs only ever collect a bare number), so
+    // Input Quantity/UOM are deliberately left out of this prefill —
+    // see §4 of the audit this follows.
+    const sendVendorIds = Array.from(
+      new Set(
+        (stage?.transactions || [])
+          .filter((t) => t.type === "send" && t.sentToVendorId)
+          .map((t) => t.sentToVendorId as string),
+      ),
+    );
+    const singleSend =
+      sendVendorIds.length === 1
+        ? (stage?.transactions || []).find(
+            (t) => t.type === "send" && t.sentToVendorId === sendVendorIds[0],
+          )
+        : undefined;
+    const stagePrefill: MaterialFlowPrefill = {
+      stageId: stage?.stageId,
+      performerType: singleSend ? "vendor" : "inhouse",
+      vendorId: singleSend?.sentToVendorId,
+      vendorName: singleSend?.sentToVendorName,
+      // The stage's own name is real data the user chose when setting
+      // up the pipeline — used as a reasonable operation label, never
+      // invented. Free to edit/replace.
+      operation: stage?.stageName || undefined,
+      note:
+        sendVendorIds.length > 1
+          ? `This stage has dispatched to more than one vendor — pick the correct one below. Received quantity was ${receiveForm.quantity} (no unit is recorded at the stage level); enter Input Item, Quantity and UOM yourself if this represents a material conversion.`
+          : !singleSend
+            ? `No vendor was recorded for this stage's dispatch. Received quantity was ${receiveForm.quantity} (no unit is recorded at the stage level); enter Input Item, Quantity and UOM yourself if this represents a material conversion.`
+            : `Vendor prefilled from this stage's own dispatch record. Received quantity was ${receiveForm.quantity} (no unit is recorded at the stage level); enter Input Item, Quantity and UOM yourself if this represents a material conversion.`,
+    };
+    setReceiptFollowUp({
+      projectId: receiveDialog.projectId,
+      vendorName: singleSend?.sentToVendorName,
+      receivedQty: receiveForm.quantity,
+      plannedQty: totalSent,
+      pendingQty: Math.max(0, totalSent - (totalReceived + receiveForm.quantity)),
+      prefill: stagePrefill,
+    });
+
     setReceiveDialog(null);
     setReceiveForm({ quantity: 0, dateTime: "" });
     toast.success("Material received recorded");
@@ -937,6 +1012,41 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                 {/* Expanded Stage List */}
                 {isExpanded && (
                   <CardContent className="px-4 pb-4 pt-0 border-t">
+                    <div className="mt-3 flex gap-1 border-b" data-ocid={`production.project.${project.id}.tabs`}>
+                      <button
+                        type="button"
+                        className={`px-3 py-2 text-xs font-semibold border-b-2 -mb-px transition-colors ${
+                          (productionTab[project.id] ?? "dispatch") === "dispatch"
+                            ? "border-primary text-primary"
+                            : "border-transparent text-muted-foreground hover:text-foreground"
+                        }`}
+                        onClick={() =>
+                          setProductionTab((t) => ({ ...t, [project.id]: "dispatch" }))
+                        }
+                        data-ocid={`production.project.${project.id}.tabs.dispatch`}
+                      >
+                        Outsourcing / Dispatch
+                      </button>
+                      <button
+                        type="button"
+                        className={`px-3 py-2 text-xs font-semibold border-b-2 -mb-px transition-colors ${
+                          productionTab[project.id] === "material_flow"
+                            ? "border-primary text-primary"
+                            : "border-transparent text-muted-foreground hover:text-foreground"
+                        }`}
+                        onClick={() =>
+                          setProductionTab((t) => ({ ...t, [project.id]: "material_flow" }))
+                        }
+                        data-ocid={`production.project.${project.id}.tabs.material_flow`}
+                      >
+                        Material Flow
+                      </button>
+                    </div>
+                    {(productionTab[project.id] ?? "dispatch") === "dispatch" && (
+                    <>
+                    <p className="mt-2 text-[10px] text-muted-foreground">
+                      Track material sent to vendors and received back.
+                    </p>
                     {isLegacy ? (
                       <div className="mt-3">
                         <div className="rounded-md bg-warning/15 px-3 py-2 text-xs text-warning border border-warning/30">
@@ -1867,6 +1977,12 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                     projectId={project.id}
                                     stageIdx={idx}
                                     pEdit={pEdit}
+                                    onReceiptRecorded={(info) =>
+                                      setReceiptFollowUp({
+                                        projectId: project.id,
+                                        ...info,
+                                      })
+                                    }
                                   />
 
                                   {/* Notes */}
@@ -1892,6 +2008,32 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                             </div>
                           );
                         })}
+                      </div>
+                    )}
+                    </>
+                    )}
+
+                    {/* Material Flow tab — the actual material-conversion
+                      event layer (Input -> Operation -> Output),
+                      distinct from the Outsourcing/Dispatch tab above.
+                      Scoped to this project's own stages; stage
+                      selection inside the form itself is optional. */}
+                    {productionTab[project.id] === "material_flow" && (
+                      <div className="mt-3">
+                        <p className="text-[10px] text-muted-foreground mb-2">
+                          Track how inventory is converted from one item into another.
+                        </p>
+                        <ProductionMaterialTransactions
+                          projectId={project.id}
+                          stages={stages}
+                          pEdit={pEdit}
+                          prefill={
+                            materialFlowPrefill?.projectId === project.id
+                              ? materialFlowPrefill.prefill
+                              : null
+                          }
+                          onPrefillConsumed={() => setMaterialFlowPrefill(null)}
+                        />
                       </div>
                     )}
                   </CardContent>
@@ -2006,6 +2148,98 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
             </Button>
             <Button size="sm" onClick={handleReceiveMaterial}>
               Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Receipt Follow-Up — shown right after any "Mark Received"
+        (stage-wide or per-Work-Line) succeeds. Never blocks the
+        receipt, which is already saved by this point; purely offers a
+        shortcut into Material Flow with only genuinely-known fields
+        prefilled. Skipping does nothing to the database. */}
+      <Dialog
+        open={!!receiptFollowUp}
+        onOpenChange={(open) => !open && setReceiptFollowUp(null)}
+      >
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Received</DialogTitle>
+          </DialogHeader>
+          {receiptFollowUp && (
+            <div className="space-y-3 py-2 text-sm">
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                {receiptFollowUp.vendorName && (
+                  <div className="col-span-2">
+                    <span className="text-muted-foreground">Vendor: </span>
+                    <span className="font-medium">{receiptFollowUp.vendorName}</span>
+                  </div>
+                )}
+                <div>
+                  <span className="text-muted-foreground">Received: </span>
+                  <span className="font-medium">
+                    {receiptFollowUp.receivedQty}
+                    {receiptFollowUp.uom ? ` ${receiptFollowUp.uom}` : ""}
+                  </span>
+                </div>
+                {receiptFollowUp.plannedQty !== undefined && (
+                  <div>
+                    <span className="text-muted-foreground">Planned: </span>
+                    <span className="font-medium">
+                      {receiptFollowUp.plannedQty}
+                      {receiptFollowUp.uom ? ` ${receiptFollowUp.uom}` : ""}
+                    </span>
+                  </div>
+                )}
+                {receiptFollowUp.pendingQty !== undefined && (
+                  <div>
+                    <span className="text-muted-foreground">Pending: </span>
+                    <span className="font-medium">
+                      {receiptFollowUp.pendingQty}
+                      {receiptFollowUp.uom ? ` ${receiptFollowUp.uom}` : ""}
+                    </span>
+                  </div>
+                )}
+              </div>
+              <div className="rounded-md border p-2 text-xs">
+                <p className="font-medium">Next step</p>
+                <p className="text-muted-foreground">
+                  Material conversion has not been recorded for this receipt.
+                </p>
+              </div>
+            </div>
+          )}
+          <DialogFooter className="flex-col sm:flex-row gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                toast(
+                  "Marked as skipped — material conversion not recorded for this receipt.",
+                );
+                setReceiptFollowUp(null);
+              }}
+              data-ocid="production.receipt_followup.skip"
+            >
+              Skip for Now
+            </Button>
+            <Button
+              size="sm"
+              onClick={() => {
+                if (!receiptFollowUp) return;
+                setProductionTab((t) => ({
+                  ...t,
+                  [receiptFollowUp.projectId]: "material_flow",
+                }));
+                setMaterialFlowPrefill({
+                  projectId: receiptFollowUp.projectId,
+                  prefill: receiptFollowUp.prefill,
+                });
+                setReceiptFollowUp(null);
+              }}
+              data-ocid="production.receipt_followup.record"
+            >
+              Record Material Conversion
             </Button>
           </DialogFooter>
         </DialogContent>

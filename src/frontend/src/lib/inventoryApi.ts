@@ -62,6 +62,8 @@ interface InventoryItemRow {
   finish: string | null;
   powder_type: string | null;
   pretreatment_tank: string | null;
+  material_family_id: string | null;
+  specifications: Record<string, string> | null;
 }
 
 function rowToInventoryItem(row: InventoryItemRow): InventoryItem {
@@ -83,6 +85,8 @@ function rowToInventoryItem(row: InventoryItemRow): InventoryItem {
     finish: row.finish ?? undefined,
     powderType: row.powder_type ?? undefined,
     pretreatmentTank: row.pretreatment_tank ?? undefined,
+    materialFamilyId: row.material_family_id ?? undefined,
+    specifications: row.specifications ?? undefined,
   };
 }
 
@@ -92,23 +96,25 @@ function rowToInventoryItem(row: InventoryItemRow): InventoryItem {
 // header for why. Phase 36 adds category + the 5 Powder Coating Powder
 // fields + the 1 Pretreatment Chemical field to the whitelist - all
 // plain master-data, same write discipline as name/unit.
-function toInventoryItemFields(
-  item: Pick<
-    InventoryItem,
-    | "name"
-    | "unit"
-    | "reorderLevel"
-    | "unitCost"
-    | "estimatedPrice"
-    | "category"
-    | "brand"
-    | "shade"
-    | "ralCode"
-    | "finish"
-    | "powderType"
-    | "pretreatmentTank"
-  >,
-) {
+type InventoryItemWriteFields = Pick<
+  InventoryItem,
+  | "name"
+  | "unit"
+  | "reorderLevel"
+  | "unitCost"
+  | "estimatedPrice"
+  | "category"
+  | "brand"
+  | "shade"
+  | "ralCode"
+  | "finish"
+  | "powderType"
+  | "pretreatmentTank"
+  | "materialFamilyId"
+  | "specifications"
+>;
+
+function toInventoryItemFields(item: InventoryItemWriteFields) {
   return {
     name: normalizeBusinessName(item.name),
     unit: item.unit || null,
@@ -122,13 +128,16 @@ function toInventoryItemFields(
     finish: item.finish ?? null,
     powder_type: item.powderType ?? null,
     pretreatment_tank: item.pretreatmentTank ?? null,
+    material_family_id: item.materialFamilyId ?? null,
+    specifications: item.specifications ?? null,
   };
 }
 
 const SELECT_COLUMNS =
   "id, name, unit, current_stock, cost_per_unit, quantity_reserved, " +
   "reorder_level, last_purchase_price, estimated_price, updated_at, " +
-  "category, brand, shade, ral_code, finish, powder_type, pretreatment_tank";
+  "category, brand, shade, ral_code, finish, powder_type, pretreatment_tank, " +
+  "material_family_id, specifications";
 
 async function requireSession() {
   if (!isSupabaseConfigured) {
@@ -155,21 +164,7 @@ async function requireSession() {
 }
 
 export async function createInventoryItemRemote(
-  item: Pick<
-    InventoryItem,
-    | "name"
-    | "unit"
-    | "reorderLevel"
-    | "unitCost"
-    | "estimatedPrice"
-    | "category"
-    | "brand"
-    | "shade"
-    | "ralCode"
-    | "finish"
-    | "powderType"
-    | "pretreatmentTank"
-  >,
+  item: InventoryItemWriteFields,
 ): Promise<WriteResult<InventoryItem>> {
   const gate = await requireSession();
   if (!gate.ok) return gate.result;
@@ -189,21 +184,7 @@ export async function createInventoryItemRemote(
 
 export async function updateInventoryItemRemote(
   id: string,
-  item: Pick<
-    InventoryItem,
-    | "name"
-    | "unit"
-    | "reorderLevel"
-    | "unitCost"
-    | "estimatedPrice"
-    | "category"
-    | "brand"
-    | "shade"
-    | "ralCode"
-    | "finish"
-    | "powderType"
-    | "pretreatmentTank"
-  >,
+  item: InventoryItemWriteFields,
 ): Promise<WriteResult<InventoryItem>> {
   const gate = await requireSession();
   if (!gate.ok) return gate.result;

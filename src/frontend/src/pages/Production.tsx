@@ -23,6 +23,7 @@ import { ShieldOff } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { useAuth } from "../AuthContext";
+import { AssetPhotoGallery } from "../components/AssetPhotoGallery";
 import { DeadlineIndicator } from "../components/DeadlineIndicator";
 import { ProductionMaterialTransactions } from "../components/ProductionMaterialTransactions";
 import type {
@@ -286,6 +287,7 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
     bomItems,
     inventoryItems,
     jobCards,
+    assetPhotos,
   } = useStore();
 
   const {
@@ -1040,6 +1042,20 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                         data-ocid={`production.project.${project.id}.tabs.material_flow`}
                       >
                         Material Flow
+                      </button>
+                      <button
+                        type="button"
+                        className={`px-3 py-2 text-xs font-semibold border-b-2 -mb-px transition-colors ${
+                          productionTab[project.id] === "photos"
+                            ? "border-primary text-primary"
+                            : "border-transparent text-muted-foreground hover:text-foreground"
+                        }`}
+                        onClick={() =>
+                          setProductionTab((t) => ({ ...t, [project.id]: "photos" }))
+                        }
+                        data-ocid={`production.project.${project.id}.tabs.photos`}
+                      >
+                        Production Photos
                       </button>
                     </div>
                     {(productionTab[project.id] ?? "dispatch") === "dispatch" && (
@@ -2036,6 +2052,105 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                         />
                       </div>
                     )}
+
+                    {/* Production Photos tab (read-only MVP — see the
+                      Project Timeline / Production Media audit). Never a
+                      new photo store: groups the SAME asset_photos rows
+                      the Job Card gallery already shows, via the real
+                      job_cards.stage_id FK — no stage is ever inferred
+                      from text. AssetPhotoGallery is reused verbatim
+                      with canEdit={false}, so upload/delete/AI-process
+                      controls are hidden and only the existing
+                      thumbnail/preview/lightbox + Original/Processed
+                      variant behavior remains. */}
+                    {productionTab[project.id] === "photos" &&
+                      (() => {
+                        const projectJobCards = jobCards.filter(
+                          (jc) => jc.projectId === project.id,
+                        );
+                        const jobCardsWithPhotos = projectJobCards.filter((jc) =>
+                          assetPhotos.some(
+                            (p) =>
+                              p.ownerType === "job_card" && p.ownerId === jc.id,
+                          ),
+                        );
+                        const unassigned = jobCardsWithPhotos.filter(
+                          (jc) => !jc.stageId,
+                        );
+
+                        if (jobCardsWithPhotos.length === 0) {
+                          return (
+                            <div
+                              className="mt-3 text-center py-8 text-xs text-muted-foreground border rounded-md"
+                              data-ocid={`production.project.${project.id}.photos.empty`}
+                            >
+                              No production photos have been added to Job
+                              Cards for this project yet.
+                            </div>
+                          );
+                        }
+
+                        const renderJobCardGallery = (jc: (typeof jobCardsWithPhotos)[number]) => (
+                          <div
+                            key={jc.id}
+                            data-ocid={`production.project.${project.id}.photos.jobcard.${jc.id}`}
+                          >
+                            <p className="text-[11px] font-mono text-muted-foreground mb-1">
+                              {jc.jobNo}
+                            </p>
+                            <AssetPhotoGallery
+                              ownerType="job_card"
+                              ownerId={jc.id}
+                              canEdit={false}
+                              data-ocid={`production.project.${project.id}.photos.jobcard.${jc.id}.gallery`}
+                            />
+                          </div>
+                        );
+
+                        return (
+                          <div className="mt-3 space-y-4">
+                            <p className="text-[10px] text-muted-foreground">
+                              Job Card photos for this project, grouped by
+                              production stage. Read-only here — manage
+                              photos from the Job Card itself.
+                            </p>
+                            {stages.map((stage) => {
+                              const stageJobCards = jobCardsWithPhotos.filter(
+                                (jc) => jc.stageId === stage.stageId,
+                              );
+                              return (
+                                <div
+                                  key={stage.stageId ?? stage.stageName}
+                                  className="space-y-2"
+                                >
+                                  <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground border-b pb-1">
+                                    {stage.stageName}
+                                  </h4>
+                                  {stageJobCards.length === 0 ? (
+                                    <p className="text-xs text-muted-foreground italic py-1">
+                                      No Job Card photos available.
+                                    </p>
+                                  ) : (
+                                    <div className="space-y-3">
+                                      {stageJobCards.map(renderJobCardGallery)}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                            {unassigned.length > 0 && (
+                              <div className="space-y-2">
+                                <h4 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground border-b pb-1">
+                                  No Production Stage
+                                </h4>
+                                <div className="space-y-3">
+                                  {unassigned.map(renderJobCardGallery)}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
                   </CardContent>
                 )}
               </Card>

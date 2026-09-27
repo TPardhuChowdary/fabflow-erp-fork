@@ -1,5 +1,6 @@
 import { AssetPhotoGallery } from "@/components/AssetPhotoGallery";
 import { AssetUsageSection } from "@/components/AssetUsageSection";
+import { MachinePrintView } from "@/components/MachinePrintView";
 import { ConnectedRecordLink } from "@/components/ConnectedRecordLink";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -39,6 +40,7 @@ import {
   Info,
   Package,
   Plus,
+  Printer,
   Trash2,
   TrendingUp,
   Wrench,
@@ -551,6 +553,7 @@ export function MachineDetail({
 
   // Breakdown Form
   const [showBreakdownForm, setShowBreakdownForm] = useState(false);
+  const [showPrintView, setShowPrintView] = useState(false);
   const [breakdownCause, setBreakdownCause] = useState("");
 
   // Doc Upload
@@ -906,6 +909,15 @@ export function MachineDetail({
               <Wrench className="w-3.5 h-3.5" /> Log Service
             </Button>
           )}
+          <Button
+            size="sm"
+            variant="outline"
+            className="gap-1.5"
+            onClick={() => setShowPrintView(true)}
+            data-ocid="machine-detail.print_button"
+          >
+            <Printer className="w-3.5 h-3.5" /> Machine Sheet
+          </Button>
         </div>
       </div>
 
@@ -2278,6 +2290,11 @@ export function MachineDetail({
           }
           setDeleteServiceRecordTarget(null);
         }}
+      />
+      <MachinePrintView
+        machine={machine}
+        open={showPrintView}
+        onClose={() => setShowPrintView(false)}
       />
     </div>
   );

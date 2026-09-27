@@ -100,6 +100,7 @@ import {
 } from "../lib/jobCardCheckpoints";
 import { setJobCardExceptionStatusRemote } from "../lib/jobCardExceptionsApi";
 import type { WriteResult } from "../lib/jobCardsApi";
+import { computeStageProductionTotals } from "../lib/stageProductionTotals";
 import {
   computeNextJobNo,
   createJobCardRemote,
@@ -1116,12 +1117,27 @@ export function JobCards({
     employees.find((e) => e.id === id)?.name ?? "";
   const projectNo = (id: string) =>
     projects.find((p) => p.id === id)?.projectNo ?? "—";
-  const stageName = (stageId: string | undefined) =>
+  // Project Operation Target system (see audit) — project_production_
+  // stages IS the operation target entity (stageName + targetQty),
+  // job_cards.stage_id is the existing, already-FK-enforced link. This
+  // resolves the linked stage row itself so its targetQty can be read;
+  // stageName below is now just a thin wrapper over it (same lookup,
+  // no duplicated traversal).
+  const resolveStage = (stageId: string | undefined) =>
     stageId
-      ? projectProductions
-          .flatMap((pp) => pp.stages)
-          .find((s) => s.stageId === stageId)?.stageName
+      ? projectProductions.flatMap((pp) => pp.stages).find((s) => s.stageId === stageId)
       : undefined;
+  const stageName = (stageId: string | undefined) => resolveStage(stageId)?.stageName;
+  // Completed/Remaining/Over Target — reuses computeStageProductionTotals
+  // exactly as Production.tsx's own stage cards do (see audit); this is
+  // not a second implementation of that formula. qmsCompletionsForStage/
+  // allStagesInProject are passed empty since only workerAccepted/
+  // remaining/overTarget are read here, never the QMS-merged or
+  // downstream-consumption fields.
+  const stageTotals = (stageId: string | undefined) => {
+    const stage = resolveStage(stageId);
+    return stage ? computeStageProductionTotals(stage, jobCards, [], []) : undefined;
+  };
 
   // Feature: Printable Job Card — physical/paper copy of this exact,
   // existing Job Card record for shop-floor employees without a phone or
@@ -1357,16 +1373,17 @@ export function JobCards({
     document.body.appendChild(container);
     const root = createRoot(container);
     const docId = `job-card-print-${jc.id}`;
-    // Print Date requirement: the moment of printing, not the Job Card's
-    // own createdAt — computed here, once, right before rendering the
-    // print document, and never written back to `jc` or Supabase.
-    const printedAt = Date.now();
     // Page 1 (Job Card core) + one page per selected Reference Photo +
     // one page per composed drawing sheet, across every linked drawing
     // (if included) — computed here since this is the one place that
     // already knows the final resolved state of all three.
     const totalPages = 1 + referencePhotoUrls.length + drawingSheets.length;
     const project = projects.find((p) => p.id === jc.projectId);
+    // Operation Target for print (see audit) — same resolveStage/
+    // stageTotals already used by the Create/Edit form and View dialog,
+    // never a second calculation. undefined (omitted from the print)
+    // for an ad-hoc Job Card or a stage with no target_qty set.
+    const operationTargetQty = resolveStage(jc.stageId)?.targetQty;
     flushSync(() => {
       root.render(
         <JobCardDocContent
@@ -1375,7 +1392,7 @@ export function JobCards({
           projectCode={project?.projectNo || "—"}
           projectName={project?.projectName || "—"}
           settings={settings as unknown as Record<string, string>}
-          printedAt={printedAt}
+          operationTargetQty={operationTargetQty}
           totalPages={totalPages}
           projectPhotoUrl={projectPhotoUrl ?? undefined}
           projectPhotoCaption={projectPhotoCaption}
@@ -1844,6 +1861,17 @@ export function JobCards({
     projectProductions.find((pp) => pp.projectId === form.projectId)?.stages ??
     [];
 
+  // Operation Target read-only preview for the Create/Edit form — never
+  // writable from here (target_qty stays owned by the Project/Production
+  // stage screen). Undefined stage (ad-hoc, no stage picked) means no
+  // target is shown at all, never fabricated from total_quantity.
+  const formStage = resolveStage(form.stageId);
+  const formStageTotals = stageTotals(form.stageId);
+
+  // Same Operation Target preview, for the read-only View dialog.
+  const viewStage = viewCard ? resolveStage(viewCard.stageId) : undefined;
+  const viewStageTotals = viewCard ? stageTotals(viewCard.stageId) : undefined;
+
   const sectionLabel = (text: string) => (
     <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground pt-2 first:pt-0">
       {text}
@@ -1889,7 +1917,9 @@ export function JobCards({
           />
         </div>
         <div className="space-y-1">
-          <Label className="text-xs">Start Date</Label>
+          {/* Label only — the underlying field stays form.startDate /
+              job_cards.start_date (UI label rename only, see audit). */}
+          <Label className="text-xs">Date</Label>
           <Input
             type="date"
             value={form.startDate}
@@ -2038,6 +2068,62 @@ export function JobCards({
           />
         </div>
       </div>
+
+      {/* Project Operation Target (see audit) — read-only preview of the
+          linked project_production_stages row. Never editable here:
+          target_qty stays owned by the Project/Production stage screen,
+          this form only ever writes stage_id. Ad-hoc (no stage picked)
+          shows a plain "not linked" line rather than fabricating a
+          target from total_quantity or anything else. Distinct from
+          "Expected Quantity / Target" below it, which is this Job
+          Card's own time-based output — the two are never conflated. */}
+      {form.stageId ? (
+        <div
+          className="rounded-md border bg-muted/30 px-3 py-2 space-y-1"
+          data-ocid="jobcards.form.operation_target"
+        >
+          <Label className="text-xs">Operation Target</Label>
+          {formStage?.targetQty !== undefined ? (
+            <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+              <span className="font-mono text-sm font-semibold">
+                {formStage.targetQty} pcs
+              </span>
+              <span className="text-xs text-muted-foreground">
+                Completed So Far:{" "}
+                <span className="font-mono">
+                  {formStageTotals?.workerAccepted ?? 0}
+                </span>
+              </span>
+              <span className="text-xs text-muted-foreground">
+                Remaining:{" "}
+                <span className="font-mono">
+                  {formStageTotals?.remaining ?? "—"}
+                </span>
+              </span>
+              {formStageTotals && formStageTotals.overTarget > 0 && (
+                <span className="text-xs text-warning font-medium">
+                  Over Target:{" "}
+                  <span className="font-mono">
+                    {formStageTotals.overTarget}
+                  </span>
+                </span>
+              )}
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground italic">
+              No target set for this stage yet
+            </p>
+          )}
+        </div>
+      ) : (
+        <p
+          className="text-[10px] text-muted-foreground italic"
+          data-ocid="jobcards.form.operation_target"
+        >
+          Operation Target: Not linked to a project stage
+        </p>
+      )}
+
       {/* Expected Quantity / Target (see chat) — effective value =
           override ?? automatic. Editable directly: typing a value sets
           the override and marks the field touched; the automatic
@@ -3010,7 +3096,83 @@ export function JobCards({
                         {STATUS_LABEL[viewCard.status]}
                       </Badge>
                     </div>
+                    <div>
+                      {/* job_cards.start_date — label renamed to "Date"
+                          per audit; the timer's own Start/End Date & Time
+                          further below is a separate field (startTime). */}
+                      <p className="text-xs text-muted-foreground">Date</p>
+                      <p>
+                        {viewCard.startDate
+                          ? new Date(viewCard.startDate).toLocaleDateString(
+                              "en-IN",
+                              { day: "numeric", month: "short", year: "numeric" },
+                            )
+                          : "—"}
+                      </p>
+                    </div>
                   </div>
+
+                  {/* Project Operation Target (see audit) — read-only,
+                      resolved from the linked project_production_stages
+                      row; Completed/Remaining/Over Target reuse
+                      computeStageProductionTotals exactly as
+                      Production.tsx's own stage cards do, not a second
+                      calculation. Ad-hoc Job Cards (no stage) show a
+                      plain "not linked" line, never a fabricated target. */}
+                  <div
+                    className="rounded-md border bg-muted/30 p-2.5 space-y-1.5"
+                    data-ocid="jobcards.view.operation_target"
+                  >
+                    <p className="text-xs text-muted-foreground">
+                      Operation Target
+                    </p>
+                    {viewCard.stageId ? (
+                      viewStage?.targetQty !== undefined ? (
+                        <>
+                          <div className="grid grid-cols-3 gap-2">
+                            <div>
+                              <p className="text-[10px] text-muted-foreground">
+                                Target
+                              </p>
+                              <p className="font-mono font-semibold">
+                                {viewStage.targetQty}
+                              </p>
+                            </div>
+                            <div>
+                              <p className="text-[10px] text-muted-foreground">
+                                Completed
+                              </p>
+                              <p className="font-mono font-semibold">
+                                {viewStageTotals?.workerAccepted ?? 0}
+                              </p>
+                            </div>
+                            <div>
+                              <p className="text-[10px] text-muted-foreground">
+                                Remaining
+                              </p>
+                              <p className="font-mono font-semibold">
+                                {viewStageTotals?.remaining ?? "—"}
+                              </p>
+                            </div>
+                          </div>
+                          {viewStageTotals && viewStageTotals.overTarget > 0 && (
+                            <p className="text-xs text-warning font-medium">
+                              Over Target: {viewStageTotals.overTarget}
+                            </p>
+                          )}
+                        </>
+                      ) : (
+                        <p className="text-sm text-muted-foreground italic">
+                          No target set for this stage
+                        </p>
+                      )
+                    ) : (
+                      <p className="text-sm text-muted-foreground italic">
+                        Not linked to a project stage
+                      </p>
+                    )}
+                  </div>
+
                   <div className="grid grid-cols-2 gap-2 rounded-md border bg-muted/30 p-2.5">
                     <div>
                       <p className="text-xs text-muted-foreground">

@@ -1979,9 +1979,10 @@ export function ChallanDocContent({
 // floor data — never printed as a live/zero value, always either the
 // real persisted number (Total Quantity/Time-per-Piece/Allocated Time/
 // Target, each only when actually configured) or a blank ink-fill line.
-// Only Project/Project Code/Operation/Employee/Start Date/Priority and
-// the "Printed On" timestamp are auto-populated, since those are
-// identifying information known at creation time, not the physical work
+// Only Project/Project Code/Operation/Employee/Date/Priority and the
+// linked Operation Target (project_production_stages.target_qty, when a
+// stage is linked) are auto-populated, since those are identifying/
+// planning information known at creation time, not the physical work
 // being recorded.
 
 interface JobCardDocProps {
@@ -1990,16 +1991,17 @@ interface JobCardDocProps {
   /** The Project's own code, e.g. "PROJ-2026-001" — printed as its own
    * "Project Code" row, separate from the Project's name below. */
   projectCode: string;
+  /** Project Operation Target (see audit) — project_production_stages
+   * .target_qty for the stage this Job Card is linked to, resolved by
+   * the caller (JobCards.tsx already has stageTotals/resolveStage in
+   * scope) via the existing job_cards.stage_id FK. undefined for an
+   * ad-hoc Job Card (no stage) or a stage with no target_qty set —
+   * never fabricated here. Not the same value as this component's own
+   * local `targetQty` (the per-Job-Card, time-based Expected Qty). */
+  operationTargetQty?: number;
   /** The Project's own name, e.g. "L-Shape Frame" — printed as "Project". */
   projectName: string;
   settings: Record<string, string>;
-  /** The moment this print was generated (client clock, `Date.now()` at
-   * render time) — shown as "Printed On" so a supervisor can tell how
-   * fresh a physical sheet is. Deliberately NOT the Job Card's own
-   * createdAt, and never persisted anywhere (see handlePrintJobCard's own
-   * comment) — a value the caller computes fresh per print, not a field
-   * read off `jobCard`. */
-  printedAt: number;
   /** Total physical pages this print will produce (Page 1 + Work
    * Reference page, if any + one page per linked-drawing sheet, if any)
    * — computed by the caller, who already knows exactly which of those
@@ -2056,17 +2058,6 @@ interface JobCardDocProps {
     sheetIndex: number;
     sheetCount: number;
   }[];
-}
-
-/** The print-generation timestamp (client clock, see handlePrintJobCard),
- * shown as the title bar's "Date:" field — the reference shows a plain
- * date there, never the Job Card's own createdAt and never persisted. */
-function formatPrintDate(ms: number): string {
-  return new Date(ms).toLocaleDateString("en-IN", {
-    day: "numeric",
-    month: "short",
-    year: "numeric",
-  });
 }
 
 const JOB_CARD_LABEL_STYLE: React.CSSProperties = {
@@ -2157,7 +2148,7 @@ export function JobCardDocContent({
   projectCode,
   projectName,
   settings,
-  printedAt,
+  operationTargetQty,
   totalPages,
   projectPhotoUrl,
   referencePhotoUrls,
@@ -2259,10 +2250,11 @@ export function JobCardDocContent({
               </div>
             )}
             <div>
-              {/* Same settings.companyName/companyAddress source
-                Invoice's own header reads — falls back to "Company
-                Name" only when Company Profile is genuinely unset, not
-                a hardcoded brand. */}
+              {/* Company Logo + Company Name only (see audit) — the
+                tagline and companyAddress rows are deliberately removed
+                from this header; settings.companyName still falls back
+                to "Company Name" only when Company Profile is genuinely
+                unset, not a hardcoded brand. */}
               <div
                 style={{
                   fontSize: "15px",
@@ -2274,25 +2266,6 @@ export function JobCardDocContent({
               >
                 {settings.companyName || "Company Name"}
               </div>
-              <div
-                style={{
-                  fontSize: "8px",
-                  fontWeight: 600,
-                  color: "#5a7ba3",
-                  letterSpacing: "0.6px",
-                  textTransform: "uppercase",
-                  marginTop: "1px",
-                }}
-              >
-                One Operation. One Team. Better Results.
-              </div>
-              {settings.companyAddress && (
-                <div
-                  style={{ fontSize: "10px", color: "#666", marginTop: "1px" }}
-                >
-                  {settings.companyAddress}
-                </div>
-              )}
             </div>
           </div>
           <div
@@ -2332,7 +2305,6 @@ export function JobCardDocContent({
             {(
               [
                 ["Job Card No.", jobCard.jobNo],
-                ["Date", formatPrintDate(printedAt)],
                 ["Page", `1 of ${pageCount}`],
               ] as const
             ).map(([label, value]) => (
@@ -2429,7 +2401,7 @@ export function JobCardDocContent({
                     ? [["Previous Job Card", jobCard.previousJobCardNo]]
                     : []),
                   [
-                    "Start Date",
+                    "Date",
                     jobCard.startDate
                       ? new Date(jobCard.startDate).toLocaleDateString(
                           "en-IN",
@@ -2582,6 +2554,43 @@ export function JobCardDocContent({
           >
             Production Planning
           </div>
+          {/* Operation Target (see audit) — the PROJECT-level total for
+            this operation (project_production_stages.target_qty via
+            jobCard.stageId), resolved by the caller and passed in as
+            operationTargetQty. Deliberately never confused with the
+            per-Job-Card "Expected Qty" grid cell below (targetQty, this
+            component's own local variable) — Section 6 of the design:
+            4,200 is the project total, 12 is this Job Card's own
+            time-based output. Omitted entirely (never a fabricated
+            value) for an ad-hoc Job Card with no linked stage, or a
+            stage with no target_qty set. */}
+          {operationTargetQty !== undefined && (
+            <div
+              style={{
+                padding: "6px 10px",
+                borderTop: `1px solid ${JOB_CARD_BORDER_BLUE}`,
+                fontSize: "11px",
+                display: "flex",
+                alignItems: "baseline",
+                gap: "6px",
+              }}
+            >
+              <span
+                style={{
+                  fontSize: "9.5px",
+                  fontWeight: 700,
+                  color: "#666",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.5px",
+                }}
+              >
+                Operation Target
+              </span>
+              <span style={{ fontWeight: 800, color: JOB_CARD_NAVY }}>
+                {operationTargetQty} pcs
+              </span>
+            </div>
+          )}
           <div
             style={{
               display: "grid",

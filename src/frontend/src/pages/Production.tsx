@@ -1131,23 +1131,21 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                         No stages defined for this project.
                       </div>
                     ) : (
-                      <div
-                        className="mt-3"
-                        style={{
-                          display: "flex",
-                          gap: "16px",
-                          overflowX: "auto",
-                          padding: "12px 0",
-                        }}
-                      >
+                      <div className="mt-3 flex flex-col gap-4 py-3 sm:flex-row sm:overflow-x-auto">
                         {stages.map((stage, idx) => {
                           const prevStage = idx > 0 ? stages[idx - 1] : null;
-                          const isLocked =
+                          // Informational only — a later stage is never
+                          // blocked from being opened/worked just
+                          // because an earlier one is incomplete (see
+                          // chat, "remove the frontend stage lock").
+                          // Available input inventory is what actually
+                          // determines what a later operation can
+                          // process, not stage completion order.
+                          const isPreviousIncomplete =
                             prevStage !== null &&
                             prevStage.status !== "Completed";
                           const isStageExpanded = expandedStageIdx === idx;
-                          const isActive =
-                            !isLocked && stage.status !== "Completed";
+                          const isActive = stage.status !== "Completed";
                           const txs = stage.transactions || [];
                           // Scoped to ordinary vendor sends only
                           // (sourceStageId undefined) — a stage-to-stage
@@ -1196,8 +1194,6 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                           return (
                             <div
                               style={{
-                                minWidth: "220px",
-                                flexShrink: 0,
                                 background: stage.isRework
                                   ? "#fffbeb"
                                   : cardStyle.background,
@@ -1210,7 +1206,7 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                 boxShadow: "0 1px 4px rgba(0,0,0,0.07)",
                               }}
                               key={`${stage.stageName}-${idx}`}
-                              className={`${isLocked ? "opacity-60" : ""}`}
+                              className={`w-full sm:min-w-[220px] sm:shrink-0 ${isPreviousIncomplete ? "opacity-80" : ""}`}
                             >
                               {/* Stage Header */}
                               <div className="flex items-center justify-between px-4 py-3">
@@ -1218,12 +1214,10 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                   type="button"
                                   className="flex items-center gap-3 flex-1 text-left"
                                   onClick={() =>
-                                    !isLocked &&
                                     setExpandedStageIdx(
                                       isStageExpanded ? null : idx,
                                     )
                                   }
-                                  disabled={isLocked}
                                 >
                                   <span
                                     className={`flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${
@@ -1250,9 +1244,9 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                         Rework
                                       </span>
                                     )}
-                                    {isLocked && (
+                                    {isPreviousIncomplete && (
                                       <span className="ml-2 text-xs text-muted-foreground">
-                                        (locked)
+                                        (previous stage pending)
                                       </span>
                                     )}
                                   </div>
@@ -1277,12 +1271,10 @@ export function Production({ onOpenProject }: ProductionProps = {}) {
                                     type="button"
                                     className="p-1 rounded hover:bg-muted disabled:opacity-40"
                                     onClick={() =>
-                                      !isLocked &&
                                       setExpandedStageIdx(
                                         isStageExpanded ? null : idx,
                                       )
                                     }
-                                    disabled={isLocked}
                                   >
                                     {isStageExpanded ? (
                                       <ChevronUp className="w-4 h-4 text-muted-foreground" />

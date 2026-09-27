@@ -698,6 +698,11 @@ export interface Vendor {
   email?: string;
   address: string;
   gstNumber?: string;
+  /** Free-form field-name/value pairs, e.g. {key:"Delivery Address",
+   * value:"Hyderabad"} — same jsonb-array convention as Customer's own
+   * additionalDetails (types.ts:28), reused here rather than adding a
+   * dedicated column per field. */
+  additionalDetails?: Array<{ key: string; value: string }>;
   createdAt: number;
 }
 

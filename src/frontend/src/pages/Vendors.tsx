@@ -69,7 +69,13 @@ function getPayableStatus(
   return "Pending";
 }
 
-const emptyForm = { name: "", phone: "", email: "", address: "", gstNumber: "" };
+const emptyForm = {
+  name: "",
+  phone: "",
+  address: "",
+  gstNumber: "",
+  additionalDetails: [] as Array<{ key: string; value: string }>,
+};
 
 export function Vendors({
   onNavigate: _onNavigate,
@@ -122,9 +128,9 @@ export function Vendors({
     setForm({
       name: v.name,
       phone: v.phone,
-      email: v.email ?? "",
       address: v.address,
       gstNumber: v.gstNumber ?? "",
+      additionalDetails: v.additionalDetails ?? [],
     });
   };
 
@@ -149,9 +155,9 @@ export function Vendors({
       const result = await createVendorRemote({
         name: form.name.trim(),
         phone: form.phone.trim(),
-        email: form.email.trim() || undefined,
         address: form.address.trim(),
         gstNumber: form.gstNumber.trim() || undefined,
+        additionalDetails: form.additionalDetails,
       });
       if (result.status === "unauthenticated") {
         toast.error("Not signed in to the server - vendor was not saved");
@@ -186,9 +192,9 @@ export function Vendors({
         ...editVendor,
         name: form.name.trim(),
         phone: form.phone.trim(),
-        email: form.email.trim() || undefined,
         address: form.address.trim(),
         gstNumber: form.gstNumber.trim() || undefined,
+        additionalDetails: form.additionalDetails,
       });
       if (result.status === "unauthenticated") {
         toast.error("Not signed in to the server - vendor was not updated");
@@ -296,16 +302,6 @@ export function Vendors({
         />
       </div>
       <div className="space-y-1">
-        <Label className="text-xs">Email</Label>
-        <Input
-          type="email"
-          value={form.email}
-          onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
-          placeholder="email@company.com"
-          data-ocid="vendors.email.input"
-        />
-      </div>
-      <div className="space-y-1">
         <Label className="text-xs">Address</Label>
         <Input
           value={form.address}
@@ -325,6 +321,89 @@ export function Vendors({
           data-ocid="vendors.gst.input"
         />
       </div>
+    </div>
+  );
+
+  // Same add/edit/remove-list pattern as Customer's own Additional
+  // Details (pages/Customers.tsx) — free-form field-name/value pairs
+  // (e.g. Email, Delivery Address, Contact Person, Payment Terms)
+  // instead of a dedicated column per field.
+  const vendorAdditionalDetails = (
+    <div className="mt-3">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+          Additional Details
+        </span>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-7 text-xs"
+          onClick={() =>
+            setForm((p) => ({
+              ...p,
+              additionalDetails: [
+                ...(p.additionalDetails || []),
+                { key: "", value: "" },
+              ],
+            }))
+          }
+          data-ocid="vendors.form.add_detail.button"
+        >
+          <Plus className="w-3 h-3 mr-1" /> Add Detail
+        </Button>
+      </div>
+      {(form.additionalDetails || []).map((detail, i) => (
+        <div
+          // biome-ignore lint/suspicious/noArrayIndexKey: stable editable list
+          key={`detail-${i}`}
+          className="flex gap-2 mb-1.5 items-center"
+        >
+          <input
+            className="flex h-7 w-full rounded-md border border-input bg-background px-2 py-1 text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            placeholder="Field name (e.g. Email)"
+            value={detail.key}
+            onChange={(e) =>
+              setForm((p) => {
+                const arr = [...(p.additionalDetails || [])];
+                arr[i] = { ...arr[i], key: e.target.value };
+                return { ...p, additionalDetails: arr };
+              })
+            }
+            data-ocid={`vendors.form.detail_key.${i + 1}`}
+          />
+          <input
+            className="flex h-7 w-full rounded-md border border-input bg-background px-2 py-1 text-xs ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            placeholder="Value"
+            value={detail.value}
+            onChange={(e) =>
+              setForm((p) => {
+                const arr = [...(p.additionalDetails || [])];
+                arr[i] = { ...arr[i], value: e.target.value };
+                return { ...p, additionalDetails: arr };
+              })
+            }
+            data-ocid={`vendors.form.detail_value.${i + 1}`}
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 px-2 shrink-0"
+            onClick={() =>
+              setForm((p) => ({
+                ...p,
+                additionalDetails: (p.additionalDetails || []).filter(
+                  (_, j) => j !== i,
+                ),
+              }))
+            }
+            data-ocid={`vendors.form.detail_remove.${i + 1}`}
+          >
+            <Trash2 className="w-3 h-3 text-destructive" />
+          </Button>
+        </div>
+      ))}
     </div>
   );
 
@@ -506,11 +585,6 @@ export function Vendors({
                     {selectedVendor.phone && (
                       <div className="text-xs text-muted-foreground mt-0.5">
                         {selectedVendor.phone}
-                      </div>
-                    )}
-                    {selectedVendor.email && (
-                      <div className="text-xs text-muted-foreground mt-0.5">
-                        {selectedVendor.email}
                       </div>
                     )}
                     {selectedVendor.address && (
@@ -727,6 +801,7 @@ export function Vendors({
             }}
           >
             {vendorFormFields}
+            {vendorAdditionalDetails}
             <DialogFooter className="flex justify-end gap-2 mt-4 min-h-[52px] items-center">
               <Button
                 type="button"
@@ -768,6 +843,7 @@ export function Vendors({
             }}
           >
             {vendorFormFields}
+            {vendorAdditionalDetails}
             <DialogFooter className="flex justify-end gap-2 mt-4 min-h-[52px] items-center">
               <Button
                 type="button"

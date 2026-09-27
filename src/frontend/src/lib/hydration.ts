@@ -1135,7 +1135,8 @@ export async function hydrateInventoryItems(): Promise<
 
 // Phase 21A — Vendors. Simple 1:1 scalar mapping, same shape as
 // Customers. DB-only: organization_id, updated_at.
-const VENDOR_COLUMNS = "id, name, phone, email, address, gstin, created_at";
+const VENDOR_COLUMNS =
+  "id, name, phone, email, address, gstin, additional_details, created_at";
 
 interface VendorRow {
   id: string;
@@ -1144,6 +1145,7 @@ interface VendorRow {
   email: string | null;
   address: string | null;
   gstin: string | null;
+  additional_details: Array<{ key: string; value: string }> | null;
   created_at: string;
 }
 
@@ -1155,6 +1157,7 @@ function transformVendorRow(row: VendorRow): Vendor {
     email: row.email ?? undefined,
     address: row.address ?? "",
     gstNumber: row.gstin ?? undefined,
+    additionalDetails: row.additional_details ?? undefined,
     createdAt: new Date(row.created_at).getTime(),
   };
 }

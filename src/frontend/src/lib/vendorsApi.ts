@@ -41,6 +41,7 @@ interface VendorRow {
   email: string | null;
   address: string | null;
   gstin: string | null;
+  additional_details: Array<{ key: string; value: string }> | null;
   created_at: string;
 }
 
@@ -52,6 +53,7 @@ function rowToVendor(row: VendorRow): Vendor {
     email: row.email ?? undefined,
     address: row.address ?? "",
     gstNumber: row.gstin ?? undefined,
+    additionalDetails: row.additional_details ?? undefined,
     createdAt: new Date(row.created_at).getTime(),
   };
 }
@@ -65,10 +67,12 @@ function toVendorFields(v: Omit<Vendor, "id" | "createdAt">) {
     email: v.email || null,
     address: v.address || null,
     gstin: v.gstNumber ?? null,
+    additional_details: v.additionalDetails ?? null,
   };
 }
 
-const SELECT_COLUMNS = "id, name, phone, email, address, gstin, created_at";
+const SELECT_COLUMNS =
+  "id, name, phone, email, address, gstin, additional_details, created_at";
 
 async function requireSession() {
   if (!isSupabaseConfigured) {

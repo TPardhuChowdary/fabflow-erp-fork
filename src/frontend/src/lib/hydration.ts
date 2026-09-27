@@ -1046,7 +1046,8 @@ export async function hydrateCustomers(): Promise<HydrationResult<Customer[]>> {
 const INVENTORY_ITEM_COLUMNS =
   "id, name, unit, current_stock, cost_per_unit, quantity_reserved, " +
   "reorder_level, last_purchase_price, estimated_price, updated_at, " +
-  "category, brand, shade, ral_code, finish, powder_type, pretreatment_tank";
+  "category, brand, shade, ral_code, finish, powder_type, pretreatment_tank, " +
+  "material_family_id, specifications";
 
 interface InventoryItemRow {
   id: string;
@@ -1066,6 +1067,8 @@ interface InventoryItemRow {
   finish: string | null;
   powder_type: string | null;
   pretreatment_tank: string | null;
+  material_family_id: string | null;
+  specifications: Record<string, string> | null;
 }
 
 function transformInventoryItemRow(row: InventoryItemRow): InventoryItem {
@@ -1088,6 +1091,8 @@ function transformInventoryItemRow(row: InventoryItemRow): InventoryItem {
     finish: row.finish ?? undefined,
     powderType: row.powder_type ?? undefined,
     pretreatmentTank: row.pretreatment_tank ?? undefined,
+    materialFamilyId: row.material_family_id ?? undefined,
+    specifications: row.specifications ?? undefined,
   };
 }
 

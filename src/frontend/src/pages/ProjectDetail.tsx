@@ -261,6 +261,94 @@ const WORK_TYPE_OPTIONS: {
   { value: "other", label: "Other" },
 ];
 
+// Project Timeline — "Add Timeline Event" event type suggestions (see
+// audit: add_project_activity()'s p_type is plain text, no DB enum, so
+// this is a curated suggestion list for the picker, not an exhaustive
+// or enforced set — the picker itself stays creatable so a genuinely
+// custom type is just whatever free text the user types. "note" is the
+// pre-existing type the old "+ Add Note" button already used (kept so
+// old-style entries and new "General Note" entries share one icon/
+// label); "production_started" is likewise already written by other,
+// unmodified parts of the app — picking it here just adds another entry
+// of that same existing type, it does not touch those other writers.
+const TIMELINE_EVENT_TYPE_OPTIONS: { value: string; label: string }[] = [
+  { value: "note", label: "General Note" },
+  { value: "sample_requested", label: "Sample Requested" },
+  { value: "sample_submitted", label: "Sample Submitted" },
+  { value: "customer_feedback", label: "Customer Feedback" },
+  { value: "sample_revised", label: "Sample Revised" },
+  { value: "sample_approved", label: "Sample Approved" },
+  { value: "production_started", label: "Production Started" },
+  { value: "production_milestone", label: "Production Milestone" },
+  { value: "production_completed", label: "Production Completed" },
+];
+const TIMELINE_EVENT_TYPE_LABELS: Record<string, string> = Object.fromEntries(
+  TIMELINE_EVENT_TYPE_OPTIONS.map((o) => [o.value, o.label]),
+);
+
+// Backward compatibility (see audit §8) — every existing system-written
+// activity type (quotation_created, po_received, etc., see
+// ProjectActivityType in types.ts) also needs a readable label, since
+// the timeline now shows an explicit type badge on every entry, not
+// just an icon. A type not listed here (an older type this map hasn't
+// caught, or genuinely custom free text from "Other") falls back to
+// prettifying the raw string instead of guessing further.
+const SYSTEM_ACTIVITY_TYPE_LABELS: Record<string, string> = {
+  project_created: "Project Created",
+  quotation_created: "Quotation Created",
+  quotation_approved: "Quotation Approved",
+  po_received: "PO Received",
+  production_stage_update: "Production Stage Update",
+  material_purchased: "Material Purchased",
+  material_requisition: "Material Requisition",
+  qc_passed: "QC Passed",
+  qc_failed: "QC Failed",
+  dispatch: "Dispatch",
+  invoice_generated: "Invoice Generated",
+  payment_received: "Payment Received",
+  machine_breakdown: "Machine Breakdown",
+  report_exported: "Report Exported",
+  deadline_updated: "Deadline Updated",
+};
+
+/** Human label for any activity `type` string, known or not — never
+ * throws, never returns blank. Known types (new Timeline types + the
+ * pre-existing system types) get their curated label; anything else
+ * (an old type this map doesn't list, or free-text "Other" custom
+ * input) is prettified from snake_case, or shown verbatim if it isn't
+ * snake_case to begin with. */
+function activityTypeLabel(type: string): string {
+  if (TIMELINE_EVENT_TYPE_LABELS[type]) return TIMELINE_EVENT_TYPE_LABELS[type];
+  if (SYSTEM_ACTIVITY_TYPE_LABELS[type]) return SYSTEM_ACTIVITY_TYPE_LABELS[type];
+  if (!type) return "Activity";
+  if (!type.includes("_")) return type;
+  return type
+    .split("_")
+    .filter(Boolean)
+    .map((w) => w[0].toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+/** Parses a plain "YYYY-MM-DD" string (this codebase's universal date-
+ * string convention, see lib/deadlinePriority.ts's own parseDeadlineDate)
+ * as a LOCAL calendar day via the 3-arg Date constructor — never
+ * `new Date(ymd)`, which parses as UTC midnight and can display as the
+ * previous day for any timezone ahead of UTC's own date-change moment.
+ * Returns null for missing/malformed input; never fabricates a date. */
+function formatEventDate(ymd: string | undefined): string | null {
+  if (!ymd) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(ymd);
+  if (!match) return null;
+  const [, y, m, d] = match;
+  const date = new Date(Number(y), Number(m) - 1, Number(d));
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleDateString("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
+
 const STAGE_STATUS_COLORS: Record<ProjectStageStatus, string> = {
   NotStarted: "bg-muted text-muted-foreground",
   Sent: "bg-info/10 text-info",
@@ -1597,6 +1685,100 @@ export function ProjectDetail({
     qty: 0,
     notes: "",
   });
+
+  // Project Timeline — "Add Timeline Event" dialog (replaces the old
+  // window.prompt() "+ Add Note"). Still writes through the existing
+  // addProjectActivity()/add_project_activity() RPC — no new table, no
+  // migration. eventDate defaults to today in LOCAL time (not
+  // toISOString(), which is UTC and can read as "yesterday" near
+  // midnight IST).
+  const [addEventDialog, setAddEventDialog] = useState(false);
+  const todayLocalYMD = () => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  };
+  const [eventForm, setEventForm] = useState({
+    type: "",
+    title: "",
+    description: "",
+    eventDate: todayLocalYMD(),
+  });
+  const [isSavingEvent, setIsSavingEvent] = useState(false);
+  // Phase 2 (photo attachment) — set to the just-created activity's own
+  // id once add_project_activity() succeeds; its presence switches the
+  // dialog from the create form to "Photos". Reset to null whenever the
+  // dialog (re)opens for a new event. This is the SAME id
+  // add_project_activity() already generates for every entry
+  // (gen_random_uuid(), see the RPC) — never a separate client-side id.
+  const [createdEventId, setCreatedEventId] = useState<string | null>(null);
+
+  // Validates, then writes through the existing addProjectActivity() ->
+  // add_project_activity() RPC exactly like the old "+ Add Note" button
+  // did — same RPC, same permission model (the RPC itself checks
+  // has_permission('projects','edit') or has_permission('production',
+  // 'edit') server-side regardless of the pEdit-gated button here), same
+  // attribution source. Only the title/eventDate/source keys are new,
+  // and they travel in the RPC's own pre-existing p_metadata parameter —
+  // no new persistence path.
+  const handleAddTimelineEvent = async () => {
+    if (isSavingEvent) return; // guards against a double-click submitting twice
+    const type = eventForm.type.trim();
+    const title = eventForm.title.trim();
+    if (!type) {
+      toast.error("Event Type is required");
+      return;
+    }
+    if (!title) {
+      toast.error("Title is required");
+      return;
+    }
+    if (!eventForm.eventDate) {
+      toast.error("Date is required");
+      return;
+    }
+    setIsSavingEvent(true);
+    try {
+      const description = eventForm.description.trim() || title;
+      const before =
+        useStore.getState().projects.find((p) => p.id === projectId)
+          ?.activityLog ?? [];
+      await addProjectActivity(
+        projectId,
+        type,
+        description,
+        currentUser?.username ?? "unknown",
+        {
+          title,
+          eventDate: eventForm.eventDate,
+          source: "project_timeline",
+        },
+      );
+      // addProjectActivity() (see store.ts) never fabricates success and
+      // returns void either way — comparing the refreshed activityLog
+      // against the pre-call snapshot via the store's own getState() is
+      // how this detects a silent RPC failure (no session, RLS denial)
+      // without widening that shared, multi-writer action's return type.
+      // The newly-created entry is identified by its own server-generated
+      // id (whichever id exists after the call but didn't before) —
+      // never guessed from array position, since add_project_activity()
+      // already assigns a stable gen_random_uuid() id to every entry.
+      const after =
+        useStore.getState().projects.find((p) => p.id === projectId)
+          ?.activityLog ?? [];
+      const beforeIds = new Set(before.map((a) => a.id));
+      const newEntry = after.find((a) => !beforeIds.has(a.id));
+      if (newEntry) {
+        toast.success("Timeline event added");
+        setCreatedEventId(newEntry.id);
+      } else {
+        toast.error(
+          "Could not save the timeline event (check your permissions and connection).",
+        );
+      }
+    } finally {
+      setIsSavingEvent(false);
+    }
+  };
 
   const openRepeatOrder = () => {
     if (!project) return;
@@ -8022,6 +8204,14 @@ export function ProjectDetail({
                   report_exported: "📊",
                   deadline_updated: "📅",
                   note: "💬",
+                  // Project Timeline manual event types.
+                  sample_requested: "🧪",
+                  sample_submitted: "📤",
+                  customer_feedback: "💭",
+                  sample_revised: "🔁",
+                  sample_approved: "👍",
+                  production_milestone: "🏁",
+                  production_completed: "🏆",
                 };
                 return (
                   <div className="space-y-4">
@@ -8040,20 +8230,18 @@ export function ProjectDetail({
                           size="sm"
                           variant="outline"
                           onClick={() => {
-                            const note = window.prompt(
-                              "Add a note to this project's timeline:",
-                            );
-                            if (note?.trim()) {
-                              addProjectActivity(
-                                projectId,
-                                "note",
-                                note.trim(),
-                                currentUser?.username ?? "unknown",
-                              );
-                            }
+                            setEventForm({
+                              type: "",
+                              title: "",
+                              description: "",
+                              eventDate: todayLocalYMD(),
+                            });
+                            setCreatedEventId(null);
+                            setAddEventDialog(true);
                           }}
+                          data-ocid="project.timeline.add_event_button"
                         >
-                          + Add Note
+                          + Add Timeline Event
                         </Button>
                       )}
                     </div>
@@ -8072,40 +8260,95 @@ export function ProjectDetail({
                       <div className="relative">
                         <div className="absolute left-4 top-0 bottom-0 w-0.5 bg-border" />
                         <div className="space-y-0">
-                          {activities.map((act) => (
-                            <div
-                              key={act.id}
-                              className="relative flex gap-4 pb-4"
-                            >
-                              <div className="relative z-10 flex items-center justify-center w-8 h-8 rounded-full bg-card border-2 border-border text-sm shrink-0">
-                                {ACTIVITY_ICONS[act.type] ?? "•"}
-                              </div>
-                              <div className="flex-1 min-w-0 bg-card border rounded-lg px-3 py-2.5">
-                                <p className="text-xs font-medium">
-                                  {act.description}
-                                </p>
-                                <div className="flex items-center gap-2 mt-1">
-                                  <span className="text-[11px] text-muted-foreground">
-                                    {new Date(act.timestamp).toLocaleDateString(
-                                      "en-IN",
-                                      {
-                                        day: "numeric",
-                                        month: "short",
-                                        year: "numeric",
-                                        hour: "2-digit",
-                                        minute: "2-digit",
-                                      },
-                                    )}
-                                  </span>
-                                  {act.performedBy && (
+                          {activities.map((act) => {
+                            // Backward compatibility (audit §8): old
+                            // entries have no metadata.title — the
+                            // existing `description` (their only line of
+                            // content) already IS the title-equivalent,
+                            // so it's reused as the display title rather
+                            // than inventing a second, empty line.
+                            const metaTitle = act.metadata?.title;
+                            const title =
+                              metaTitle != null
+                                ? String(metaTitle)
+                                : act.description;
+                            const showDescriptionLine =
+                              metaTitle != null &&
+                              act.description &&
+                              act.description !== title;
+                            const eventDateDisplay = formatEventDate(
+                              act.metadata?.eventDate != null
+                                ? String(act.metadata.eventDate)
+                                : undefined,
+                            );
+                            // Timeline photo attachments — only mount the
+                            // gallery when this activity actually has
+                            // asset_photos rows. AssetPhotoGallery's own
+                            // empty-state text ("No photos yet.") isn't
+                            // gated by canEdit, so an unconditional render
+                            // here would leak that line onto every
+                            // photo-less card (old AND new) — checking
+                            // the count first keeps photo-less entries
+                            // rendering exactly as before.
+                            const eventPhotoCount = assetPhotos.filter(
+                              (p) =>
+                                p.ownerType === "timeline_event" &&
+                                p.ownerId === act.id,
+                            ).length;
+                            return (
+                              <div
+                                key={act.id}
+                                className="relative flex gap-4 pb-4"
+                              >
+                                <div className="relative z-10 flex items-center justify-center w-8 h-8 rounded-full bg-card border-2 border-border text-sm shrink-0">
+                                  {ACTIVITY_ICONS[act.type] ?? "•"}
+                                </div>
+                                <div className="flex-1 min-w-0 bg-card border rounded-lg px-3 py-2.5 space-y-1">
+                                  <Badge
+                                    variant="outline"
+                                    className="text-[9px] font-semibold uppercase tracking-wide"
+                                  >
+                                    {activityTypeLabel(act.type)}
+                                  </Badge>
+                                  <p className="text-xs font-medium">{title}</p>
+                                  {showDescriptionLine && (
+                                    <p className="text-[11px] text-muted-foreground">
+                                      {act.description}
+                                    </p>
+                                  )}
+                                  <div className="flex items-center gap-2 flex-wrap pt-0.5">
                                     <span className="text-[11px] text-muted-foreground">
-                                      · {act.performedBy}
+                                      {eventDateDisplay ??
+                                        new Date(
+                                          act.timestamp,
+                                        ).toLocaleDateString("en-IN", {
+                                          day: "numeric",
+                                          month: "short",
+                                          year: "numeric",
+                                          hour: "2-digit",
+                                          minute: "2-digit",
+                                        })}
                                     </span>
+                                    {act.performedBy && (
+                                      <span className="text-[11px] text-muted-foreground">
+                                        · By: {act.performedBy}
+                                      </span>
+                                    )}
+                                  </div>
+                                  {eventPhotoCount > 0 && (
+                                    <div className="pt-1">
+                                      <AssetPhotoGallery
+                                        ownerType="timeline_event"
+                                        ownerId={act.id}
+                                        canEdit={false}
+                                        data-ocid="project.timeline.card_photos"
+                                      />
+                                    </div>
                                   )}
                                 </div>
                               </div>
-                            </div>
-                          ))}
+                            );
+                          })}
                           {/* Project creation as last item */}
                           <div className="relative flex gap-4 pb-4">
                             <div className="relative z-10 flex items-center justify-center w-8 h-8 rounded-full bg-info/10 border-2 border-info/30 text-sm shrink-0">
@@ -8137,6 +8380,166 @@ export function ProjectDetail({
           )}
         </div>
       </div>
+
+      {/* Add Timeline Event Dialog — replaces the old window.prompt()
+        "+ Add Note". Writes through the same addProjectActivity() ->
+        add_project_activity() RPC as before; title/eventDate/source are
+        carried in the RPC's own existing p_metadata parameter (see
+        handleAddTimelineEvent) — no new table, no migration.
+        Two phases: the create form, then — once the event is durably
+        saved and its own server-generated id is known — a "Photos" step
+        reusing AssetPhotoGallery unmodified (ownerType="timeline_event",
+        ownerId=that id). A photo can never be uploaded before the event
+        exists, since Phase 2 only renders once createdEventId is set. */}
+      <Dialog
+        open={addEventDialog}
+        onOpenChange={(open) => {
+          setAddEventDialog(open);
+          if (!open) setCreatedEventId(null);
+        }}
+      >
+        <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
+          {createdEventId ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>Timeline Event Created</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-3 py-2">
+                <div className="rounded-lg border bg-muted/30 px-3 py-2.5 space-y-1">
+                  <Badge
+                    variant="outline"
+                    className="text-[9px] font-semibold uppercase tracking-wide"
+                  >
+                    {activityTypeLabel(eventForm.type)}
+                  </Badge>
+                  <p className="text-xs font-medium">{eventForm.title}</p>
+                  {eventForm.description &&
+                    eventForm.description !== eventForm.title && (
+                      <p className="text-[11px] text-muted-foreground">
+                        {eventForm.description}
+                      </p>
+                    )}
+                  <p className="text-[11px] text-muted-foreground">
+                    Date: {formatEventDate(eventForm.eventDate)} · Recorded
+                    by: {currentUser?.username ?? "—"}
+                  </p>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Photos</Label>
+                  <AssetPhotoGallery
+                    ownerType="timeline_event"
+                    ownerId={createdEventId}
+                    canEdit={pEdit}
+                    data-ocid="project.timeline.form.photos"
+                  />
+                </div>
+              </div>
+              <DialogFooter>
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    setAddEventDialog(false);
+                    setCreatedEventId(null);
+                  }}
+                  data-ocid="project.timeline.form.done"
+                >
+                  Done
+                </Button>
+              </DialogFooter>
+            </>
+          ) : (
+            <>
+              <DialogHeader>
+                <DialogTitle>Add Timeline Event</DialogTitle>
+              </DialogHeader>
+              <div className="space-y-3 py-2">
+                <div className="space-y-1">
+                  <Label className="text-xs">Event Type *</Label>
+                  <SearchableSelect
+                    value={eventForm.type}
+                    onChange={(v) =>
+                      setEventForm((f) => ({ ...f, type: v }))
+                    }
+                    options={TIMELINE_EVENT_TYPE_OPTIONS.map((o) => ({
+                      value: o.value,
+                      label: o.label,
+                      searchText: o.label,
+                    }))}
+                    placeholder="Select an event type"
+                    searchPlaceholder="Search, or type a custom type…"
+                    creatable
+                    createLabel={(text) =>
+                      `Use "${text}" as a custom event type`
+                    }
+                    className="w-full text-sm"
+                    data-ocid="project.timeline.form.type"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Title *</Label>
+                  <Input
+                    value={eventForm.title}
+                    onChange={(e) =>
+                      setEventForm((f) => ({ ...f, title: e.target.value }))
+                    }
+                    placeholder="e.g. Sample Submitted to Customer"
+                    data-ocid="project.timeline.form.title"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Description</Label>
+                  <Textarea
+                    rows={3}
+                    value={eventForm.description}
+                    onChange={(e) =>
+                      setEventForm((f) => ({
+                        ...f,
+                        description: e.target.value,
+                      }))
+                    }
+                    placeholder="Optional details about this event"
+                    data-ocid="project.timeline.form.description"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Date *</Label>
+                  <Input
+                    type="date"
+                    value={eventForm.eventDate}
+                    onChange={(e) =>
+                      setEventForm((f) => ({
+                        ...f,
+                        eventDate: e.target.value,
+                      }))
+                    }
+                    data-ocid="project.timeline.form.date"
+                  />
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Recorded by: {currentUser?.username ?? "—"}
+                </p>
+              </div>
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setAddEventDialog(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  size="sm"
+                  disabled={isSavingEvent}
+                  onClick={handleAddTimelineEvent}
+                  data-ocid="project.timeline.form.submit"
+                >
+                  {isSavingEvent ? "Saving..." : "Add Event"}
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* Repeat Order Dialog */}
       <Dialog open={repeatDialog} onOpenChange={setRepeatDialog}>

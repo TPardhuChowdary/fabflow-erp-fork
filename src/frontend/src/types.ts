@@ -954,6 +954,14 @@ export interface ProjectPO {
   sharedPoId?: string;
 }
 
+// The known/named values below exist for icon-mapping and Select-option
+// autocomplete only — add_project_activity() itself accepts arbitrary
+// text for p_type (no DB enum/constraint), and the Project Timeline's
+// "Add Timeline Event" form's own custom/"Other" type is deliberately
+// free text. `(string & {})` keeps IDE autocomplete for the known values
+// while still accepting any string, so this stays a hint, never a rigid
+// enum — do not add a CHECK constraint or narrow this back to a closed
+// union.
 export type ProjectActivityType =
   | "project_created"
   | "quotation_created"
@@ -971,7 +979,17 @@ export type ProjectActivityType =
   | "machine_breakdown"
   | "report_exported"
   | "deadline_updated"
-  | "note";
+  | "note"
+  // Project Timeline manual event types (see ProjectDetail.tsx's "Add
+  // Timeline Event" dialog) — examples, not an exhaustive list.
+  | "sample_requested"
+  | "sample_submitted"
+  | "customer_feedback"
+  | "sample_revised"
+  | "sample_approved"
+  | "production_milestone"
+  | "production_completed"
+  | (string & {});
 
 export interface ProjectActivity {
   id: string;
@@ -2101,13 +2119,18 @@ export interface MachineDie {
 // supabase/migrations/20260915130000_project_photos.sql, same widening
 // pattern as "job_card") - reuses AssetPhotoGallery/assetPhotosApi.ts
 // unmodified too.
+// "timeline_event" added for Project Timeline photo attachments (see
+// supabase/migrations/20260926150000_timeline_event_asset_photos.sql) -
+// owner_id is an existing activity_log entry's own `id` (already
+// generated server-side by add_project_activity(), never a new id).
 export type AssetOwnerType =
   | "machine"
   | "die"
   | "tool"
   | "inventory_item"
   | "job_card"
-  | "project";
+  | "project"
+  | "timeline_event";
 
 // Phase 51 (Group 2) — universal usage-event log for Machine/Die/Tool,
 // one reusable table (asset_usage_events) rather than three. Mirrors

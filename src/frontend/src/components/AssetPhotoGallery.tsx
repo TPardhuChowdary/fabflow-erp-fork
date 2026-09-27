@@ -90,6 +90,14 @@ export function AssetPhotoGallery({
   } = useStore();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isUploading, setIsUploading] = useState(false);
+  // Multi-select upload progress (see chat, "multiple photo upload") —
+  // null when idle, {done, total} while a batch is in flight so the
+  // existing "Uploading…" label can show "Uploading 2/4…" instead of
+  // going silent for however long a multi-file batch takes.
+  const [uploadProgress, setUploadProgress] = useState<{
+    done: number;
+    total: number;
+  } | null>(null);
   const [signedUrls, setSignedUrls] = useState<Record<string, string>>({});
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [isBusy, setIsBusy] = useState(false);
@@ -195,46 +203,81 @@ export function AssetPhotoGallery({
     };
   }, [photos]);
 
+  // Multi-select (see chat, "multiple photo upload") — the file input now
+  // has `multiple`, so `e.target.files` can hold several File objects from
+  // one picker operation. Uploaded ONE AT A TIME, not Promise.all: each
+  // call needs the CURRENT photos.length for displayOrder (would collide
+  // if fired concurrently) and the "first photo becomes primary" step
+  // below must only ever fire once, for the first file of the first-ever
+  // batch. A failure partway through is caught per-file (never a single
+  // try/catch around the whole loop) so one bad file can't abort the
+  // rest — same reuse-first pattern already used for multi-file upload in
+  // StageChecklistSection.tsx. Single-file selection still works exactly
+  // as before; this is strictly additive.
   async function handleFileChosen(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
+    const files = Array.from(e.target.files ?? []);
     e.target.value = "";
-    if (!file) return;
+    if (files.length === 0) return;
     setIsUploading(true);
+    setUploadProgress({ done: 0, total: files.length });
+    let succeeded = 0;
+    let firstUploaded: AssetPhoto | undefined;
+    let nextDisplayOrder = photos.length;
     try {
-      const result = await uploadAssetPhoto(ownerType, ownerId, file, {
-        displayOrder: photos.length,
-      });
-      if (result.status === "unauthenticated") {
-        toast.error("Not signed in to Supabase - photo was not uploaded.");
-        return;
+      for (const file of files) {
+        try {
+          const result = await uploadAssetPhoto(ownerType, ownerId, file, {
+            displayOrder: nextDisplayOrder,
+          });
+          if (result.status === "unauthenticated") {
+            toast.error("Not signed in to Supabase - photo was not uploaded.");
+            break; // session is gone for every remaining file too
+          }
+          if (
+            result.status === "error" ||
+            result.status === "denied" ||
+            !result.data
+          ) {
+            toast.error(
+              `Could not upload ${file.name}: ${result.error ?? "unknown error"}`,
+            );
+            continue;
+          }
+          nextDisplayOrder += 1;
+          succeeded += 1;
+          addAssetPhotoLocal(result.data);
+          if (!firstUploaded) firstUploaded = result.data;
+        } finally {
+          setUploadProgress((prev) =>
+            prev ? { ...prev, done: prev.done + 1 } : prev,
+          );
+        }
       }
-      if (
-        result.status === "error" ||
-        result.status === "denied" ||
-        !result.data
-      ) {
-        toast.error(
-          `Could not upload photo: ${result.error ?? "unknown error"}`,
-        );
-        return;
-      }
-      addAssetPhotoLocal(result.data);
       // First real photo for this asset — make it primary automatically
       // so the thumbnail/header views (which show only the primary) have
-      // something to show without a separate manual step.
-      if (photos.length === 0) {
+      // something to show without a separate manual step. Only the
+      // FIRST successfully-uploaded file of a batch that started from
+      // zero existing photos qualifies — never re-evaluated per file.
+      if (photos.length === 0 && firstUploaded) {
         const primaryResult = await setPrimaryAssetPhoto(
-          result.data.id,
+          firstUploaded.id,
           ownerType,
           ownerId,
         );
         if (primaryResult.status === "success") {
-          updateAssetPhotoLocal({ ...result.data, isPrimary: true });
+          updateAssetPhotoLocal({ ...firstUploaded, isPrimary: true });
         }
       }
-      toast.success("Photo added");
+      if (succeeded > 0) {
+        toast.success(
+          succeeded === 1
+            ? "Photo added"
+            : `${succeeded} of ${files.length} photos added`,
+        );
+      }
     } finally {
       setIsUploading(false);
+      setUploadProgress(null);
     }
   }
 
@@ -403,6 +446,7 @@ export function AssetPhotoGallery({
       ref={fileInputRef}
       type="file"
       accept="image/jpeg,image/png,image/webp"
+      multiple
       className="hidden"
       onChange={handleFileChosen}
     />
@@ -449,7 +493,9 @@ export function AssetPhotoGallery({
               >
                 <ImagePlus className="w-3.5 h-3.5" />
                 {isUploading
-                  ? "Uploading…"
+                  ? uploadProgress && uploadProgress.total > 1
+                    ? `Uploading ${uploadProgress.done}/${uploadProgress.total}…`
+                    : "Uploading…"
                   : heroImgUrl
                     ? "Change"
                     : "Add Photo"}
@@ -537,7 +583,11 @@ export function AssetPhotoGallery({
                 data-ocid={dataOcid ? `${dataOcid}.add_button` : undefined}
               >
                 {isUploading ? (
-                  <span className="text-[10px]">Uploading…</span>
+                  <span className="text-[10px]">
+                    {uploadProgress && uploadProgress.total > 1
+                      ? `${uploadProgress.done}/${uploadProgress.total}…`
+                      : "Uploading…"}
+                  </span>
                 ) : (
                   <>
                     <ImagePlus className="w-4 h-4" />

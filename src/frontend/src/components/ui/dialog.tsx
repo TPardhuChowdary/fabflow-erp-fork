@@ -46,10 +46,45 @@ function DialogOverlay({
   );
 }
 
+// Reusable dialog sizing tiers (design/UX audit, "preview dialogs too
+// compressed") — a single point of change instead of ~120 call sites
+// each hand-rolling their own max-w-*/max-h-*/overflow className from
+// scratch. Opt-in only: a DialogContent with no `size` prop keeps
+// today's exact default (sm:max-w-lg, no height cap), so every existing
+// dialog this isn't deliberately applied to is byte-for-byte unaffected.
+//   sm      — tiny/single-field dialogs, narrower than the default.
+//   md      — explicit alias for today's unstyled default; use when a
+//             call site wants to state its size intentionally without
+//             changing behavior.
+//   lg      — comfortable Add/Edit forms (the "Vendors/Customers/
+//             Projects stuck at the 512px default" case).
+//   xl      — large/complex forms (many fields, e.g. Job Card-style).
+//   preview — document/image/print preview surfaces: near-fullscreen,
+//             same single-scrolling-container shape every print-preview
+//             component already uses (just much larger) so existing
+//             internal layout/zoom/print logic in each of those
+//             components needs zero changes — this only widens the
+//             viewport they already scroll within. True fullscreen
+//             below `sm:` (matches the mobile-fullscreen override
+//             already hand-copied across the 6 print-preview
+//             components).
+export type DialogSize = "sm" | "md" | "lg" | "xl" | "preview";
+
+const DIALOG_SIZE_CLASSES: Record<DialogSize, string> = {
+  sm: "sm:max-w-sm",
+  md: "sm:max-w-lg",
+  lg: "sm:max-w-2xl max-h-[85vh] overflow-y-auto",
+  xl: "sm:max-w-4xl max-h-[90vh] overflow-y-auto",
+  preview:
+    "sm:max-w-[95vw] sm:w-[95vw] max-h-[95vh] overflow-y-auto " +
+    "max-sm:!fixed max-sm:!inset-0 max-sm:!max-w-full max-sm:!rounded-none max-sm:!h-screen max-sm:!max-h-screen max-sm:![transform:none]",
+};
+
 function DialogContent({
   className,
   children,
   showCloseButton = true,
+  size,
   // Most call sites in this app rely on DialogTitle alone (the real,
   // required accessible name) and never render a DialogDescription — a
   // separate summary line would usually just repeat the title. Radix
@@ -63,6 +98,7 @@ function DialogContent({
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean;
+  size?: DialogSize;
 }) {
   return (
     <DialogPortal data-slot="dialog-portal">
@@ -72,6 +108,7 @@ function DialogContent({
         aria-describedby={ariaDescribedBy}
         className={cn(
           "bg-background data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border p-6 shadow-lg duration-200 sm:max-w-lg",
+          size && DIALOG_SIZE_CLASSES[size],
           className,
         )}
         {...props}

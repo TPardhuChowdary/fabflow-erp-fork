@@ -80,6 +80,7 @@ import {
   hasPermission,
 } from "../permissions";
 import { useStore } from "../store";
+import { allocateServiceRecordNumber } from "../lib/documentNumbering";
 import type {
   BillableService,
   MachineCondition,
@@ -621,7 +622,20 @@ export function MachineDetail({
       }
       toast.success("Service record updated");
     } else {
-      const svcNo = generateServiceNumber(machineId);
+      // Task 5 - fixes the audit's worst finding (COUNT+1 over an
+      // in-memory, per-machine list, which collides if any prior
+      // record for this machine was ever deleted). The centralized,
+      // per-machine allocate_service_record_number RPC is now the
+      // primary source; generateServiceNumber's local COUNT+1 is only
+      // a fallback if the RPC call fails.
+      const svcNoResult = await allocateServiceRecordNumber(
+        machineId,
+        machine?.machineCode || "",
+      );
+      const svcNo =
+        svcNoResult.status === "success" && svcNoResult.data
+          ? svcNoResult.data.formattedNumber
+          : generateServiceNumber(machineId);
       const newRecord: ServiceRecord = {
         id: crypto.randomUUID(),
         machineId,

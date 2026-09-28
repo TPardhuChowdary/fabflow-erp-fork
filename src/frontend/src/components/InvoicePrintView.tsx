@@ -184,10 +184,7 @@ export function InvoicePrintView({
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent
-        className="max-w-4xl max-h-[92vh] overflow-y-auto max-sm:!fixed max-sm:!inset-0 max-sm:!max-w-full max-sm:!rounded-none max-sm:!h-screen max-sm:!max-h-screen max-sm:![transform:none]"
-        data-ocid="invoice-print.dialog"
-      >
+      <DialogContent size="preview" data-ocid="invoice-print.dialog">
         <DialogHeader className="no-print">
           <DialogTitle className="flex items-center gap-2 flex-wrap">
             Invoice Preview

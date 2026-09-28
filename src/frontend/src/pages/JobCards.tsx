@@ -100,6 +100,11 @@ import {
 } from "../lib/jobCardCheckpoints";
 import { setJobCardExceptionStatusRemote } from "../lib/jobCardExceptionsApi";
 import type { WriteResult } from "../lib/jobCardsApi";
+import {
+  allocateDocumentNumber,
+  renameDocumentNumber,
+  validateManualNumberEdit,
+} from "../lib/documentNumbering";
 import { computeStageProductionTotals } from "../lib/stageProductionTotals";
 import {
   computeNextJobNo,
@@ -372,6 +377,8 @@ export function JobCards({
 
   const [addOpen, setAddOpen] = useState(false);
   const [editCard, setEditCard] = useState<JobCard | null>(null);
+  // Task 6 - manual document-number editing.
+  const [editJobNo, setEditJobNo] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<JobCard | null>(null);
   const [viewCard, setViewCard] = useState<JobCard | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -995,6 +1002,10 @@ export function JobCards({
 
   const openEdit = (jc: JobCard) => {
     setEditCard(jc);
+    // Task 6 - manual document-number editing, kept separate from
+    // editCard so the original jobNo stays available for the changed/
+    // prefix-preservation check.
+    setEditJobNo(jc.jobNo);
     clearPendingReferencePhoto();
     setPendingDrawingIds([]);
     setReferencePhotoExcludeIds(
@@ -1511,7 +1522,14 @@ export function JobCards({
     if (isSaving || !validate()) return;
     setIsSaving(true);
     try {
-      const jobNo = computeNextJobNo(jobCards.map((jc) => jc.jobNo));
+      // Task 5 - centralized, DB-atomic numbering (allocate_document_
+      // number) is now the primary source; computeNextJobNo's in-memory
+      // MAX+1 is only a fallback if the RPC call fails.
+      const jobNoResult = await allocateDocumentNumber("JC");
+      const jobNo =
+        jobNoResult.status === "success" && jobNoResult.data
+          ? jobNoResult.data.formattedNumber
+          : computeNextJobNo(jobCards.map((jc) => jc.jobNo));
       const result = await createJobCardRemote(
         {
           jobNo,
@@ -1756,8 +1774,24 @@ export function JobCards({
 
   const handleSaveEdit = async () => {
     if (isSaving || !editCard || !validate()) return;
+    // Task 6 - validate the manually-edited number BEFORE any write, so
+    // an invalid/malformed number never partially saves anything.
+    const jobNoChanged = editJobNo.trim() !== editCard.jobNo;
+    if (jobNoChanged) {
+      const validation = validateManualNumberEdit(editJobNo, editCard.jobNo);
+      if (!validation.ok) {
+        toast.error(validation.error);
+        return;
+      }
+    }
     setIsSaving(true);
     try {
+      // Hardening pass - jobNo is now ALWAYS sent unchanged
+      // (editCard.jobNo) through this main fields update; any actual
+      // number change is routed exclusively through the atomic
+      // rename_document_number RPC below, so the number is written
+      // exactly once, by exactly one atomic operation (number+counter
+      // together) - not through this call at all.
       const result = await updateJobCardRemote({
         id: editCard.id,
         jobNo: editCard.jobNo,
@@ -1805,7 +1839,7 @@ export function JobCards({
         toast.error(result.error || "Failed to update Job Card");
         return;
       }
-      updateJobCard({
+      const updatedJobCard = {
         ...result.data,
         isContinuation: form.isContinuation,
         previousJobCardId: form.isContinuation
@@ -1814,7 +1848,23 @@ export function JobCards({
         previousJobCardNo: form.isContinuation
           ? jobCards.find((c) => c.id === form.previousJobCardId)?.jobNo
           : undefined,
-      });
+      };
+      updateJobCard(updatedJobCard);
+      if (jobNoChanged) {
+        const renameResult = await renameDocumentNumber(
+          "JC",
+          editCard.id,
+          editJobNo.trim(),
+        );
+        if (renameResult.status !== "success") {
+          toast.error(
+            renameResult.error ??
+              "Job Card saved, but the number could not be changed.",
+          );
+        } else {
+          updateJobCard({ ...updatedJobCard, jobNo: editJobNo.trim() });
+        }
+      }
       // Continuation Job Card (see chat, and the later corrective pass)
       // — a separate, best-effort call (see updateJobCardContinuation's
       // own comment for why); a failure here must never be reported as
@@ -2527,7 +2577,7 @@ export function JobCards({
                 onOpenChange={setPendingReferencePhotoPreviewOpen}
               >
                 <DialogContent
-                  className="max-w-2xl"
+                  size="preview"
                   data-ocid="jobcards.form.pending_reference_photo_preview_dialog"
                 >
                   <DialogHeader>
@@ -2912,6 +2962,21 @@ export function JobCards({
             <DialogTitle>Edit {editCard?.jobNo}</DialogTitle>
           </DialogHeader>
           <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-4 sm:p-6">
+            {/* Task 6 - manual document-number edit. Preserves the
+                existing prefix/format; uniqueness is enforced by the DB's
+                uq_job_cards_org_jobno constraint. */}
+            <div className="space-y-1 mb-4">
+              <Label htmlFor="jobcard-edit-number" className="text-xs">
+                Job Card Number
+              </Label>
+              <Input
+                id="jobcard-edit-number"
+                className="h-8 text-sm max-w-xs"
+                value={editJobNo}
+                onChange={(e) => setEditJobNo(e.target.value)}
+                data-ocid="jobcards.form.jobno_input"
+              />
+            </div>
             {formFields}
           </div>
           <DialogFooter className="shrink-0 border-t p-4 sm:p-6">

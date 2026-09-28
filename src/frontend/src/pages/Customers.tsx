@@ -407,7 +407,7 @@ export function Customers({ onViewHistory }: Props) {
       </div>
 
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent data-ocid="customers.dialog">
+        <DialogContent size="lg" data-ocid="customers.dialog">
           <DialogHeader>
             <DialogTitle>
               {editing ? "Edit Customer" : "New Customer"}

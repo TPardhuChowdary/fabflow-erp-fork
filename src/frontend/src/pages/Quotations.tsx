@@ -11,6 +11,12 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import { GST_HALF_RATE, IGST_RATE, computeGstIgstTax } from "@/lib/taxCalc";
+import {
+  allocateDocumentNumber,
+  renameDocumentNumber,
+  validateManualNumberEdit,
+} from "@/lib/documentNumbering";
 import {
   Select,
   SelectContent,
@@ -119,35 +125,9 @@ const todayStr = () => new Date().toISOString().split("T")[0];
 
 // §29-31: GST/IGST are opt-in and mutually exclusive; neither applies by
 // default (both false → 0 tax, matching "do not auto-apply 18% or any
-// tax when neither is selected"). Rates are fixed standard rates (18%
-// GST split evenly as 9% CGST + 9% SGST for intra-state, 18% IGST for
-// inter-state) - same numbers Invoice already defaults to - never
-// user-edited, since the checkboxes replace the old free-typed % input
-// entirely.
-const GST_HALF_RATE = 9;
-const IGST_RATE = 18;
-
-function computeQuotationTax(
-  applyGST: boolean,
-  applyIGST: boolean,
-  subtotal: number,
-) {
-  const cgstRate = applyGST ? GST_HALF_RATE : 0;
-  const sgstRate = applyGST ? GST_HALF_RATE : 0;
-  const igstRate = applyIGST ? IGST_RATE : 0;
-  const cgstAmt = Math.round((subtotal * cgstRate) / 100);
-  const sgstAmt = Math.round((subtotal * sgstRate) / 100);
-  const igstAmt = Math.round((subtotal * igstRate) / 100);
-  return {
-    cgstRate,
-    sgstRate,
-    igstRate,
-    cgstAmt,
-    sgstAmt,
-    igstAmt,
-    total: subtotal + cgstAmt + sgstAmt + igstAmt,
-  };
-}
+// tax when neither is selected"). Now shared with Company PO (Task 2) via
+// lib/taxCalc.ts instead of being defined here only.
+const computeQuotationTax = computeGstIgstTax;
 
 const emptyForm = (defaultTerms = "") => ({
   customerId: "",
@@ -228,6 +208,8 @@ export function Quotations({
   const [editMode, setEditMode] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [forceEdit, setForceEdit] = useState(false);
+  // Task 6 - manual document-number editing, kept separate from `form`.
+  const [editQtNo, setEditQtNo] = useState("");
 
   // Quotation detail + Record PO state
   const [printQuotation, setPrintQuotation] = useState<Quotation | null>(null);
@@ -438,6 +420,10 @@ export function Quotations({
       terms: q.terms || "",
       notes: (q as any).notes || q.terms || "",
     });
+    // Task 6 - manual number editing. Kept as its own state, separate
+    // from `form`, since qtNo is otherwise excluded from that type
+    // everywhere else in this file (see QuotationWritable).
+    setEditQtNo(q.qtNo);
     setEditingId(q.id);
     setEditMode(true);
     setRevisionMode(false);
@@ -490,6 +476,7 @@ export function Quotations({
     setEditingId(null);
     setRevisionMode(false);
     setForceEdit(false);
+    setEditQtNo("");
   };
 
   const handleSave = async () => {
@@ -631,6 +618,17 @@ export function Quotations({
           -10,
         );
 
+        // Task 6 - validate the manually-edited number BEFORE any write,
+        // so an invalid/malformed number never partially saves anything.
+        const qtNoChanged = editQtNo.trim() !== existing.qtNo;
+        if (qtNoChanged) {
+          const validation = validateManualNumberEdit(editQtNo, existing.qtNo);
+          if (!validation.ok) {
+            toast.error(validation.error);
+            return;
+          }
+        }
+
         const result = await updateQuotationRemote({
           id: editingId,
           customerId: form.customerId,
@@ -666,11 +664,42 @@ export function Quotations({
           toast.error("Could not save quotation");
           return;
         }
+        let savedQuotation = result.data;
         updateQuotation({
-          ...result.data,
+          ...savedQuotation,
           approvedBy: existing.approvedBy,
           recordedPO: existing.recordedPO,
         });
+
+        // Hardening pass - number+counter are now one atomic RPC call
+        // (rename_document_number): qtNo is still a separate write from
+        // the main fields update above (structurally excluded from
+        // updateQuotationRemote/QuotationWritable), so that boundary is
+        // unchanged and still honestly not atomic with the main save -
+        // but the rename itself and the counter advance are now
+        // guaranteed atomic with each other (single DB transaction): if
+        // the rename fails (e.g. duplicate), the counter is never
+        // touched.
+        if (qtNoChanged) {
+          const renameResult = await renameDocumentNumber(
+            "QT",
+            editingId,
+            editQtNo.trim(),
+          );
+          if (renameResult.status !== "success") {
+            toast.error(
+              renameResult.error ??
+                "Quotation saved, but the number could not be changed.",
+            );
+          } else {
+            savedQuotation = { ...savedQuotation, qtNo: editQtNo.trim() };
+            updateQuotation({
+              ...savedQuotation,
+              approvedBy: existing.approvedBy,
+              recordedPO: existing.recordedPO,
+            });
+          }
+        }
 
         // Keep the current revision's snapshot in sync with the same edit
         // (dates/notes/tax-rate corrections on the current, unaccepted
@@ -710,7 +739,17 @@ export function Quotations({
           toast.error("Set a Valid Until date.");
           return;
         }
-        const qtNo = generateDocNo("QT");
+        // Task 5 - centralized, DB-atomic numbering (allocate_document_
+        // number RPC) is now the primary source; generateDocNo("QT")'s
+        // local per-browser counter is only a fallback if the RPC call
+        // itself fails (e.g. offline), so quotation creation still works
+        // - createQuotationRemote's own existing retry-on-conflict logic
+        // (computeNextQtNumber) remains as a second safety net either way.
+        const numberResult = await allocateDocumentNumber("QT");
+        const qtNo =
+          numberResult.status === "success" && numberResult.data
+            ? numberResult.data.formattedNumber
+            : generateDocNo("QT");
         const createResult = await createQuotationRemote({
           qtNo,
           customerId: form.customerId,
@@ -1479,6 +1518,24 @@ export function Quotations({
               )}
             </DialogTitle>
           </DialogHeader>
+
+          {/* Task 6 - manual document-number edit. Preserves the existing
+              prefix/format (validateManualNumberEdit); uniqueness is
+              enforced by the DB's uq_quotations_org_qtno constraint. */}
+          {editMode && (
+            <div className="space-y-1">
+              <Label htmlFor="quotation-edit-number" className="text-xs">
+                Quotation Number
+              </Label>
+              <Input
+                id="quotation-edit-number"
+                className="h-8 text-sm max-w-xs"
+                value={editQtNo}
+                onChange={(e) => setEditQtNo(e.target.value)}
+                data-ocid="quotations.form.qtno_input"
+              />
+            </div>
+          )}
 
           {/* Admin Force Edit banner (shown when PO is recorded and editing) */}
           {editMode && hasRecordedPO && isAdmin && (

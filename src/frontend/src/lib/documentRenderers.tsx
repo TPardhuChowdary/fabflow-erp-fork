@@ -1425,7 +1425,46 @@ export function CompanyPODocContent({ id, po, settings }: CompanyPODocProps) {
             <span style={{ color: "#666" }}>Subtotal</span>
             <span>{fmtPO(po.subtotal ?? 0)}</span>
           </div>
-          {(po.gstPercent || 0) > 0 && (
+          {po.applyGST && (
+            <>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  padding: "7px 12px",
+                  borderBottom: "1px solid #eee",
+                }}
+              >
+                <span style={{ color: "#666" }}>CGST ({po.cgstRate}%)</span>
+                <span>{fmtPO(po.cgstAmt ?? 0)}</span>
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  padding: "7px 12px",
+                  borderBottom: "1px solid #eee",
+                }}
+              >
+                <span style={{ color: "#666" }}>SGST ({po.sgstRate}%)</span>
+                <span>{fmtPO(po.sgstAmt ?? 0)}</span>
+              </div>
+            </>
+          )}
+          {po.applyIGST && (
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                padding: "7px 12px",
+                borderBottom: "1px solid #eee",
+              }}
+            >
+              <span style={{ color: "#666" }}>IGST ({po.igstRate}%)</span>
+              <span>{fmtPO(po.igstAmt ?? 0)}</span>
+            </div>
+          )}
+          {!po.applyGST && !po.applyIGST && (po.gstPercent || 0) > 0 && (
             <div
               style={{
                 display: "flex",

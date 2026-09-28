@@ -42,6 +42,11 @@ import {
 } from "../lib/machinesApi";
 import { canCreate, canDelete, canEdit, canView } from "../permissions";
 import { useStore } from "../store";
+import {
+  allocateDocumentNumber,
+  renameDocumentNumber,
+  validateManualNumberEdit,
+} from "../lib/documentNumbering";
 import type { Machine, MachineStatus, MachineType } from "../types";
 
 const MACHINE_TYPES: MachineType[] = [
@@ -225,9 +230,29 @@ export function Machinery({ onViewMachine }: Props) {
     // rejected/failed write never leaves local state claiming a save that
     // didn't happen.
     if (editingMachine) {
+      // Task 6 - validate the manually-edited number BEFORE any write,
+      // so an invalid/malformed number never partially saves anything.
+      const machineCodeChanged =
+        (form.machineCode || "").trim() !== editingMachine.machineCode;
+      if (machineCodeChanged) {
+        const validation = validateManualNumberEdit(
+          form.machineCode || "",
+          editingMachine.machineCode,
+        );
+        if (!validation.ok) {
+          toast.error(validation.error);
+          return;
+        }
+      }
+      // Hardening pass - machineCode is now ALWAYS sent unchanged
+      // through this main fields update; any actual number change is
+      // routed exclusively through the atomic rename_document_number
+      // RPC below, so the number is written exactly once, atomically
+      // with the counter advance.
       const result = await updateMachineRemote({
         ...editingMachine,
         ...form,
+        machineCode: editingMachine.machineCode,
         updatedAt: Date.now(),
       } as Machine);
       if (result.status === "unauthenticated") {
@@ -246,9 +271,35 @@ export function Machinery({ onViewMachine }: Props) {
       }
       updateMachine(result.data);
       toast.success("Machine updated");
+      if (machineCodeChanged) {
+        const renameResult = await renameDocumentNumber(
+          "MCH",
+          editingMachine.id,
+          (form.machineCode || "").trim(),
+        );
+        if (renameResult.status !== "success") {
+          toast.error(
+            renameResult.error ??
+              "Machine saved, but the code could not be changed.",
+          );
+        } else {
+          updateMachine({
+            ...result.data,
+            machineCode: (form.machineCode || "").trim(),
+          });
+        }
+      }
     } else {
+      // Task 5 - centralized, DB-atomic numbering is now the primary
+      // source; generateMachineCode()'s local counter is only a
+      // fallback if the RPC call fails.
+      const machineCodeResult = await allocateDocumentNumber("MCH");
+      const machineCode =
+        machineCodeResult.status === "success" && machineCodeResult.data
+          ? machineCodeResult.data.formattedNumber
+          : generateMachineCode();
       const result = await createMachineRemote({
-        machineCode: generateMachineCode(),
+        machineCode,
         name: form.name!,
         type: form.type!,
         brand: form.brand,
@@ -592,6 +643,25 @@ export function Machinery({ onViewMachine }: Props) {
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-5 py-2">
+            {/* Task 6 - manual document-number edit. Preserves the
+                existing prefix/format; uniqueness is enforced by the
+                DB's uq_machines_org_code constraint. */}
+            {editingMachine && (
+              <div className="space-y-1">
+                <Label htmlFor="machine-edit-code" className="text-xs">
+                  Machine Code
+                </Label>
+                <Input
+                  id="machine-edit-code"
+                  className="h-8 text-sm max-w-xs"
+                  value={form.machineCode || ""}
+                  onChange={(e) =>
+                    setForm({ ...form, machineCode: e.target.value })
+                  }
+                  data-ocid="machinery.form.machine_code_input"
+                />
+              </div>
+            )}
             {/* Basic Info */}
             <div>
               <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wide mb-3">

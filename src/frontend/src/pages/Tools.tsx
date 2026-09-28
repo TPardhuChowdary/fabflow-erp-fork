@@ -49,6 +49,11 @@ import {
   hasPermission,
 } from "../permissions";
 import { useStore } from "../store";
+import {
+  allocateDocumentNumber,
+  renameDocumentNumber,
+  validateManualNumberEdit,
+} from "../lib/documentNumbering";
 import type { MachineCondition, Tool, ToolStatus } from "../types";
 
 const TOOL_STATUSES: ToolStatus[] = [
@@ -260,9 +265,29 @@ export function Tools({ onViewTool }: ToolsProps = {}) {
     setIsSaving(true);
     try {
       if (editingTool) {
+        // Task 6 - validate the manually-edited number BEFORE any write,
+        // so an invalid/malformed number never partially saves anything.
+        const toolCodeChanged =
+          (form.toolCode || "").trim() !== editingTool.toolCode;
+        if (toolCodeChanged) {
+          const validation = validateManualNumberEdit(
+            form.toolCode || "",
+            editingTool.toolCode,
+          );
+          if (!validation.ok) {
+            toast.error(validation.error);
+            return;
+          }
+        }
+        // Hardening pass - toolCode is now ALWAYS sent unchanged through
+        // this main fields update; any actual number change is routed
+        // exclusively through the atomic rename_document_number RPC
+        // below, so the number is written exactly once, atomically with
+        // the counter advance.
         const result = await updateToolRemote({
           ...editingTool,
           ...form,
+          toolCode: editingTool.toolCode,
           updatedAt: Date.now(),
         } as Tool);
         if (result.status === "unauthenticated") {
@@ -281,9 +306,35 @@ export function Tools({ onViewTool }: ToolsProps = {}) {
         }
         updateTool(result.data);
         toast.success("Tool updated");
+        if (toolCodeChanged) {
+          const renameResult = await renameDocumentNumber(
+            "TL",
+            editingTool.id,
+            (form.toolCode || "").trim(),
+          );
+          if (renameResult.status !== "success") {
+            toast.error(
+              renameResult.error ??
+                "Tool saved, but the code could not be changed.",
+            );
+          } else {
+            updateTool({
+              ...result.data,
+              toolCode: (form.toolCode || "").trim(),
+            });
+          }
+        }
       } else {
+        // Task 5 - centralized, DB-atomic numbering is now the primary
+        // source; generateToolCode()'s local counter is only a fallback
+        // if the RPC call fails.
+        const toolCodeResult = await allocateDocumentNumber("TL");
+        const toolCode =
+          toolCodeResult.status === "success" && toolCodeResult.data
+            ? toolCodeResult.data.formattedNumber
+            : generateToolCode();
         const result = await createToolRemote({
-          toolCode: generateToolCode(),
+          toolCode,
           name: form.name!,
           category: form.category,
           quantity: form.quantity ? Number(form.quantity) : 1,
@@ -605,6 +656,25 @@ export function Tools({ onViewTool }: ToolsProps = {}) {
             <DialogTitle>{editingTool ? "Edit Tool" : "Add Tool"}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 py-2">
+            {/* Task 6 - manual document-number edit. Preserves the
+                existing prefix/format; uniqueness is enforced by the
+                DB's uq_tools_org_code constraint. */}
+            {editingTool && (
+              <div className="space-y-1.5">
+                <Label htmlFor="tool-edit-code" className="text-xs">
+                  Tool Code
+                </Label>
+                <Input
+                  id="tool-edit-code"
+                  className="h-8 text-sm max-w-xs"
+                  value={form.toolCode || ""}
+                  onChange={(e) =>
+                    setForm({ ...form, toolCode: e.target.value })
+                  }
+                  data-ocid="tools.form.tool_code_input"
+                />
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5 col-span-2 flex items-start gap-3">
                 <div className="shrink-0">

@@ -1814,10 +1814,25 @@ export interface CompanyPO {
   deliveryAddress?: string;
   expectedDeliveryDate?: string;
   status: CompanyPOStatus;
+  // Legacy flat-GST field (Phase 21B) - kept for backward compatibility
+  // with pre-existing POs, no longer written to by the UI. See
+  // applyGST/applyIGST below (Task 2, mirrors Quotation's §29-31 shape).
   gstPercent?: number;
   subtotal: number;
   gstAmount: number;
   grandTotal: number;
+  // GST/IGST are opt-in and mutually exclusive, same shape and
+  // computeGstIgstTax() helper (lib/taxCalc.ts) as Quotation. Optional so
+  // rows saved before this feature existed parse fine (both undefined ==
+  // no tax selected, consistent with the legacy gstPercent path above).
+  applyGST?: boolean;
+  applyIGST?: boolean;
+  cgstRate?: number;
+  sgstRate?: number;
+  igstRate?: number;
+  cgstAmt?: number;
+  sgstAmt?: number;
+  igstAmt?: number;
   termsAndConditions?: string;
   notes?: string;
   file?: PurchaseAttachment;

@@ -1201,6 +1201,8 @@ export const COMPANY_PO_COLUMNS =
   "id, cpo_number, vendor_id, vendor_name, vendor_address, vendor_gst, " +
   "vendor_contact, items, delivery_address, expected_delivery_date, " +
   "status, gst_percent, subtotal, gst_amount, grand_total, " +
+  "apply_gst, apply_igst, cgst_rate, sgst_rate, igst_rate, " +
+  "cgst_amt, sgst_amt, igst_amt, " +
   "terms_and_conditions, notes, file, created_at";
 
 export interface CompanyPORow {
@@ -1219,6 +1221,14 @@ export interface CompanyPORow {
   subtotal: number;
   gst_amount: number;
   grand_total: number;
+  apply_gst: boolean | null;
+  apply_igst: boolean | null;
+  cgst_rate: number | null;
+  sgst_rate: number | null;
+  igst_rate: number | null;
+  cgst_amt: number | null;
+  sgst_amt: number | null;
+  igst_amt: number | null;
   terms_and_conditions: string | null;
   notes: string | null;
   file: PurchaseAttachment | null;
@@ -1244,6 +1254,14 @@ export function transformCompanyPORow(row: CompanyPORow): CompanyPO {
     subtotal: row.subtotal,
     gstAmount: row.gst_amount,
     grandTotal: row.grand_total,
+    applyGST: row.apply_gst ?? undefined,
+    applyIGST: row.apply_igst ?? undefined,
+    cgstRate: row.cgst_rate ?? undefined,
+    sgstRate: row.sgst_rate ?? undefined,
+    igstRate: row.igst_rate ?? undefined,
+    cgstAmt: row.cgst_amt ?? undefined,
+    sgstAmt: row.sgst_amt ?? undefined,
+    igstAmt: row.igst_amt ?? undefined,
     termsAndConditions: row.terms_and_conditions ?? undefined,
     notes: row.notes ?? undefined,
     file: row.file ?? undefined,

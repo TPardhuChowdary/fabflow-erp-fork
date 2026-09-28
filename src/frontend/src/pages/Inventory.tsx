@@ -1241,7 +1241,7 @@ export function Inventory({
           }
         }}
       >
-        <DialogContent className="max-w-sm">
+        <DialogContent size="lg">
           <DialogHeader>
             <DialogTitle>Edit Material</DialogTitle>
           </DialogHeader>
@@ -1589,7 +1589,7 @@ export function Inventory({
 
       {/* Add Material Dialog */}
       <Dialog open={addDialog} onOpenChange={setAddDialog}>
-        <DialogContent className="max-w-sm">
+        <DialogContent size="lg">
           <DialogHeader>
             <DialogTitle>Add Material to Inventory</DialogTitle>
           </DialogHeader>
@@ -1818,7 +1818,7 @@ export function Inventory({
           if (!open) closePurchaseDialog();
         }}
       >
-        <DialogContent className="max-w-sm">
+        <DialogContent size="lg">
           <DialogHeader>
             <DialogTitle>
               {editingPurchase ? "Edit Purchase" : "Record Purchase"}

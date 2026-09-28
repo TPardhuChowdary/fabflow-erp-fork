@@ -77,7 +77,7 @@ export function WorkDrawingPreviewDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[92vh] overflow-y-auto">
+      <DialogContent size="preview">
         <DialogHeader>
           <DialogTitle className="truncate pr-8">
             {drawing?.fileName}
@@ -108,7 +108,7 @@ export function WorkDrawingPreviewDialog({
                 <Printer className="w-3.5 h-3.5" /> Print
               </Button>
             </div>
-            <div className="border rounded-md overflow-auto max-h-[70vh] bg-muted/30 flex items-center justify-center">
+            <div className="border rounded-md overflow-auto max-h-[80vh] bg-muted/30 flex items-center justify-center">
               <img
                 src={imageUrl}
                 alt={`${drawing?.fileName} — Work Order preview`}

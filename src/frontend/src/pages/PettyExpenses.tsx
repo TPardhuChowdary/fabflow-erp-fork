@@ -53,6 +53,11 @@ import {
   updateExpenseFloatRemote,
   updatePettyExpenseRemote,
 } from "../lib/expenseFloatsApi";
+import {
+  allocateDocumentNumber,
+  renameDocumentNumber,
+  validateManualNumberEdit,
+} from "../lib/documentNumbering";
 import { createInventoryPurchaseRemote } from "../lib/inventoryPurchasesApi";
 import { createVendorRemote } from "../lib/vendorsApi";
 import { canView, hasPermission } from "../permissions";
@@ -458,6 +463,8 @@ function PettyExpensesInner({
   const [floatDialogOpen, setFloatDialogOpen] = useState(false);
   const [floatForm, setFloatForm] = useState(emptyFloatForm());
   const [editingFloat, setEditingFloat] = useState<ExpenseFloat | null>(null);
+  // Task 6 - manual document-number editing.
+  const [editFloatNo, setEditFloatNo] = useState("");
   const [isSavingFloat, setIsSavingFloat] = useState(false);
   const [settleDialogOpen, setSettleDialogOpen] = useState(false);
   const [settleTargetId, setSettleTargetId] = useState<string>("");
@@ -707,6 +714,7 @@ function PettyExpensesInner({
       notes: f.notes || "",
       projectId: f.projectId || "",
     });
+    setEditFloatNo(f.floatNo);
     setFloatDialogOpen(true);
   };
 
@@ -723,6 +731,19 @@ function PettyExpensesInner({
     setIsSavingFloat(true);
     try {
       if (editingFloat) {
+        // Task 6 - validate the manually-edited number BEFORE any write,
+        // so an invalid/malformed number never partially saves anything.
+        const floatNoChanged = editFloatNo.trim() !== editingFloat.floatNo;
+        if (floatNoChanged) {
+          const validation = validateManualNumberEdit(
+            editFloatNo,
+            editingFloat.floatNo,
+          );
+          if (!validation.ok) {
+            toast.error(validation.error);
+            return;
+          }
+        }
         const result = await updateExpenseFloatRemote({
           id: editingFloat.id,
           employeeId: floatForm.employeeId,
@@ -749,12 +770,45 @@ function PettyExpensesInner({
           issuedBy: editingFloat.issuedBy,
         });
         toast.success("Float updated");
+
+        // Hardening pass - number+counter are now one atomic RPC call
+        // (rename_document_number): float_no is still a separate write
+        // from the main fields update above (structurally excluded from
+        // updateExpenseFloatRemote), so that boundary is unchanged and
+        // still honestly not atomic with the main save - but the rename
+        // itself and the counter advance are now guaranteed atomic with
+        // each other (single DB transaction): if the rename fails (e.g.
+        // duplicate), the counter is never touched.
+        if (floatNoChanged) {
+          const renameResult = await renameDocumentNumber(
+            "FLT",
+            editingFloat.id,
+            editFloatNo.trim(),
+          );
+          if (renameResult.status !== "success") {
+            toast.error(
+              renameResult.error ??
+                "Float saved, but the number could not be changed.",
+            );
+          } else {
+            updateExpenseFloat({
+              ...result.data,
+              floatNo: editFloatNo.trim(),
+              issuedBy: editingFloat.issuedBy,
+            });
+          }
+        }
       } else {
-        // First-guess number from the local counter, purely for UX -
-        // createExpenseFloatRemote's bounded retry recomputes from live
-        // server state on any real collision.
+        // Task 5 - centralized, DB-atomic numbering is now the primary
+        // source; the local floatCounter guess is only a fallback if
+        // the RPC call fails - createExpenseFloatRemote's bounded retry
+        // still recomputes from live server state on any real collision.
+        const floatNoResult = await allocateDocumentNumber("FLT");
         const num = (floatCounter || 0) + 1;
-        const floatNo = `FLT-${new Date().getFullYear()}-${String(num).padStart(3, "0")}`;
+        const floatNo =
+          floatNoResult.status === "success" && floatNoResult.data
+            ? floatNoResult.data.formattedNumber
+            : `FLT-${new Date().getFullYear()}-${String(num).padStart(3, "0")}`;
         const result = await createExpenseFloatRemote({
           floatNo,
           employeeId: floatForm.employeeId,
@@ -1994,6 +2048,24 @@ function PettyExpensesInner({
             </DialogTitle>
           </DialogHeader>
           <div className="space-y-4 py-2">
+            {/* Task 6 - manual document-number edit. Preserves the
+                existing prefix/format; uniqueness is enforced by the
+                DB's expense_floats_organization_id_float_no_key
+                constraint. */}
+            {editingFloat && (
+              <div className="space-y-1.5">
+                <Label htmlFor="float-edit-number" className="text-xs">
+                  Float Number
+                </Label>
+                <Input
+                  id="float-edit-number"
+                  className="h-8 text-sm max-w-xs"
+                  value={editFloatNo}
+                  onChange={(e) => setEditFloatNo(e.target.value)}
+                  data-ocid="petty_expenses.float_form.float_no_input"
+                />
+              </div>
+            )}
             <div className="space-y-1.5">
               <Label>Employee *</Label>
               <SearchableSelect

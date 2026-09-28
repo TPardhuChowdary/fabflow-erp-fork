@@ -76,6 +76,7 @@ import {
   computeNextEmployeeCode,
   updateEmployeeRemote,
 } from "../lib/employeesApi";
+import { allocateDocumentNumber } from "../lib/documentNumbering";
 import { generateEmployeeIdCardPdf } from "../lib/generateEmployeeIdCardPdf";
 import { createSalaryPaymentRemote } from "../lib/salaryPaymentsApi";
 import { canUpload, hasPermission } from "../permissions";
@@ -188,16 +189,26 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
       // assignEmployeeCodeRemote retries against fresh server state on a
       // genuine unique-index collision, same "Option 1" pattern already
       // used for project/quotation/float numbers.
-      const code = computeNextEmployeeCode(
-        employees.map((e) => e.employeeCode).filter((c): c is string => !!c),
-      );
-      assignEmployeeCodeRemote(employee, code).then((result) => {
-        if (result.status === "success" && result.data) {
-          updateEmployee({ ...result.data, userId: employee.userId });
-        }
-        // unauthenticated/error/denied: leave Zustand untouched, no
-        // fabricated success. The effect will simply retry on the next
-        // mount/employee change since employeeCode is still unset.
+      // Task 5 - centralized, DB-atomic numbering is now the primary
+      // source; computeNextEmployeeCode's in-memory MAX+1 is only a
+      // fallback if the RPC call fails.
+      allocateDocumentNumber("EMP").then((numberResult) => {
+        const code =
+          numberResult.status === "success" && numberResult.data
+            ? numberResult.data.formattedNumber
+            : computeNextEmployeeCode(
+                employees
+                  .map((e) => e.employeeCode)
+                  .filter((c): c is string => !!c),
+              );
+        assignEmployeeCodeRemote(employee, code).then((result) => {
+          if (result.status === "success" && result.data) {
+            updateEmployee({ ...result.data, userId: employee.userId });
+          }
+          // unauthenticated/error/denied: leave Zustand untouched, no
+          // fabricated success. The effect will simply retry on the next
+          // mount/employee change since employeeCode is still unset.
+        });
       });
     }
   }, [employee, canEditEmp, updateEmployee, employees]);
@@ -1011,9 +1022,13 @@ export function EmployeeDetail({ employeeId, onBack, initialTab }: Props) {
   // the JSX below), matching the employees_update RLS policy.
   const handleRegenerateIdCard = async () => {
     if (employee && !employee.employeeCode) {
-      const code = computeNextEmployeeCode(
-        employees.map((e) => e.employeeCode).filter((c): c is string => !!c),
-      );
+      const numberResult = await allocateDocumentNumber("EMP");
+      const code =
+        numberResult.status === "success" && numberResult.data
+          ? numberResult.data.formattedNumber
+          : computeNextEmployeeCode(
+              employees.map((e) => e.employeeCode).filter((c): c is string => !!c),
+            );
       const result = await assignEmployeeCodeRemote(employee, code);
       if (result.status === "success" && result.data) {
         updateEmployee({ ...result.data, userId: employee.userId });

@@ -89,10 +89,7 @@ export function MachinePrintView({ machine, open, onClose }: Props) {
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent
-        className="max-w-3xl max-h-[92vh] overflow-y-auto max-sm:!fixed max-sm:!inset-0 max-sm:!max-w-full max-sm:!rounded-none max-sm:!h-screen max-sm:!max-h-screen max-sm:![transform:none]"
-        data-ocid="machine-print.dialog"
-      >
+      <DialogContent size="preview" data-ocid="machine-print.dialog">
         <DialogHeader className="no-print">
           <DialogTitle>Machine Sheet Preview</DialogTitle>
         </DialogHeader>

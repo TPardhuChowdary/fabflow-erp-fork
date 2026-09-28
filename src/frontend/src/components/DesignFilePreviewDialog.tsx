@@ -497,7 +497,7 @@ export function DesignFilePreviewDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[92vh] overflow-y-auto">
+      <DialogContent size="preview">
         <DialogHeader>
           <DialogTitle className="truncate pr-8">{file?.fileName}</DialogTitle>
           <DialogDescription className="sr-only">

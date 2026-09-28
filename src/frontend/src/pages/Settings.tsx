@@ -61,6 +61,7 @@ import {
   Copy,
   Edit2,
   Eye,
+  Hash,
   History,
   Info,
   KeyRound,
@@ -133,7 +134,13 @@ import {
   setUserActive,
   setUserRole,
 } from "../lib/settingsUsersApi";
-import { canView, hasPermission } from "../permissions";
+import {
+  type DocumentCounterKey,
+  type DocumentNumberingSetting,
+  getDocumentNumberingSettings,
+  setDocumentNumbering,
+} from "../lib/documentNumbering";
+import { canEdit, canView, hasPermission } from "../permissions";
 import { getModulesByCategory } from "../permissions";
 import { useStore } from "../store";
 import type { AppSettings } from "../types";
@@ -1072,6 +1079,15 @@ export function Settings() {
       >
         <UserManagement />
         <AccountRecoveryCard />
+      </SettingsSection>
+
+      {/* Task 8 - centralized document numbering configuration. */}
+      <SettingsSection
+        title="Document Numbering"
+        description="Prefix and next number for every document type FabFlow generates."
+        icon={Hash}
+      >
+        <DocumentNumberingCard />
       </SettingsSection>
 
       {/* Data */}
@@ -2884,6 +2900,248 @@ function ResetPasswordDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+// Task 8 - "Document Numbering" settings section. Lists every
+// centrally-numbered document type (Task 5's document_numbering_
+// settings/document_counters, via allocate_document_number/set_
+// document_numbering RPCs) with its Prefix, Next Number, and a live
+// Preview - the exact layout the task specified. Only a settings-edit-
+// permitted user sees editable inputs; a view-only user sees the same
+// data read-only, matching the RPC's own has_permission('settings',
+// 'edit') / ('settings', 'view') enforcement server-side (this
+// component's own canEdit() check is a UX convenience, never the real
+// security boundary - the RPC re-checks unconditionally). No database
+// ID is ever shown - only the human counter_key label and its config.
+const NUMBERING_LABELS: Record<DocumentCounterKey, string> = {
+  INV: "Invoice",
+  QT: "Quotation",
+  JC: "Job Card",
+  CPO: "Company PO",
+  DC: "Delivery Challan",
+  PROJ: "Project",
+  FLT: "Expense Float",
+  EMP: "Employee Code",
+  MCH: "Machine Code",
+  TL: "Tool Code",
+  DIE: "Die Code",
+};
+
+function formatNumberingPreview(setting: DocumentNumberingSetting): string {
+  const year = new Date().getFullYear();
+  const seq = String(setting.nextNumber).padStart(setting.digitWidth, "0");
+  return setting.includeYear
+    ? `${setting.prefix}${year}-${seq}`
+    : `${setting.prefix}${seq}`;
+}
+
+function DocumentNumberingCard() {
+  const { currentUser } = useAuth();
+  const canEditNumbering = canEdit(currentUser, "settings");
+  const [rows, setRows] = useState<DocumentNumberingSetting[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [drafts, setDrafts] = useState<
+    Record<string, { prefix: string; nextNumber: string }>
+  >({});
+  const [confirmKey, setConfirmKey] = useState<DocumentCounterKey | null>(
+    null,
+  );
+  const [saving, setSaving] = useState<DocumentCounterKey | null>(null);
+
+  const load = async () => {
+    setLoading(true);
+    const result = await getDocumentNumberingSettings();
+    if (result.status === "success" && result.data) {
+      setRows(result.data);
+      setDrafts(
+        Object.fromEntries(
+          result.data.map((r) => [
+            r.counterKey,
+            { prefix: r.prefix, nextNumber: String(r.nextNumber) },
+          ]),
+        ),
+      );
+    } else if (result.status !== "unauthenticated") {
+      // A denied/error result here just means the card stays empty -
+      // most likely a view-only user (get_document_numbering_settings
+      // itself requires settings:view), not worth a toast on a page
+      // load.
+      setRows([]);
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleSave = async (key: DocumentCounterKey) => {
+    const draft = drafts[key];
+    if (!draft) return;
+    const nextNumber = Number.parseInt(draft.nextNumber, 10);
+    if (!draft.prefix.trim()) {
+      toast.error("Prefix is required");
+      return;
+    }
+    if (!Number.isFinite(nextNumber) || nextNumber < 1) {
+      toast.error("Next Number must be at least 1");
+      return;
+    }
+    setSaving(key);
+    try {
+      const result = await setDocumentNumbering(
+        key,
+        draft.prefix.trim(),
+        nextNumber,
+      );
+      if (result.status === "success") {
+        toast.success(`${NUMBERING_LABELS[key]} numbering updated`);
+        setConfirmKey(null);
+        await load();
+      } else {
+        toast.error(result.error ?? "Could not update numbering");
+      }
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  return (
+    <Card data-ocid="settings.document_numbering.card">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm font-semibold flex items-center gap-2">
+          <Hash className="w-4 h-4 text-primary" />
+          Document Numbering
+        </CardTitle>
+        <p className="text-xs text-muted-foreground">
+          Set the prefix and next number for each document type FabFlow
+          generates. Changing Next Number only affects documents created
+          from now on - existing documents are never renumbered.
+        </p>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {loading && (
+          <p className="text-xs text-muted-foreground">Loading...</p>
+        )}
+        {!loading && rows && rows.length === 0 && (
+          <p className="text-xs text-muted-foreground">
+            You don't have permission to view document numbering settings.
+          </p>
+        )}
+        {!loading &&
+          rows &&
+          rows.map((row) => {
+            const draft = drafts[row.counterKey] ?? {
+              prefix: row.prefix,
+              nextNumber: String(row.nextNumber),
+            };
+            const preview = formatNumberingPreview({
+              ...row,
+              prefix: draft.prefix,
+              nextNumber: Number.parseInt(draft.nextNumber, 10) || 0,
+            });
+            const dirty =
+              draft.prefix !== row.prefix ||
+              draft.nextNumber !== String(row.nextNumber);
+            return (
+              <div
+                key={row.counterKey}
+                className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_1fr_auto] gap-2 items-end border-b border-border pb-3 last:border-0 last:pb-0"
+                data-ocid={`settings.document_numbering.row.${row.counterKey}`}
+              >
+                <div className="space-y-1">
+                  <Label className="text-xs">Document Type</Label>
+                  <p className="text-sm font-medium">
+                    {NUMBERING_LABELS[row.counterKey]}
+                  </p>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Prefix</Label>
+                  <Input
+                    className="h-8 text-sm"
+                    value={draft.prefix}
+                    disabled={!canEditNumbering}
+                    onChange={(e) =>
+                      setDrafts((d) => ({
+                        ...d,
+                        [row.counterKey]: {
+                          ...draft,
+                          prefix: e.target.value,
+                        },
+                      }))
+                    }
+                    data-ocid={`settings.document_numbering.${row.counterKey}.prefix`}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Next Number</Label>
+                  <Input
+                    className="h-8 text-sm"
+                    type="number"
+                    min={1}
+                    value={draft.nextNumber}
+                    disabled={!canEditNumbering}
+                    onChange={(e) =>
+                      setDrafts((d) => ({
+                        ...d,
+                        [row.counterKey]: {
+                          ...draft,
+                          nextNumber: e.target.value,
+                        },
+                      }))
+                    }
+                    data-ocid={`settings.document_numbering.${row.counterKey}.next_number`}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Preview</Label>
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-mono">{preview}</p>
+                    {canEditNumbering && dirty && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="h-7 text-xs"
+                        disabled={saving === row.counterKey}
+                        onClick={() => setConfirmKey(row.counterKey)}
+                        data-ocid={`settings.document_numbering.${row.counterKey}.save`}
+                      >
+                        Save
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+      </CardContent>
+      <AlertDialog
+        open={confirmKey !== null}
+        onOpenChange={(open) => !open && setConfirmKey(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Change document numbering?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {confirmKey &&
+                `This changes the next ${NUMBERING_LABELS[confirmKey]} number to ${drafts[confirmKey]?.nextNumber}. Every ${NUMBERING_LABELS[confirmKey]} created from now on will continue from there. Existing documents are not affected.`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => confirmKey && handleSave(confirmKey)}
+              disabled={saving !== null}
+            >
+              Confirm
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </Card>
   );
 }
 

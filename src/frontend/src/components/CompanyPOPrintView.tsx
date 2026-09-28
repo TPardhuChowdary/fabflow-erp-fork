@@ -103,10 +103,7 @@ export function CompanyPOPrintView({ po, open, onClose }: Props) {
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent
-        className="max-w-4xl max-h-[92vh] overflow-y-auto max-sm:!fixed max-sm:!inset-0 max-sm:!max-w-full max-sm:!rounded-none max-sm:!h-screen max-sm:!max-h-screen max-sm:![transform:none]"
-        data-ocid="company-po-print.dialog"
-      >
+      <DialogContent size="preview" data-ocid="company-po-print.dialog">
         <DialogHeader className="no-print">
           <DialogTitle>Purchase Order Preview</DialogTitle>
         </DialogHeader>
@@ -477,7 +474,50 @@ export function CompanyPOPrintView({ po, open, onClose }: Props) {
                 <span style={{ color: "#666" }}>Subtotal</span>
                 <span>{fmt(po.subtotal ?? 0)}</span>
               </div>
-              {(po.gstPercent || 0) > 0 && (
+              {po.applyGST && (
+                <>
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      padding: "7px 12px",
+                      borderBottom: "1px solid #eee",
+                    }}
+                  >
+                    <span style={{ color: "#666" }}>
+                      CGST ({po.cgstRate}%)
+                    </span>
+                    <span>{fmt(po.cgstAmt ?? 0)}</span>
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      padding: "7px 12px",
+                      borderBottom: "1px solid #eee",
+                    }}
+                  >
+                    <span style={{ color: "#666" }}>
+                      SGST ({po.sgstRate}%)
+                    </span>
+                    <span>{fmt(po.sgstAmt ?? 0)}</span>
+                  </div>
+                </>
+              )}
+              {po.applyIGST && (
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    padding: "7px 12px",
+                    borderBottom: "1px solid #eee",
+                  }}
+                >
+                  <span style={{ color: "#666" }}>IGST ({po.igstRate}%)</span>
+                  <span>{fmt(po.igstAmt ?? 0)}</span>
+                </div>
+              )}
+              {!po.applyGST && !po.applyIGST && (po.gstPercent || 0) > 0 && (
                 <div
                   style={{
                     display: "flex",

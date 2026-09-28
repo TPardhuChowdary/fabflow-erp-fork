@@ -608,7 +608,7 @@ export function AssetPhotoGallery({
         open={previewIndex !== null}
         onOpenChange={(o) => !o && setPreviewIndex(null)}
       >
-        <DialogContent className="max-w-2xl">
+        <DialogContent size="preview">
           <DialogTitle className="sr-only">
             {previewPhoto?.caption ||
               previewPhoto?.originalFilename ||
@@ -622,7 +622,7 @@ export function AssetPhotoGallery({
               <img
                 src={legacyPhotoDataUrl}
                 alt="Existing"
-                className="w-full max-h-[70vh] object-contain rounded"
+                className="w-full max-h-[80vh] object-contain rounded"
               />
               <p className="text-xs text-muted-foreground">
                 Uploaded before the current photo system — preview only.
@@ -676,7 +676,7 @@ export function AssetPhotoGallery({
                             previewPhoto.originalFilename ||
                             "Asset photo"
                           }
-                          className="w-full max-h-[70vh] object-contain rounded"
+                          className="w-full max-h-[80vh] object-contain rounded"
                         />
                       )
                     );

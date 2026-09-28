@@ -49,6 +49,10 @@ import {
   deleteEmployeeRemote,
   updateEmployeeRemote,
 } from "../lib/employeesApi";
+import {
+  renameDocumentNumber,
+  validateManualNumberEdit,
+} from "../lib/documentNumbering";
 import { createOrgUser } from "../lib/settingsUsersApi";
 import {
   canCreate,
@@ -93,6 +97,8 @@ export function Employees({ onViewEmployee }: Props) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editingEmployee, setEditingEmployee] = useState<Employee | null>(null);
+  // Task 6 - manual document-number editing.
+  const [editEmployeeCode, setEditEmployeeCode] = useState("");
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -389,6 +395,8 @@ export function Employees({ onViewEmployee }: Props) {
 
   const openEditDialog = (emp: Employee) => {
     setEditingEmployee(emp);
+    // Task 6 - manual document-number editing.
+    setEditEmployeeCode(emp.employeeCode || "");
     setEditForm({
       name: emp.name,
       phone: emp.phone || "",
@@ -448,6 +456,23 @@ export function Employees({ onViewEmployee }: Props) {
       toast.error(Object.values(errors)[0]);
       return;
     }
+    // Task 6 - validate the manually-edited number BEFORE any write, so
+    // an invalid/malformed number never partially saves anything. Only
+    // applies when the employee already has a code - an unset code is
+    // assigned automatically elsewhere (EmployeeDetail.tsx), not here.
+    const employeeCodeChanged =
+      !!editingEmployee.employeeCode &&
+      editEmployeeCode.trim() !== editingEmployee.employeeCode;
+    if (employeeCodeChanged) {
+      const validation = validateManualNumberEdit(
+        editEmployeeCode,
+        editingEmployee.employeeCode as string,
+      );
+      if (!validation.ok) {
+        toast.error(validation.error);
+        return;
+      }
+    }
     setEditFormErrors({});
     let photoUrl = editForm.photo;
     try {
@@ -469,6 +494,12 @@ export function Employees({ onViewEmployee }: Props) {
     // only updated with what Supabase actually persisted, never before.
     const result = await updateEmployeeRemote({
       ...editingEmployee,
+      // Hardening pass - employeeCode is now ALWAYS sent unchanged
+      // through this main fields update; any actual number change is
+      // routed exclusively through the atomic rename_document_number
+      // RPC below, so the number is written exactly once, atomically
+      // with the counter advance.
+      employeeCode: editingEmployee.employeeCode,
       name: editForm.name.trim(),
       phone: editForm.phone.trim(),
       role: editForm.role,
@@ -509,8 +540,27 @@ export function Employees({ onViewEmployee }: Props) {
 
     // Preserve the local-only userId link (no DB representation - Phase
     // 18A/18B mapping) since the returned row can't carry it.
-    updateEmployee({ ...result.data, userId: editingEmployee.userId });
+    const updatedEmployee = { ...result.data, userId: editingEmployee.userId };
+    updateEmployee(updatedEmployee);
     toast.success("Employee updated");
+    if (employeeCodeChanged) {
+      const renameResult = await renameDocumentNumber(
+        "EMP",
+        editingEmployee.id,
+        editEmployeeCode.trim(),
+      );
+      if (renameResult.status !== "success") {
+        toast.error(
+          renameResult.error ??
+            "Employee saved, but the code could not be changed.",
+        );
+      } else {
+        updateEmployee({
+          ...updatedEmployee,
+          employeeCode: editEmployeeCode.trim(),
+        });
+      }
+    }
     setEditDialogOpen(false);
     setEditingEmployee(null);
     setNewPhotoFile(null);
@@ -707,7 +757,7 @@ export function Employees({ onViewEmployee }: Props) {
 
       {/* Add Employee Dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent data-ocid="employees.dialog">
+        <DialogContent size="lg" data-ocid="employees.dialog">
           <DialogHeader>
             <DialogTitle>New Employee</DialogTitle>
           </DialogHeader>
@@ -1317,12 +1367,31 @@ export function Employees({ onViewEmployee }: Props) {
 
       {/* Edit Employee Dialog */}
       <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
-        <DialogContent data-ocid="employees.edit.dialog">
+        <DialogContent size="lg" data-ocid="employees.edit.dialog">
           <DialogHeader>
             <DialogTitle>Edit Employee</DialogTitle>
           </DialogHeader>
           <form onSubmit={handleEditSubmit}>
             <div className="space-y-4 py-2">
+              {/* Task 6 - manual document-number edit. Only shown once an
+                  employee code exists (an unset code is assigned
+                  automatically elsewhere). Preserves the existing
+                  prefix/format; uniqueness is enforced by the DB's
+                  uq_employees_org_code constraint. */}
+              {editingEmployee?.employeeCode && (
+                <div className="space-y-1">
+                  <Label htmlFor="employee-edit-code" className="text-xs">
+                    Employee Code
+                  </Label>
+                  <Input
+                    id="employee-edit-code"
+                    className="h-8 text-sm max-w-xs"
+                    value={editEmployeeCode}
+                    onChange={(e) => setEditEmployeeCode(e.target.value)}
+                    data-ocid="employees.edit.employee_code_input"
+                  />
+                </div>
+              )}
               <div className="mb-3">
                 <Label className="text-sm font-medium mb-1 block">
                   Profile Photo

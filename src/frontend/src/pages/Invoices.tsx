@@ -7,6 +7,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  allocateDocumentNumber,
+  extractNumericSuffix,
+  recordManualDocumentNumber,
+  renameDocumentNumber,
+  validateManualNumberEdit,
+} from "@/lib/documentNumbering";
 import { Label } from "@/components/ui/label";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import {
@@ -431,8 +438,26 @@ export function Invoices({
           return;
         }
       }
-      // Derive invoice number: use user-provided or generate preview
-      const invNoToUse = (form as any).invoiceNumber?.trim() || previewInvNo();
+      // Derive invoice number: use user-provided or generate preview.
+      // usingAutoNumber tracks whether the user left the field at its
+      // auto-generated suggestion (vs typed a custom number) - needed
+      // below both to decide whether to ask the centralized allocator
+      // for a fresh, DB-atomic number, and for autoRenumberOnConflict.
+      const previewSuggestion = previewInvNo();
+      const typedInvoiceNumber = (form as any).invoiceNumber?.trim();
+      const usingAutoNumber =
+        !typedInvoiceNumber || typedInvoiceNumber === previewSuggestion;
+      let invNoToUse = typedInvoiceNumber || previewSuggestion;
+      // Task 5 - centralized, DB-atomic numbering (allocate_document_
+      // number) is now the primary source for the auto-generated case;
+      // previewInvNo()'s in-memory MAX+1 is only a fallback if the RPC
+      // call fails. A user-typed custom number is never overridden.
+      if (usingAutoNumber && !editingInvoice) {
+        const numberResult = await allocateDocumentNumber("INV");
+        if (numberResult.status === "success" && numberResult.data) {
+          invNoToUse = numberResult.data.formattedNumber;
+        }
+      }
       // Validate no duplicate (only on create)
       if (!editingInvoice) {
         const duplicate = (invoices || []).find((i) => i.invNo === invNoToUse);
@@ -440,6 +465,26 @@ export function Invoices({
           toast.error(
             `Invoice number ${invNoToUse} already exists. Please use a different number.`,
           );
+          setIsSaving(false);
+          return;
+        }
+      }
+      // Hardening pass - fixes a real bug found during this pass: the
+      // visible, editable "Invoice Number" input's value was previously
+      // discarded on save for an EXISTING invoice (the payload always
+      // used editingInvoice.invNo, never what this typed/edited). Now
+      // detected and validated here; the actual rename happens via the
+      // atomic rename_document_number RPC after the main save succeeds
+      // (see below), same pattern as every other centralized type.
+      const invNoChanged =
+        !!editingInvoice && typedInvoiceNumber && typedInvoiceNumber !== editingInvoice.invNo;
+      if (invNoChanged && editingInvoice) {
+        const validation = validateManualNumberEdit(
+          typedInvoiceNumber,
+          editingInvoice.invNo,
+        );
+        if (!validation.ok) {
+          toast.error(validation.error);
           setIsSaving(false);
           return;
         }
@@ -512,6 +557,21 @@ export function Invoices({
         }
         updateInvoice(result.data);
         toast.success("Invoice updated");
+        if (invNoChanged && editingInvoice) {
+          const renameResult = await renameDocumentNumber(
+            "INV",
+            editingInvoice.id,
+            typedInvoiceNumber,
+          );
+          if (renameResult.status !== "success") {
+            toast.error(
+              renameResult.error ??
+                "Invoice saved, but the number could not be changed.",
+            );
+          } else {
+            updateInvoice({ ...result.data, invNo: typedInvoiceNumber });
+          }
+        }
       } else {
         const result = await createInvoiceRemote(
           {
@@ -553,18 +613,13 @@ export function Invoices({
             nextReminderCustomDate: null,
             termsAndConditions: form.termsAndConditions,
           },
-          // Unlike DeliveryChallans.tsx's dcNumber (a separate state that
-          // genuinely stays "" until the user types), the "New Invoice"
-          // button seeds form.invoiceNumber with previewInvNo()'s actual
-          // text at open time (see its onClick) - so form.invoiceNumber is
-          // never truly empty here, and a blank-string check would always
-          // read as "user typed it". Instead compare the submitted
-          // candidate against a freshly recomputed preview: still equal to
-          // that means the field was left as its auto-generated value
-          // (safe to silently retry on a collision); different means the
-          // user deliberately typed something else (must not be swapped
-          // out silently).
-          { autoRenumberOnConflict: invNoToUse === previewInvNo() },
+          // usingAutoNumber (computed above) already captures exactly
+          // this distinction - true means the field was left as its
+          // auto-generated value (safe to silently retry on a
+          // collision, or was just replaced with a fresh centralized
+          // allocation), false means the user deliberately typed
+          // something else (must not be swapped out silently).
+          { autoRenumberOnConflict: usingAutoNumber },
         );
 
         if (result.status === "unauthenticated") {
@@ -582,6 +637,14 @@ export function Invoices({
 
         addInvoice(result.data);
         toast.success(`Invoice ${result.data.invNo} created`);
+        // Task 6 - manual-edit sequence policy: a user-typed custom
+        // number must never be produced again by a future automatic
+        // allocation. Best-effort - a failure here doesn't affect the
+        // invoice that was already created successfully.
+        if (!usingAutoNumber) {
+          const suffix = extractNumericSuffix(result.data.invNo);
+          if (suffix !== null) void recordManualDocumentNumber("INV", suffix);
+        }
         if (form.projectId) {
           addProjectActivity(
             form.projectId,

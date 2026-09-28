@@ -7,6 +7,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import {
+  allocateDocumentNumber,
+  extractNumericSuffix,
+  recordManualDocumentNumber,
+  renameDocumentNumber,
+  validateManualNumberEdit,
+} from "@/lib/documentNumbering";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -240,6 +247,11 @@ export function DeliveryChallans({
   const [editingChallan, setEditingChallan] = useState<DeliveryChallan | null>(
     null,
   );
+  // Hardening pass - fixes a real gap found during this pass: the edit
+  // dialog previously showed dcNo as plain text with no way to change
+  // it at all. Kept separate from editForm since dcNo isn't part of
+  // that state shape.
+  const [editDcNo, setEditDcNo] = useState("");
   const [editForm, setEditForm] = useState<{
     qtys: Record<string, number>;
     dispatchMethod: DispatchMethod;
@@ -448,6 +460,7 @@ export function DeliveryChallans({
     });
     setEditErrors({});
     setEditingChallan(challan);
+    setEditDcNo(challan.dcNo);
     setShowEditDialog(true);
   }
 
@@ -513,6 +526,21 @@ export function DeliveryChallans({
         return;
       }
 
+      // Hardening pass - validate the manually-edited number BEFORE any
+      // write, so an invalid/malformed number never partially saves
+      // anything.
+      const dcNoChanged = editDcNo.trim() !== editingChallan.dcNo;
+      if (dcNoChanged) {
+        const validation = validateManualNumberEdit(
+          editDcNo,
+          editingChallan.dcNo,
+        );
+        if (!validation.ok) {
+          toast.error(validation.error);
+          return;
+        }
+      }
+
       const updatedEntries: DCProjectEntry[] = (
         editingChallan.projectEntries || []
       ).map((entry) => ({
@@ -569,9 +597,24 @@ export function DeliveryChallans({
       }
 
       updateDeliveryChallan(result.data);
+      toast.success("Delivery Challan updated");
+      if (dcNoChanged) {
+        const renameResult = await renameDocumentNumber(
+          "DC",
+          editingChallan.id,
+          editDcNo.trim(),
+        );
+        if (renameResult.status !== "success") {
+          toast.error(
+            renameResult.error ??
+              "Delivery Challan saved, but the number could not be changed.",
+          );
+        } else {
+          updateDeliveryChallan({ ...result.data, dcNo: editDcNo.trim() });
+        }
+      }
       setShowEditDialog(false);
       setEditingChallan(null);
-      toast.success("Delivery Challan updated");
     } finally {
       setIsEditSaving(false);
     }
@@ -752,18 +795,24 @@ export function DeliveryChallans({
         }),
       );
 
-      // Use editable dcNumber; fall back to previewDcNo() if empty
-      const dcNoToUse = dcNumber.trim() || previewDcNo();
-      const duplicate = (deliveryChallans || []).find(
-        (d) => d.dcNo === dcNoToUse,
-      );
+      // Use editable dcNumber; fall back to the centralized allocator
+      // (Task 5) if empty, or the in-memory previewDcNo() if the RPC
+      // call itself fails.
+      const usingAutoNumber = dcNumber.trim() === "";
+      let dcNo = dcNumber.trim() || previewDcNo();
+      if (usingAutoNumber) {
+        const numberResult = await allocateDocumentNumber("DC");
+        if (numberResult.status === "success" && numberResult.data) {
+          dcNo = numberResult.data.formattedNumber;
+        }
+      }
+      const duplicate = (deliveryChallans || []).find((d) => d.dcNo === dcNo);
       if (duplicate) {
         toast.error(
-          `Challan number ${dcNoToUse} already exists. Please use a different number.`,
+          `Challan number ${dcNo} already exists. Please use a different number.`,
         );
         return;
       }
-      const dcNo = dcNoToUse;
       const result = await createDeliveryChallanRemote(
         {
           dcNo,
@@ -781,12 +830,11 @@ export function DeliveryChallans({
               : form.customDeliveryAddress,
           },
         },
-        // The user only typed a specific number if dcNumber (the raw form
-        // field) is non-empty - an untouched field falls back to
-        // previewDcNo() above, so it's safe to silently retry with a
-        // fresh server-derived number on a real collision. A number the
-        // user deliberately typed must not be silently swapped out.
-        { autoRenumberOnConflict: dcNumber.trim() === "" },
+        // usingAutoNumber (computed above): an untouched field is safe
+        // to silently retry with a fresh server-derived number on a
+        // real collision. A number the user deliberately typed must not
+        // be silently swapped out.
+        { autoRenumberOnConflict: usingAutoNumber },
       );
 
       if (result.status === "unauthenticated") {
@@ -803,6 +851,10 @@ export function DeliveryChallans({
       }
 
       addDeliveryChallan(result.data);
+      if (!usingAutoNumber) {
+        const suffix = extractNumericSuffix(result.data.dcNo);
+        if (suffix !== null) void recordManualDocumentNumber("DC", suffix);
+      }
 
       toast.success(`Delivery Challan ${result.data.dcNo} created`);
       setOpen(false);
@@ -1116,14 +1168,7 @@ export function DeliveryChallans({
           data-ocid="delivery_challans.edit.dialog"
         >
           <DialogHeader>
-            <DialogTitle>
-              Edit Delivery Challan
-              {editingChallan && (
-                <span className="ml-2 font-mono text-sm text-muted-foreground">
-                  {editingChallan.dcNo}
-                </span>
-              )}
-            </DialogTitle>
+            <DialogTitle>Edit Delivery Challan</DialogTitle>
           </DialogHeader>
 
           {editingChallan && (
@@ -1135,6 +1180,23 @@ export function DeliveryChallans({
             >
               <div className="modal-body">
                 <div className="space-y-4">
+                  {/* Hardening pass - manual document-number edit,
+                      previously not offered at all here (plain text
+                      only). Preserves the existing prefix/format;
+                      uniqueness is enforced by the DB's
+                      uq_delivery_challans_org_dcno constraint. */}
+                  <div className="space-y-1">
+                    <Label htmlFor="dc-edit-number" className="text-xs">
+                      Delivery Challan Number
+                    </Label>
+                    <Input
+                      id="dc-edit-number"
+                      className="h-8 text-sm max-w-xs"
+                      value={editDcNo}
+                      onChange={(e) => setEditDcNo(e.target.value)}
+                      data-ocid="delivery_challans.edit.dc_no_input"
+                    />
+                  </div>
                   {/* Logistics fields */}
                   <div className="form-grid">
                     <div className="col-span-3">

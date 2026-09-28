@@ -1,5 +1,6 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -25,6 +26,12 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
+import { GST_HALF_RATE, IGST_RATE, computeGstIgstTax } from "@/lib/taxCalc";
+import {
+  allocateDocumentNumber,
+  renameDocumentNumber,
+  validateManualNumberEdit,
+} from "@/lib/documentNumbering";
 import {
   downloadAttachment,
   generateDocumentFilename,
@@ -98,7 +105,8 @@ type FormState = {
   deliveryAddress: string;
   expectedDeliveryDate: string;
   status: CompanyPOStatus;
-  gstPercent: number;
+  applyGST: boolean;
+  applyIGST: boolean;
   termsAndConditions: string;
   notes: string;
 };
@@ -112,7 +120,8 @@ const emptyForm = (): FormState => ({
   deliveryAddress: "",
   expectedDeliveryDate: "",
   status: "Draft",
-  gstPercent: 0,
+  applyGST: false,
+  applyIGST: false,
   termsAndConditions: "",
   notes: "",
 });
@@ -267,6 +276,8 @@ function CompanyPOsInner() {
     setTimeout(() => win.print(), 300);
   }
   const [editing, setEditing] = useState<CompanyPO | null>(null);
+  // Task 6 - manual document-number editing.
+  const [editCpoNumber, setEditCpoNumber] = useState("");
   const [form, setForm] = useState<FormState>(emptyForm());
   const [formItems, setFormItems] = useState<CompanyPOItem[]>([emptyItem()]);
   const [formFile, setFormFile] = useState<PurchaseAttachment | undefined>(
@@ -287,8 +298,8 @@ function CompanyPOsInner() {
     (s, i) => s + i.quantity * (Number(i.rate) || 0),
     0,
   );
-  const gstAmount = subtotal * ((form.gstPercent || 0) / 100);
-  const grandTotal = subtotal + gstAmount;
+  const { cgstRate, sgstRate, igstRate, cgstAmt, sgstAmt, igstAmt, total: grandTotal } =
+    computeGstIgstTax(form.applyGST, form.applyIGST, subtotal);
 
   const openNew = () => {
     setEditing(null);
@@ -311,12 +322,15 @@ function CompanyPOsInner() {
       deliveryAddress: po.deliveryAddress || "",
       expectedDeliveryDate: po.expectedDeliveryDate || "",
       status: po.status,
-      gstPercent: po.gstPercent || 0,
+      applyGST: po.applyGST ?? false,
+      applyIGST: po.applyIGST ?? false,
       termsAndConditions: po.termsAndConditions || "",
       notes: po.notes || "",
     });
     setFormItems((po.items || []).map((i) => ({ ...i })));
     setFormFile(po.file);
+    // Task 6 - manual document-number editing.
+    setEditCpoNumber(po.cpoNumber);
     setDialogOpen(true);
   };
 
@@ -412,20 +426,45 @@ function CompanyPOsInner() {
         (s, i) => s + i.amount,
         0,
       );
-      const computedGst = computedSubtotal * ((form.gstPercent || 0) / 100);
-      const computedGrand = computedSubtotal + computedGst;
+      const computedTax = computeGstIgstTax(
+        form.applyGST,
+        form.applyIGST,
+        computedSubtotal,
+      );
 
       if (editing) {
+        // Task 6 - validate the manually-edited number BEFORE any write,
+        // so an invalid/malformed number never partially saves anything.
+        const cpoNumberChanged = editCpoNumber.trim() !== editing.cpoNumber;
+        if (cpoNumberChanged) {
+          const validation = validateManualNumberEdit(
+            editCpoNumber,
+            editing.cpoNumber,
+          );
+          if (!validation.ok) {
+            toast.error(validation.error);
+            return;
+          }
+        }
+
         // Phase 21B — remote-first. cpoNumber is intentionally not part
-        // of `form` and stays as editing.cpoNumber - the PO number is
-        // immutable after creation, same as before this phase.
+        // of `form` and stays as editing.cpoNumber for the main update -
+        // the number itself is now a separate atomic write below
+        // (hardening pass, via renameDocumentNumber), since it's
+        // structurally excluded from toCompanyPOUpdateFields.
         const result = await updateCompanyPORemote({
           ...editing,
           ...form,
           items: itemsWithAmounts,
           subtotal: computedSubtotal,
-          gstAmount: computedGst,
-          grandTotal: computedGrand,
+          cgstRate: computedTax.cgstRate,
+          sgstRate: computedTax.sgstRate,
+          igstRate: computedTax.igstRate,
+          cgstAmt: computedTax.cgstAmt,
+          sgstAmt: computedTax.sgstAmt,
+          igstAmt: computedTax.igstAmt,
+          gstAmount: computedTax.cgstAmt + computedTax.sgstAmt + computedTax.igstAmt,
+          grandTotal: computedTax.total,
           file: formFile,
         });
         if (result.status === "unauthenticated") {
@@ -442,19 +481,57 @@ function CompanyPOsInner() {
         }
         updateCompanyPO(result.data);
         toast.success("PO updated.");
+
+        // Hardening pass - number+counter are now one atomic RPC call
+        // (rename_document_number): cpo_number is still a separate write
+        // from the main fields update above (structurally excluded from
+        // updateCompanyPORemote), so that boundary is unchanged and
+        // still honestly not atomic with the main save - but the rename
+        // itself and the counter advance are now guaranteed atomic with
+        // each other (single DB transaction): if the rename fails (e.g.
+        // duplicate), the counter is never touched.
+        if (cpoNumberChanged) {
+          const renameResult = await renameDocumentNumber(
+            "CPO",
+            editing.id,
+            editCpoNumber.trim(),
+          );
+          if (renameResult.status !== "success") {
+            toast.error(
+              renameResult.error ??
+                "PO saved, but the number could not be changed.",
+            );
+          } else {
+            updateCompanyPO({ ...result.data, cpoNumber: editCpoNumber.trim() });
+          }
+        }
       } else {
         // Phase 21B — remote-first, with bounded retry-on-conflict for
         // the CPO number handled inside createCompanyPORemote(). The
         // number generated here from local state is only the *initial*
         // attempt - on a collision the API module re-derives it from
         // actual server state, never from this stale guess.
+        // Task 5 - centralized, DB-atomic numbering (allocate_document_
+        // number) is now the primary source; genCpoNumber()'s in-memory
+        // MAX+1 is only a fallback if the RPC call fails.
+        const cpoNumberResult = await allocateDocumentNumber("CPO");
+        const cpoNumber =
+          cpoNumberResult.status === "success" && cpoNumberResult.data
+            ? cpoNumberResult.data.formattedNumber
+            : genCpoNumber();
         const result = await createCompanyPORemote({
-          cpoNumber: genCpoNumber(),
+          cpoNumber,
           ...form,
           items: itemsWithAmounts,
           subtotal: computedSubtotal,
-          gstAmount: computedGst,
-          grandTotal: computedGrand,
+          cgstRate: computedTax.cgstRate,
+          sgstRate: computedTax.sgstRate,
+          igstRate: computedTax.igstRate,
+          cgstAmt: computedTax.cgstAmt,
+          sgstAmt: computedTax.sgstAmt,
+          igstAmt: computedTax.igstAmt,
+          gstAmount: computedTax.cgstAmt + computedTax.sgstAmt + computedTax.igstAmt,
+          grandTotal: computedTax.total,
           file: formFile,
         });
         if (result.status === "unauthenticated") {
@@ -827,10 +904,7 @@ function CompanyPOsInner() {
 
       {/* Create/Edit Dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent
-          className="max-w-3xl max-h-[90vh] overflow-y-auto"
-          data-ocid="company-po.dialog"
-        >
+        <DialogContent size="xl" data-ocid="company-po.dialog">
           <DialogHeader>
             <DialogTitle>
               {editing ? "Edit Purchase Order" : "New Company Purchase Order"}
@@ -843,6 +917,23 @@ function CompanyPOsInner() {
             }}
           >
             <div className="space-y-5">
+              {/* Task 6 - manual document-number edit. Preserves the
+                  existing prefix/format; uniqueness is enforced by the
+                  DB's uq_company_pos_org_cpono constraint. */}
+              {editing && (
+                <div className="space-y-1">
+                  <Label htmlFor="cpo-edit-number" className="text-xs">
+                    PO Number
+                  </Label>
+                  <Input
+                    id="cpo-edit-number"
+                    className="h-8 text-sm max-w-xs"
+                    value={editCpoNumber}
+                    onChange={(e) => setEditCpoNumber(e.target.value)}
+                    data-ocid="company-po.form.cpo_number_input"
+                  />
+                </div>
+              )}
               {/* Vendor Selection */}
               <div className="space-y-3">
                 <h3 className="font-semibold text-sm">Vendor</h3>
@@ -1081,29 +1172,73 @@ function CompanyPOsInner() {
               </div>
 
               {/* Totals */}
-              <div className="flex justify-end">
+              <div className="flex justify-between items-end gap-4">
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="cpo-apply-gst"
+                      data-ocid="company_pos.form.gst.checkbox"
+                      checked={form.applyGST}
+                      onCheckedChange={(v) =>
+                        setForm((f) => ({
+                          ...f,
+                          applyGST: !!v,
+                          applyIGST: v ? false : f.applyIGST,
+                        }))
+                      }
+                    />
+                    <Label htmlFor="cpo-apply-gst" className="text-xs">
+                      Apply GST (CGST {GST_HALF_RATE}% + SGST {GST_HALF_RATE}
+                      %)
+                    </Label>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="cpo-apply-igst"
+                      data-ocid="company_pos.form.igst.checkbox"
+                      checked={form.applyIGST}
+                      onCheckedChange={(v) =>
+                        setForm((f) => ({
+                          ...f,
+                          applyIGST: !!v,
+                          applyGST: v ? false : f.applyGST,
+                        }))
+                      }
+                    />
+                    <Label htmlFor="cpo-apply-igst" className="text-xs">
+                      Apply IGST ({IGST_RATE}%)
+                    </Label>
+                  </div>
+                </div>
                 <div className="w-72 space-y-2">
                   <div className="flex justify-between text-sm">
                     <span className="text-muted-foreground">Subtotal</span>
                     <span>₹{fmt(subtotal)}</span>
                   </div>
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-sm text-muted-foreground">GST %</span>
-                    <Input
-                      type="number"
-                      min={0}
-                      max={100}
-                      value={form.gstPercent}
-                      onChange={(e) =>
-                        setForm((f) => ({
-                          ...f,
-                          gstPercent: Number(e.target.value),
-                        }))
-                      }
-                      className="h-7 w-20 text-right"
-                    />
-                    <span className="text-sm">₹{fmt(gstAmount)}</span>
-                  </div>
+                  {form.applyGST && (
+                    <>
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">
+                          CGST ({cgstRate}%)
+                        </span>
+                        <span>₹{fmt(cgstAmt)}</span>
+                      </div>
+                      <div className="flex justify-between text-sm">
+                        <span className="text-muted-foreground">
+                          SGST ({sgstRate}%)
+                        </span>
+                        <span>₹{fmt(sgstAmt)}</span>
+                      </div>
+                    </>
+                  )}
+                  {form.applyIGST && (
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">
+                        IGST ({igstRate}%)
+                      </span>
+                      <span>₹{fmt(igstAmt)}</span>
+                    </div>
+                  )}
                   <div className="flex justify-between font-bold text-sm border-t pt-1">
                     <span>Grand Total</span>
                     <span>₹{fmt(grandTotal)}</span>

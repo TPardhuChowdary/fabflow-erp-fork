@@ -55,6 +55,11 @@ import {
 import { getCustomerVisibleName, getProjectSearchText } from "../lib/utils";
 import { canCreate, canDelete, canEdit, canView } from "../permissions";
 import { useStore } from "../store";
+import {
+  allocateDocumentNumber,
+  renameDocumentNumber,
+  validateManualNumberEdit,
+} from "@/lib/documentNumbering";
 import type { Project } from "../types";
 
 // Phase 57 (Group 2, Master Monster Prompt) — work type classification.
@@ -163,6 +168,9 @@ export function Projects({ onViewProject }: Props) {
 
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editForm, setEditForm] = useState<Project | null>(null);
+  // Task 6 - manual document-number editing; kept separate so the
+  // original projectNo stays available for the changed/prefix check.
+  const [originalProjectNo, setOriginalProjectNo] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [deleteProjectTarget, setDeleteProjectTarget] =
     useState<Project | null>(null);
@@ -260,8 +268,16 @@ export function Projects({ onViewProject }: Props) {
       // productionVersion is forced to "v2" here to match what the local
       // addProject() action already forces unconditionally, so the DB
       // row and the resulting local state never disagree on it.
+      // Task 5 - centralized, DB-atomic numbering (allocate_document_
+      // number) is now the primary source; generateDocNo("PROJ")'s local
+      // per-browser counter is only a fallback if the RPC call fails.
+      const projectNoResult = await allocateDocumentNumber("PROJ");
+      const projectNo =
+        projectNoResult.status === "success" && projectNoResult.data
+          ? projectNoResult.data.formattedNumber
+          : generateDocNo("PROJ");
       const result = await createProjectRemote({
-        projectNo: generateDocNo("PROJ"),
+        projectNo,
         customerId: form.customerId,
         projectName: form.projectName.trim(),
         workDescription: form.workDescription.trim(),
@@ -324,7 +340,29 @@ export function Projects({ onViewProject }: Props) {
         toast.error("Total Quantity cannot be negative");
         return;
       }
-      const result = await updateProjectRemote(editForm);
+      // Task 6 - validate the manually-edited number BEFORE any write,
+      // so an invalid/malformed number never partially saves anything.
+      const projectNoChanged = editForm.projectNo.trim() !== originalProjectNo;
+      if (projectNoChanged) {
+        const validation = validateManualNumberEdit(
+          editForm.projectNo,
+          originalProjectNo,
+        );
+        if (!validation.ok) {
+          toast.error(validation.error);
+          return;
+        }
+      }
+      // Hardening pass - editForm.projectNo is always sent UNCHANGED
+      // (originalProjectNo) through this main fields update; any actual
+      // number change is routed exclusively through the atomic
+      // rename_document_number RPC below, so the number is written
+      // exactly once, by exactly one atomic operation (number+counter
+      // together).
+      const result = await updateProjectRemote({
+        ...editForm,
+        projectNo: originalProjectNo,
+      });
       if (result.status === "unauthenticated") {
         toast.error("Not signed in to the server - project was not updated");
         return;
@@ -342,15 +380,36 @@ export function Projects({ onViewProject }: Props) {
       // explicitly approved decisions) - re-attach them from the
       // pre-update local object, since this update never touches them
       // and they must not be silently wiped.
-      updateProject({
+      const updatedProject = {
         ...result.data,
         assignedEmployeeIds: editForm.assignedEmployeeIds,
         pos: editForm.pos,
         poNumber: editForm.poNumber,
         poDate: editForm.poDate,
         poFiles: editForm.poFiles,
-      });
+      };
+      updateProject(updatedProject);
       toast.success("Project updated");
+      // Hardening pass - number+counter are now one atomic RPC call
+      // (rename_document_number): projectNo is deliberately kept out of
+      // the main update above and routed exclusively through this call
+      // instead, so the number is written exactly once, atomically with
+      // the counter advance.
+      if (projectNoChanged) {
+        const renameResult = await renameDocumentNumber(
+          "PROJ",
+          editForm.id,
+          editForm.projectNo.trim(),
+        );
+        if (renameResult.status !== "success") {
+          toast.error(
+            renameResult.error ??
+              "Project saved, but the number could not be changed.",
+          );
+        } else {
+          updateProject({ ...updatedProject, projectNo: editForm.projectNo.trim() });
+        }
+      }
       setEditDialogOpen(false);
       setEditForm(null);
     } finally {
@@ -595,6 +654,7 @@ export function Projects({ onViewProject }: Props) {
                       onClick={(e) => {
                         e.stopPropagation();
                         setEditForm(p);
+                        setOriginalProjectNo(p.projectNo);
                         setEditDialogOpen(true);
                       }}
                       data-ocid={`projects.card_edit_button.${i + 1}`}
@@ -751,6 +811,7 @@ export function Projects({ onViewProject }: Props) {
                             onClick={(e) => {
                               e.stopPropagation();
                               setEditForm(p);
+                              setOriginalProjectNo(p.projectNo);
                               setEditDialogOpen(true);
                             }}
                             data-ocid={`projects.edit_button_edit.${i + 1}`}
@@ -797,7 +858,7 @@ export function Projects({ onViewProject }: Props) {
 
       {/* New Project Dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent data-ocid="projects.dialog">
+        <DialogContent size="lg" data-ocid="projects.dialog">
           <DialogHeader>
             <DialogTitle>New Project</DialogTitle>
           </DialogHeader>
@@ -931,7 +992,7 @@ export function Projects({ onViewProject }: Props) {
             if (!open) setEditForm(null);
           }}
         >
-          <DialogContent data-ocid="projects.edit_dialog">
+          <DialogContent size="lg" data-ocid="projects.edit_dialog">
             <DialogHeader>
               <DialogTitle>Edit Project</DialogTitle>
             </DialogHeader>
@@ -942,6 +1003,25 @@ export function Projects({ onViewProject }: Props) {
               }}
             >
               <div className="space-y-4 py-2">
+                {/* Task 6 - manual document-number edit. Preserves the
+                    existing prefix/format; uniqueness is enforced by the
+                    DB's projects_project_number_key constraint. */}
+                <div className="space-y-1.5">
+                  <Label htmlFor="edit-proj-number" className="text-xs">
+                    Project Number
+                  </Label>
+                  <Input
+                    id="edit-proj-number"
+                    className="h-8 text-sm max-w-xs"
+                    value={editForm.projectNo}
+                    onChange={(e) =>
+                      setEditForm((f) =>
+                        f ? { ...f, projectNo: e.target.value } : f,
+                      )
+                    }
+                    data-ocid="projects.edit_dialog.project_no_input"
+                  />
+                </div>
                 <div className="space-y-1.5">
                   <Label htmlFor="edit-proj-customer">Customer *</Label>
                   <CustomerSelect

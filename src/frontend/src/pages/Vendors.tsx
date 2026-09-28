@@ -790,7 +790,7 @@ export function Vendors({
 
       {/* Add Dialog */}
       <Dialog open={addOpen} onOpenChange={setAddOpen}>
-        <DialogContent data-ocid="vendors.add.dialog">
+        <DialogContent size="lg" data-ocid="vendors.add.dialog">
           <DialogHeader>
             <DialogTitle>Add Vendor</DialogTitle>
           </DialogHeader>
@@ -832,7 +832,7 @@ export function Vendors({
           if (!o) setEditVendor(null);
         }}
       >
-        <DialogContent data-ocid="vendors.edit.dialog">
+        <DialogContent size="lg" data-ocid="vendors.edit.dialog">
           <DialogHeader>
             <DialogTitle>Edit Vendor</DialogTitle>
           </DialogHeader>

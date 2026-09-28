@@ -46,6 +46,11 @@ import {
 } from "../lib/diesApi";
 import { canCreate, canDelete, canEdit, canView } from "../permissions";
 import { useStore } from "../store";
+import {
+  allocateDocumentNumber,
+  renameDocumentNumber,
+  validateManualNumberEdit,
+} from "../lib/documentNumbering";
 import type { Die, DieStatus, MachineCondition } from "../types";
 
 const DIE_STATUSES: DieStatus[] = [
@@ -344,9 +349,29 @@ export function Dies({ onViewDie }: DiesProps = {}) {
     setIsSaving(true);
     try {
       if (editingDie) {
+        // Task 6 - validate the manually-edited number BEFORE any write,
+        // so an invalid/malformed number never partially saves anything.
+        const dieCodeChanged =
+          (form.dieCode || "").trim() !== editingDie.dieCode;
+        if (dieCodeChanged) {
+          const validation = validateManualNumberEdit(
+            form.dieCode || "",
+            editingDie.dieCode,
+          );
+          if (!validation.ok) {
+            toast.error(validation.error);
+            return;
+          }
+        }
+        // Hardening pass - dieCode is now ALWAYS sent unchanged through
+        // this main fields update; any actual number change is routed
+        // exclusively through the atomic rename_document_number RPC
+        // below, so the number is written exactly once, atomically with
+        // the counter advance.
         const result = await updateDieRemote({
           ...editingDie,
           ...form,
+          dieCode: editingDie.dieCode,
           updatedAt: Date.now(),
         } as Die);
         if (result.status === "unauthenticated") {
@@ -363,9 +388,35 @@ export function Dies({ onViewDie }: DiesProps = {}) {
         }
         updateDie(result.data);
         toast.success("Die updated");
+        if (dieCodeChanged) {
+          const renameResult = await renameDocumentNumber(
+            "DIE",
+            editingDie.id,
+            (form.dieCode || "").trim(),
+          );
+          if (renameResult.status !== "success") {
+            toast.error(
+              renameResult.error ??
+                "Die saved, but the code could not be changed.",
+            );
+          } else {
+            updateDie({
+              ...result.data,
+              dieCode: (form.dieCode || "").trim(),
+            });
+          }
+        }
       } else {
+        // Task 5 - centralized, DB-atomic numbering is now the primary
+        // source; generateDieCode()'s local counter is only a fallback
+        // if the RPC call fails.
+        const dieCodeResult = await allocateDocumentNumber("DIE");
+        const dieCode =
+          dieCodeResult.status === "success" && dieCodeResult.data
+            ? dieCodeResult.data.formattedNumber
+            : generateDieCode();
         const result = await createDieRemote({
-          dieCode: generateDieCode(),
+          dieCode,
           name: form.name!,
           type: form.type,
           purpose: form.purpose,
@@ -702,6 +753,25 @@ export function Dies({ onViewDie }: DiesProps = {}) {
             <DialogTitle>{editingDie ? "Edit Die" : "Add Die"}</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 py-2">
+            {/* Task 6 - manual document-number edit. Preserves the
+                existing prefix/format; uniqueness is enforced by the
+                DB's uq_dies_org_code constraint. */}
+            {editingDie && (
+              <div className="space-y-1.5">
+                <Label htmlFor="die-edit-code" className="text-xs">
+                  Die Code
+                </Label>
+                <Input
+                  id="die-edit-code"
+                  className="h-8 text-sm max-w-xs"
+                  value={form.dieCode || ""}
+                  onChange={(e) =>
+                    setForm({ ...form, dieCode: e.target.value })
+                  }
+                  data-ocid="dies.form.die_code_input"
+                />
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5 col-span-2 flex items-start gap-3">
                 <div className="shrink-0">

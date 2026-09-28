@@ -35,10 +35,7 @@ export function CompanyProfilePrintView({ open, onClose }: Props) {
 
   return (
     <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent
-        className="max-w-4xl max-h-[92vh] overflow-y-auto"
-        data-ocid="company-profile-print.dialog"
-      >
+      <DialogContent size="preview" data-ocid="company-profile-print.dialog">
         <DialogHeader className="no-print">
           <DialogTitle>Company Profile Preview</DialogTitle>
         </DialogHeader>
